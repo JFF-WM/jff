@@ -1,0 +1,137 @@
+use smithay::reexports::calloop::generic::Generic;
+use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
+use smithay::reexports::wayland_server::Display;
+use smithay::wayland::socket::ListeningSocketSource;
+use tracing_subscriber::EnvFilter;
+
+use crate::config::{Action, Config};
+use crate::input::spawn_command;
+use crate::state::JffState;
+
+pub fn run() -> anyhow::Result<()> {
+    // `jff msg ...` only talks to a running instance, it never starts one.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("msg") {
+        std::process::exit(crate::ipc::client(&args[2..])?);
+    }
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    let mut event_loop: EventLoop<JffState> = EventLoop::try_new()?;
+    let display: Display<JffState> = Display::new()?;
+
+    let config = Config::load().unwrap_or_else(|err| {
+        tracing::warn!("invalid config, using defaults: {err:#}");
+        Config::default()
+    });
+
+    let (backend, winit_loop, outputs) = super::init(&event_loop.handle(), &config)?;
+    let mut state = JffState::new(
+        display.handle(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        backend,
+        outputs,
+        config,
+    );
+
+    let socket = ListeningSocketSource::new_auto()?;
+    let socket_name = socket.socket_name().to_os_string();
+    event_loop
+        .handle()
+        .insert_source(socket, |stream, _, state| state.insert_client(stream))?;
+
+    event_loop.handle().insert_source(
+        Generic::new(display, Interest::READ, Mode::Level),
+        |_, display, state| {
+            // SAFETY: the display is never dropped while the loop is running.
+            unsafe { display.get_mut().dispatch_clients(state).unwrap() };
+            Ok(PostAction::Continue)
+        },
+    )?;
+
+    // The insert error holds the winit loop, which isn't Send, so anyhow can't wrap it directly.
+    if let Some(winit_loop) = winit_loop {
+        event_loop
+            .handle()
+            .insert_source(winit_loop, |event, _, state| state.on_winit_event(event))
+            .map_err(|e| anyhow::anyhow!("failed to insert winit event source: {}", e.error))?;
+    }
+
+    std::env::set_var("WAYLAND_DISPLAY", &socket_name);
+    tracing::info!(
+        "listening on WAYLAND_DISPLAY={}",
+        socket_name.to_string_lossy()
+    );
+
+    let ipc_socket = match crate::ipc::init(&event_loop.handle(), &socket_name.to_string_lossy()) {
+        Ok(path) => Some(path),
+        Err(err) => {
+            tracing::warn!("ipc disabled: {err:#}");
+            None
+        }
+    };
+
+    // xwayland-satellite is optional, when present it exports DISPLAY for spawned apps.
+    let mut satellite = crate::feature::xwayland::spawn();
+
+    // Has to run after the satellite so DISPLAY ends up in the exported environment.
+    crate::feature::portals::setup(state.backend.is_tty());
+
+    // Last on purpose: autostart programs should see WAYLAND_DISPLAY, DISPLAY and the portal vars.
+    for action in state.config.autostart() {
+        match action {
+            Action::Spawn(args) => {
+                if let Some((command, rest)) = args.split_first() {
+                    tracing::info!("autostart: {command}");
+                    spawn_command(command, rest);
+                }
+            }
+            Action::SpawnShell(line) => {
+                tracing::info!("autostart: sh -c {line:?}");
+                spawn_command("sh", &["-c".to_string(), line.clone()]);
+            }
+            _ => {}
+        }
+    }
+
+    // `jff <cmd>` launches a client right away.
+    if let Some(cmd) = std::env::args().nth(1) {
+        if let Err(err) = std::process::Command::new(&cmd).spawn() {
+            tracing::warn!("could not spawn {cmd}: {err}");
+        }
+    }
+
+    state.start_rendering();
+
+    event_loop.run(None, &mut state, |state| {
+        // Settle the state first (popups, focus, resize...), then publish it to clients.
+        state.popups.cleanup();
+        state.update_keyboard_focus();
+        state.reap_globals();
+        state.update_resize();
+        state.update_idle_inhibited();
+        state.service_session_lock();
+        state.publish_events();
+        state.publish_foreign_toplevels();
+        state.publish_ext_foreign_toplevels();
+        state.publish_ext_workspaces();
+        state.service_image_copy();
+        let _ = state.display_handle.flush_clients();
+    })?;
+
+    if let Some(path) = ipc_socket {
+        let _ = std::fs::remove_file(path);
+    }
+
+    if let Some(child) = satellite.as_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    Ok(())
+}

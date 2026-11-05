@@ -1,0 +1,29 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Lockfile - remove this line if you ship binaries
+# Cargo.lock
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local jff files
+/jff.log
+*.kdl.bak
+backups/
+
+# Trace / log output
+*.log
+perf.data*
+callgrind.out.*

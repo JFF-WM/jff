@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 156">
+  <defs>
+    <!-- Very subtle shadow to lift the paper off the dark background -->
+    <filter id="paper-shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.2"/>
+    </filter>
+  </defs>
+
+  <!-- The Paper (Warm, soft off-white) -->
+  <rect x="28" y="12" width="200" height="132" 
+        fill="#F4F1EA" 
+        filter="url(#paper-shadow)"/>
+
+  <!-- The Ink: Smile (Warm graphite) -->
+  <path d="M101 98 V105 Q101 116 111 116 H145 Q155 116 155 105 V98"
+        fill="none" stroke="#3B3835" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- The Ink: Eyes and Nose -->
+  <g fill="#3B3835" font-family="DejaVu Sans, sans-serif" font-weight="300">
+    <!-- Left eye (mirrored) -->
+    <text x="92" y="58" font-size="29" text-anchor="middle"
+          transform="translate(184, 0) scale(-1, 1)">f</text>
+    <!-- Right eye -->
+    <text x="164" y="58" font-size="29" text-anchor="middle">f</text>
+    <!-- Nose -->
+    <text x="128" y="87" font-size="30" text-anchor="middle">j</text>
+  </g>
+</svg>

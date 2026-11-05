@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=jff
+Comment=jff Wayland compositor
+Exec=@PREFIX@/bin/jff-session
+Type=Application
+DesktopNames=jff

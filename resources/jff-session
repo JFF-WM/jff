@@ -1,0 +1,22 @@
+#!/bin/sh
+# Started by the login manager (GDM, SDDM, greetd, ly, ...) to begin a jff session.
+
+# A login manager gives no WAYLAND_DISPLAY or DISPLAY, but make sure jff runs on the GPU
+# and not nested inside another session.
+export JFF_BACKEND=tty
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=jff
+export XDG_SESSION_DESKTOP=jff
+
+# Your usual environment (PATH, EDITOR, ...), as a login shell would have it.
+[ -f /etc/profile ] && . /etc/profile
+[ -f "$HOME/.profile" ] && . "$HOME/.profile"
+
+jff="$(dirname "$0")/jff"
+[ -x "$jff" ] || jff=jff
+
+# Most systems already have a user D-Bus session at this point. If not, start one.
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    exec dbus-run-session -- "$jff" "$@"
+fi
+exec "$jff" "$@"

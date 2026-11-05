@@ -1,0 +1,37 @@
+[package]
+name = "jff-wm"
+version = "0.0.1"
+edition = "2021"
+description = "jff: a minimal stacking Wayland compositor, just for fun"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "jff"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+xcursor = "0.3"
+kdl = { version = "6.7.1" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+png = "0.18.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+
+[dependencies.smithay]
+git = "https://github.com/Smithay/smithay.git"
+rev = "8a270232f1bfc416c781273c98a3f52a812a0bba"
+default-features = false
+features = [
+  "backend_egl",
+  "backend_winit",
+  "renderer_gl",
+  "desktop",
+  "wayland_frontend",
+  "use_system_lib",
+  "backend_drm",
+  "backend_gbm",
+  "backend_libinput",
+  "backend_session_libseat",
+  "backend_udev",
+]
