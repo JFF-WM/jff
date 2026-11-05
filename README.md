@@ -31,7 +31,7 @@ bar, a launcher, notifications, a lock screen.
 Requires a recent Rust toolchain, seatd or logind, and the usual libinput / DRM /
 GBM development files.
 
-    git clone https://github.com/you/jff
+    git clone https://github.com/JFF-WM/jff
     cd jff
     cargo build --release
     sudo install -Dm755 target/release/jff /usr/local/bin/jff
