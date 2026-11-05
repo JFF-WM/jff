@@ -26,7 +26,7 @@ A minimal stacking Wayland compositor, just for fun. Written in Rust, built on
 Tiling, animations, blur, rounded corners, per-window rules, a settings GUI, a
 bar, a launcher, notifications, a lock screen.
 
-## Install
+## Build
 
 Requires a recent Rust toolchain, seatd or logind, and the usual libinput / DRM /
 GBM development files.
@@ -34,18 +34,32 @@ GBM development files.
     git clone https://github.com/JFF-WM/jff
     cd jff
     cargo build --release
-    sudo install -Dm755 target/release/jff /usr/local/bin/jff
 
-Run it from a TTY:
+## Run it
+
+From a TTY:
 
     jff
 
-Or nested inside your current session:
+Nested inside your current session:
 
     JFF_BACKEND=winit jff alacritty
 
 Without `JFF_BACKEND`, jff picks winit when `WAYLAND_DISPLAY` or `DISPLAY` is
 set, and TTY otherwise.
+
+## Install as a session
+
+To have jff show up in the session list of your login manager (GDM, SDDM, Ly,
+greetd, …):
+
+    sudo make install
+
+This installs the binary, the `jff-session` wrapper, and the `.desktop` file
+under `/usr/share/wayland-sessions/` so the login manager picks it up. Override
+the prefix with `make install PREFIX=/opt/jff`. To remove it:
+
+    sudo make uninstall
 
 ## Configure
 
