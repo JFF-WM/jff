@@ -148,6 +148,7 @@ pub fn layer_elements(
                 (0, 0).into(),
                 blur,
                 blur.is_some_and(|b| b.all_layers),
+                0,
                 &mut out,
             );
             let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
@@ -247,6 +248,7 @@ pub fn layer_popup_elements(
                 (0, 0).into(),
                 blur,
                 blur.is_some_and(|b| b.all_layers),
+                0,
                 &mut out,
             );
         }

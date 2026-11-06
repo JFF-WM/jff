@@ -1072,6 +1072,7 @@ impl JffState {
                 ));
             } else {
                 let radius = self.config.radius();
+                let popup_radius = self.config.popup_radius();
                 for entry in self.desk.top_down() {
                     let geo = entry.window.geometry();
                     let window_origin: Point<i32, Logical> = Point::from(entry.pos) - geo.loc;
@@ -1094,6 +1095,7 @@ impl JffState {
                         blur,
                         snapshot.as_ref(),
                         radius,
+                        popup_radius,
                         &mut elements,
                     );
                     // nothing below the covering window goes in the frame

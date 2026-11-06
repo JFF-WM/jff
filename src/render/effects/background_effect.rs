@@ -195,7 +195,10 @@ pub fn render_for_surface_zoomed(
 /// `parent_loc` is the parent surface's origin in the frame, `parent_geo_loc` is its geometry
 /// offset inside the surface (popups are placed relative to parent geometry, layer surfaces
 /// pass zero). A popup blurs the live frame, so what sits behind it is the parent window, not
-/// the wallpaper. `blur_whole`: also blur popups that sent no region.
+/// the wallpaper. `blur_whole`: also blur popups that sent no region. `radius`: corner radius
+/// of the popups (0 = square), their blur is shaped by it so it doesn't show square behind a
+/// rounded popover. The mask is the popup's geometry, a client shadow around it is not blurred
+/// differently.
 pub fn popup_elements(
     renderer: &mut GlesRenderer,
     parent: &WlSurface,
@@ -203,11 +206,13 @@ pub fn popup_elements(
     parent_geo_loc: Point<i32, Logical>,
     blur: Option<config::Blur>,
     blur_whole: bool,
+    radius: i32,
     out: &mut Vec<JffElement>,
 ) {
     let scale = Scale::from(1.0f64);
     for (popup, popup_offset) in PopupManager::popups_for_surface(parent) {
         let origin = parent_loc + parent_geo_loc + popup_offset - popup.geometry().loc;
+        let popup_geo = Rectangle::new(origin + popup.geometry().loc, popup.geometry().size);
         let loc: Point<i32, Physical> = origin.to_physical_precise_round(scale);
         let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
             render_elements_from_surface_tree(
@@ -220,12 +225,15 @@ pub fn popup_elements(
             );
         out.extend(elements.into_iter().map(JffElement::from));
         if let Some(blur) = blur {
-            render_for_surface(
+            let mask = Rounding::new(&mut *renderer, popup_geo, radius);
+            render_for_surface_zoomed(
                 popup.wl_surface(),
                 origin.to_f64(),
+                1.0,
                 blur_whole.then_some(popup.geometry()),
                 1.0,
                 blur,
+                mask.as_ref(),
                 &mut |element| out.push(JffElement::from(element)),
             );
         }
@@ -237,7 +245,8 @@ pub fn popup_elements(
 ///
 /// `surface_loc` is the window surface origin in the frame. `snapshot`: the window blurs a
 /// wallpaper copy instead of the live frame (see `WallpaperSnapshot`). `radius` is the corner
-/// radius in pixels (0 = square), fullscreen windows are never rounded.
+/// radius in pixels (0 = square), fullscreen windows are never rounded. `popup_radius` is the
+/// same for the blur behind the window's popups.
 pub fn window_elements(
     renderer: &mut GlesRenderer,
     window: &Window,
@@ -245,6 +254,7 @@ pub fn window_elements(
     blur: Option<config::Blur>,
     snapshot: Option<&WallpaperSnapshot>,
     radius: i32,
+    popup_radius: i32,
     out: &mut Vec<JffElement>,
 ) {
     let scale = Scale::from(1.0f64);
@@ -278,6 +288,7 @@ pub fn window_elements(
         geo.loc,
         blur,
         blur.is_some_and(|b| b.all_windows),
+        popup_radius,
         out,
     );
     let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =

@@ -4,7 +4,7 @@
 //! `~/.config/jff/config.kdl`. When none exists, the built-in [`DEFAULT_CONFIG`] is used.
 //!
 //! The format is one KDL document. Top-level nodes: `workspaces`, `maximize-new-windows`,
-//! `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `screenshot { … }`,
+//! `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `screenshot { … }`,
 //! `keyboard { … }`, `blur { … }`, `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
 //! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
@@ -367,6 +367,9 @@ pub struct Config {
     gaps: i32,
     /// Corner radius in pixels of windows that aren't fullscreen. 0 = square.
     radius: i32,
+    /// Corner radius of popups (menus, popovers) for the blur behind them. `None`: same as
+    /// `radius`.
+    popup_radius: Option<i32>,
     screenshot: ScreenshotConfig,
     blur: Blur,
     autostart: Vec<Action>,
@@ -398,6 +401,7 @@ impl Default for Config {
                 drag_modifier: DragModifier::Alt,
                 gaps: DEFAULT_GAPS,
                 radius: DEFAULT_RADIUS,
+                popup_radius: None,
                 screenshot: ScreenshotConfig::default(),
                 blur: Blur::default(),
                 autostart: Vec::new(),
@@ -511,6 +515,10 @@ impl Config {
             None => DEFAULT_RADIUS,
             Some(node) => int_arg(node, MAX_RADIUS)?,
         };
+        let popup_radius = match doc.get("popup-radius") {
+            None => None,
+            Some(node) => Some(int_arg(node, MAX_RADIUS)?),
+        };
 
         let keyboard = match doc.get("keyboard") {
             None => KeyboardConfig::default(),
@@ -545,6 +553,7 @@ impl Config {
             drag_modifier,
             gaps,
             radius,
+            popup_radius,
             screenshot,
             blur,
             autostart,
@@ -554,6 +563,13 @@ impl Config {
     /// Corner radius in pixels of windows that aren't fullscreen (0 by default: square).
     pub fn radius(&self) -> i32 {
         self.radius
+    }
+
+    /// Corner radius in pixels the blur behind popups (menus, popovers) is shaped with: the
+    /// `popup-radius` setting, `radius` when it isn't set. GTK popovers are rounded by the
+    /// client, which the compositor can't see, so this says how much.
+    pub fn popup_radius(&self) -> i32 {
+        self.popup_radius.unwrap_or(self.radius)
     }
 
     /// Pixels kept free on each side of a maximized window (0 by default). Fullscreen windows
@@ -1479,6 +1495,17 @@ sh-autostart "a && b""#,
         // Independent of gaps.
         let both = Config::parse("gaps 8\nradius 12").unwrap();
         assert_eq!((both.gaps(), both.radius()), (8, 12));
+    }
+
+    #[test]
+    fn popup_radius_follows_radius_unless_set() {
+        assert_eq!(Config::default().popup_radius(), 0);
+        assert_eq!(Config::parse("radius 12").unwrap().popup_radius(), 12);
+        let own = Config::parse("radius 16\npopup-radius 10").unwrap();
+        assert_eq!((own.radius(), own.popup_radius()), (16, 10));
+        assert_eq!(Config::parse("popup-radius 0\nradius 8").unwrap().popup_radius(), 0);
+        assert!(Config::parse("popup-radius -1").is_err());
+        assert!(Config::parse(&format!("popup-radius {}", MAX_RADIUS + 1)).is_err());
     }
 
     #[test]
