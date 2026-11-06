@@ -1,6 +1,8 @@
 //! Tests for `jff_wm::ipc::events`.
 
-use jff_wm::ipc::events::{diff, Event, Group, GroupSet, OutputInfo, Snapshot, View};
+use jff_wm::ipc::events::{
+    diff, Event, Group, GroupSet, LayerInfo, OutputInfo, PopupInfo, Snapshot, View,
+};
 
 fn view(id: u64) -> View {
     View {
@@ -39,6 +41,32 @@ fn snapshot(views: Vec<View>) -> Snapshot {
         outputs: vec![output("DP-1", 0)],
         overview: false,
         screenshot: false,
+        ..Snapshot::default()
+    }
+}
+
+fn popup(id: u64, view: u64) -> PopupInfo {
+    PopupInfo {
+        id,
+        view: Some(view),
+        layer: None,
+        x: 100,
+        y: 200,
+        width: 150,
+        height: 90,
+    }
+}
+
+fn layer(id: u64) -> LayerInfo {
+    LayerInfo {
+        id,
+        namespace: "panel".to_string(),
+        layer: "top".to_string(),
+        output: "DP-1".to_string(),
+        x: 0,
+        y: 1040,
+        width: 1920,
+        height: 40,
     }
 }
 
@@ -400,6 +428,8 @@ fn groups_are_parsed_and_collected() {
     assert_eq!(Group::parse("workspaces"), Some(Group::Workspaces));
     assert_eq!(Group::parse("outputs"), Some(Group::Outputs));
     assert_eq!(Group::parse("modes"), Some(Group::Modes));
+    assert_eq!(Group::parse("popups"), Some(Group::Popups));
+    assert_eq!(Group::parse("layers"), Some(Group::Layers));
     assert_eq!(Group::parse("view"), None);
     assert_eq!(Group::parse("Views"), None);
 
@@ -410,6 +440,8 @@ fn groups_are_parsed_and_collected() {
         Group::Workspaces,
         Group::Outputs,
         Group::Modes,
+        Group::Popups,
+        Group::Layers,
     ] {
         assert!(all.contains(group));
     }
@@ -701,7 +733,8 @@ fn an_empty_snapshot_is_valid() {
     assert_eq!(
         s.to_json(GroupSet::ALL),
         "{\"event\":\"snapshot\",\"views\":[],\"workspace\":1,\"count\":9,\
-             \"focused\":null,\"outputs\":[],\"overview\":false,\"screenshot\":false}"
+             \"focused\":null,\"outputs\":[],\"overview\":false,\"screenshot\":false,\
+             \"locked\":false,\"popups\":[],\"layers\":[]}"
     );
 }
 
@@ -715,11 +748,64 @@ fn the_snapshot_only_has_the_asked_for_groups() {
     );
     assert_eq!(
         s.to_json(GroupSet::from_groups(&[Group::Focus, Group::Modes])),
-        "{\"event\":\"snapshot\",\"focused\":1,\"overview\":false,\"screenshot\":false}"
+        "{\"event\":\"snapshot\",\"focused\":1,\"overview\":false,\"screenshot\":false,\"locked\":false}"
     );
     let json = s.to_json(GroupSet::from_groups(&[Group::Views]));
     assert!(json.starts_with("{\"event\":\"snapshot\",\"views\":[{\"id\":1,"));
     assert!(!json.contains("workspace\":1,\"count"));
     assert!(!json.contains("outputs"));
     assert!(!json.contains("overview"));
+}
+
+#[test]
+fn a_menu_opens_after_its_window_and_closes_before_it() {
+    let mut old = snapshot(vec![view(1)]);
+    old.popups = vec![popup(7, 1)];
+    let mut new = snapshot(vec![view(1), view(2)]);
+    new.popups = vec![popup(8, 2)];
+    assert_eq!(
+        names(&diff(&old, &new)),
+        ["view-opened", "popup-opened", "popup-closed"]
+    );
+
+    let mut gone = snapshot(vec![]);
+    gone.popups = vec![];
+    let mut had = snapshot(vec![view(1)]);
+    had.popups = vec![popup(7, 1)];
+    assert_eq!(names(&diff(&had, &gone)), ["popup-closed", "view-closed"]);
+}
+
+#[test]
+fn panels_open_first_and_close_last() {
+    let old = snapshot(vec![view(1)]);
+    let mut new = snapshot(vec![view(1), view(2)]);
+    new.layers = vec![layer(3)];
+    assert_eq!(names(&diff(&old, &new)), ["layer-opened", "view-opened"]);
+    assert_eq!(names(&diff(&new, &old)), ["view-closed", "layer-closed"]);
+}
+
+#[test]
+fn locking_the_session_is_an_event() {
+    let old = snapshot(vec![]);
+    let mut new = snapshot(vec![]);
+    new.locked = true;
+    let events = diff(&old, &new);
+    assert_eq!(events, vec![Event::Lock { on: true }]);
+    assert_eq!(events[0].group(), Group::Modes);
+}
+
+#[test]
+fn popup_and_layer_events_are_flat_json() {
+    assert_eq!(
+        Event::PopupOpened(popup(7, 1)).to_json(),
+        "{\"event\":\"popup-opened\",\"id\":7,\"view\":1,\"layer\":null,\"x\":100,\"y\":200,\
+         \"width\":150,\"height\":90}"
+    );
+    assert_eq!(
+        Event::LayerOpened(layer(3)).to_json(),
+        "{\"event\":\"layer-opened\",\"id\":3,\"namespace\":\"panel\",\"layer\":\"top\",\
+         \"output\":\"DP-1\",\"x\":0,\"y\":1040,\"width\":1920,\"height\":40}"
+    );
+    assert_eq!(Event::PopupClosed { id: 7 }.group(), Group::Popups);
+    assert_eq!(Event::LayerClosed { id: 3 }.group(), Group::Layers);
 }

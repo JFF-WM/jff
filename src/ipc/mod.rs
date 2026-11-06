@@ -59,13 +59,17 @@
 //!  "workspace":2,"count":9,                the shown workspace (from 1) and how many there are
 //!  "focused":3,                            id of the view that has the keyboard, or null
 //!  "outputs":[{"name":"DP-1","x":0,"y":0,"width":1920,"height":1080,"scanout":false},...],
-//!  "overview":false,"screenshot":false}   overview / screenshot selection is open
+//!  "overview":false,"screenshot":false,    overview / screenshot selection is open
+//!  "locked":false,                         the session is locked
+//!  "popups":[POPUP,...],                   mapped menus and popovers
+//!  "layers":[LAYER,...]}                   mapped panels, bars, launchers, wallpapers
 //! ```
 //!
 //! Following events are written flat, `{"event":"title","id":5,"title":"..."}`, in an order a
 //! client can apply: monitors added or changed, views opened, changes on views already there,
 //! the shown workspace, focus, views closed (after the `focus` that moved away from them),
-//! monitors removed, overview, screenshot selection.
+//! monitors removed, overview, screenshot selection, lock. Panels open before views and close
+//! after them, menus open after their view or panel and close before it.
 //!
 //! ```text
 //! event            members                                   group
@@ -84,7 +88,18 @@
 //! output-removed   name                                      outputs
 //! overview         open                                      modes
 //! screenshot       open (the area selection)                 modes
+//! lock             on                                        modes
+//! popup-opened     id, view, layer, x, y, width, height      popups
+//! popup-closed     id                                        popups
+//! layer-opened     id, namespace, layer, output, x, y,       layers
+//!                  width, height
+//! layer-closed     id                                        layers
 //! ```
+//!
+//! A popup (menu, popover) belongs to a `view` or to a `layer` (the id of a panel), the other
+//! one is null. Its `x`, `y` is its own top-left in the shared space, so a panel can tell where
+//! the menu it opened ended up. `layer` is `background`, `bottom`, `top` or `overlay`. Popup and
+//! layer ids are numbers of their own, never reused while jff runs.
 //!
 //! `scanout` is true while the monitor's primary plane shows a client's buffer directly (direct
 //! scanout, no copy), false while it shows a frame jff composited. It changes with an
@@ -97,9 +112,10 @@
 //! follow it.
 //!
 //! `watch` takes the groups to report (`views`, `focus`, `workspaces`, `outputs`, `modes` for
-//! overview and screenshot selection). `watch views workspaces` sends only those events and a
-//! snapshot with only matching members (`views`, `workspace` and `count`, `focused`, `outputs`,
-//! `overview` and `screenshot`). No groups means all of them. An unknown group gets the usual
+//! overview, screenshot selection and lock, `popups`, `layers`). `watch views workspaces` sends
+//! only those events and a snapshot with only matching members (`views`, `workspace` and
+//! `count`, `focused`, `outputs`, `overview`, `screenshot` and `locked`, `popups`, `layers`).
+//! No groups means all of them. An unknown group gets the usual
 //! `{"ok":false,...}` reply and the connection closes.
 //!
 //! jff never waits for a watcher: one that doesn't read fast enough (256 KiB of unsent events)
@@ -113,21 +129,27 @@ use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context};
-use smithay::desktop::Window;
+use smithay::desktop::{layer_map_for_output, PopupManager, Window};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::compositor::with_states;
+use smithay::wayland::shell::wlr_layer::Layer;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 
 use crate::app::Backend;
 use crate::desk::Goto;
 use crate::feature::outputs::output_rect;
 use crate::input::spawn_command;
-use crate::ipc::events::{Event, Group, GroupSet, OutputInfo, Snapshot, View};
+use crate::ipc::events::{
+    Event, Group, GroupSet, LayerInfo, OutputInfo, PopupInfo, Snapshot, View,
+};
 use crate::primitives::json::json_str;
+use crate::protocol::layer_shell::is_mapped;
 use crate::state::JffState;
 
 /// Requests longer than this are dropped.
@@ -143,6 +165,20 @@ const MAX_WATCH_INPUT: usize = 64 * 1024;
 /// The number clients use to name a view. Attached to the window when it appears.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ViewId(pub u64);
+
+/// Same for popups and layer surfaces, given the first time one is listed.
+struct SurfaceId(u64);
+
+static NEXT_SURFACE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn surface_id(surface: &WlSurface) -> u64 {
+    with_states(surface, |states| {
+        states.data_map.insert_if_missing_threadsafe(|| {
+            SurfaceId(NEXT_SURFACE_ID.fetch_add(1, Ordering::Relaxed))
+        });
+        states.data_map.get::<SurfaceId>().map_or(0, |id| id.0)
+    })
+}
 
 // ---- requests ---------------------------------------------------------------------------------
 
@@ -598,7 +634,89 @@ impl JffState {
             outputs,
             overview: self.overview_active(),
             screenshot: self.screenshot.is_some(),
+            locked: self.session_locked(),
+            popups: self.popup_list(),
+            layers: self.layer_list(),
         }
+    }
+
+    /// Every mapped menu, of windows and of panels. Position is the menu's own top-left in the
+    /// shared space.
+    fn popup_list(&self) -> Vec<PopupInfo> {
+        let mut out = Vec::new();
+        let mut add = |root: &WlSurface, origin: (i32, i32), view, layer| {
+            for (popup, offset) in PopupManager::popups_for_surface(root) {
+                if !is_mapped(popup.wl_surface()) {
+                    continue;
+                }
+                let size = popup.geometry().size;
+                out.push(PopupInfo {
+                    id: surface_id(popup.wl_surface()),
+                    view,
+                    layer,
+                    x: origin.0 + offset.x,
+                    y: origin.1 + offset.y,
+                    width: size.w,
+                    height: size.h,
+                });
+            }
+        };
+        for entry in self.desk.all_top_down() {
+            let Some(toplevel) = entry.window.toplevel() else {
+                continue;
+            };
+            let view = entry.window.user_data().get::<ViewId>().map(|id| id.0);
+            add(toplevel.wl_surface(), entry.pos, view, None);
+        }
+        for output in &self.outputs {
+            let (ox, oy, _, _) = output_rect(output);
+            let map = layer_map_for_output(output);
+            for surface in map.layers() {
+                let Some(geo) = map.layer_geometry(surface) else {
+                    continue;
+                };
+                let layer = Some(surface_id(surface.wl_surface()));
+                let origin = (ox + geo.loc.x, oy + geo.loc.y);
+                add(surface.wl_surface(), origin, None, layer);
+            }
+        }
+        out.sort_by_key(|p| p.id);
+        out
+    }
+
+    /// Every mapped panel, bar, launcher and wallpaper.
+    fn layer_list(&self) -> Vec<LayerInfo> {
+        let mut out = Vec::new();
+        for output in &self.outputs {
+            let (ox, oy, _, _) = output_rect(output);
+            let map = layer_map_for_output(output);
+            for surface in map.layers() {
+                let Some(geo) = map.layer_geometry(surface) else {
+                    continue;
+                };
+                if !is_mapped(surface.wl_surface()) {
+                    continue;
+                }
+                out.push(LayerInfo {
+                    id: surface_id(surface.wl_surface()),
+                    namespace: surface.namespace().to_string(),
+                    layer: match surface.layer() {
+                        Layer::Background => "background",
+                        Layer::Bottom => "bottom",
+                        Layer::Top => "top",
+                        Layer::Overlay => "overlay",
+                    }
+                    .to_string(),
+                    output: output.name(),
+                    x: ox + geo.loc.x,
+                    y: oy + geo.loc.y,
+                    width: geo.size.w,
+                    height: geo.size.h,
+                });
+            }
+        }
+        out.sort_by_key(|l| l.id);
+        out
     }
 }
 

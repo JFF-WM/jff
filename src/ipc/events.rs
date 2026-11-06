@@ -6,7 +6,7 @@
 //! that changes something means a change can't be forgotten, and a burst (a drag) costs one
 //! event per loop iteration.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::primitives::json::{json_opt, json_str};
 
@@ -23,13 +23,17 @@ pub enum Group {
     Workspaces,
     /// Monitors added, removed, or changed.
     Outputs,
-    /// Overview and screenshot selection opening or closing.
+    /// Overview, screenshot selection and the session lock opening or closing.
     Modes,
+    /// Menus and popovers appearing or going away.
+    Popups,
+    /// Panels, bars, launchers and wallpapers (layer-shell surfaces) appearing or going away.
+    Layers,
 }
 
 impl Group {
     /// Group names as typed on the command line, for error messages.
-    pub const NAMES: &'static str = "views, focus, workspaces, outputs, modes";
+    pub const NAMES: &'static str = "views, focus, workspaces, outputs, modes, popups, layers";
 
     pub fn parse(word: &str) -> Option<Group> {
         match word {
@@ -38,6 +42,8 @@ impl Group {
             "workspaces" => Some(Group::Workspaces),
             "outputs" => Some(Group::Outputs),
             "modes" => Some(Group::Modes),
+            "popups" => Some(Group::Popups),
+            "layers" => Some(Group::Layers),
             _ => None,
         }
     }
@@ -52,7 +58,7 @@ impl Group {
 pub struct GroupSet(u8);
 
 impl GroupSet {
-    pub const ALL: GroupSet = GroupSet(0b1_1111);
+    pub const ALL: GroupSet = GroupSet(0b111_1111);
 
     /// No groups named means all of them.
     pub fn from_groups(groups: &[Group]) -> GroupSet {
@@ -146,6 +152,73 @@ impl OutputInfo {
     }
 }
 
+/// A menu or popover that is showing. `x`, `y` is its top-left in the shared space.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PopupInfo {
+    pub id: u64,
+    /// The view it belongs to, if it belongs to a window.
+    pub view: Option<u64>,
+    /// The layer surface it belongs to, if it belongs to a panel.
+    pub layer: Option<u64>,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl PopupInfo {
+    fn members(&self) -> String {
+        format!(
+            "\"id\":{},\"view\":{},\"layer\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{}",
+            self.id,
+            json_id(self.view),
+            json_id(self.layer),
+            self.x,
+            self.y,
+            self.width,
+            self.height
+        )
+    }
+
+    pub fn to_json(&self) -> String {
+        format!("{{{}}}", self.members())
+    }
+}
+
+/// A panel, bar, launcher or wallpaper (a layer-shell surface).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LayerInfo {
+    pub id: u64,
+    pub namespace: String,
+    /// `background`, `bottom`, `top` or `overlay`.
+    pub layer: String,
+    pub output: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl LayerInfo {
+    fn members(&self) -> String {
+        format!(
+            "\"id\":{},\"namespace\":{},\"layer\":{},\"output\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{}",
+            self.id,
+            json_str(&self.namespace),
+            json_str(&self.layer),
+            json_str(&self.output),
+            self.x,
+            self.y,
+            self.width,
+            self.height
+        )
+    }
+
+    pub fn to_json(&self) -> String {
+        format!("{{{}}}", self.members())
+    }
+}
+
 /// Everything `watch` reports, at one moment.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
@@ -159,6 +232,11 @@ pub struct Snapshot {
     pub outputs: Vec<OutputInfo>,
     pub overview: bool,
     pub screenshot: bool,
+    pub locked: bool,
+    /// Mapped menus, oldest first.
+    pub popups: Vec<PopupInfo>,
+    /// Mapped layer-shell surfaces.
+    pub layers: Vec<LayerInfo>,
 }
 
 impl Snapshot {
@@ -184,9 +262,17 @@ impl Snapshot {
         }
         if groups.contains(Group::Modes) {
             out.push_str(&format!(
-                ",\"overview\":{},\"screenshot\":{}",
-                self.overview, self.screenshot
+                ",\"overview\":{},\"screenshot\":{},\"locked\":{}",
+                self.overview, self.screenshot, self.locked
             ));
+        }
+        if groups.contains(Group::Popups) {
+            let popups: Vec<String> = self.popups.iter().map(PopupInfo::to_json).collect();
+            out.push_str(&format!(",\"popups\":[{}]", popups.join(",")));
+        }
+        if groups.contains(Group::Layers) {
+            let layers: Vec<String> = self.layers.iter().map(LayerInfo::to_json).collect();
+            out.push_str(&format!(",\"layers\":[{}]", layers.join(",")));
         }
         out.push('}');
         out
@@ -247,6 +333,17 @@ pub enum Event {
     Screenshot {
         open: bool,
     },
+    Lock {
+        on: bool,
+    },
+    PopupOpened(PopupInfo),
+    PopupClosed {
+        id: u64,
+    },
+    LayerOpened(LayerInfo),
+    LayerClosed {
+        id: u64,
+    },
 }
 
 fn json_id(id: Option<u64>) -> String {
@@ -270,7 +367,9 @@ impl Event {
             Event::OutputAdded(_) | Event::OutputRemoved { .. } | Event::OutputChanged(_) => {
                 Group::Outputs
             }
-            Event::Overview { .. } | Event::Screenshot { .. } => Group::Modes,
+            Event::Overview { .. } | Event::Screenshot { .. } | Event::Lock { .. } => Group::Modes,
+            Event::PopupOpened(_) | Event::PopupClosed { .. } => Group::Popups,
+            Event::LayerOpened(_) | Event::LayerClosed { .. } => Group::Layers,
         }
     }
 
@@ -330,15 +429,26 @@ impl Event {
             }
             Event::Overview { open } => format!("{{\"event\":\"overview\",\"open\":{open}}}"),
             Event::Screenshot { open } => format!("{{\"event\":\"screenshot\",\"open\":{open}}}"),
+            Event::Lock { on } => format!("{{\"event\":\"lock\",\"on\":{on}}}"),
+            Event::PopupOpened(popup) => {
+                format!("{{\"event\":\"popup-opened\",{}}}", popup.members())
+            }
+            Event::PopupClosed { id } => format!("{{\"event\":\"popup-closed\",\"id\":{id}}}"),
+            Event::LayerOpened(layer) => {
+                format!("{{\"event\":\"layer-opened\",{}}}", layer.members())
+            }
+            Event::LayerClosed { id } => format!("{{\"event\":\"layer-closed\",\"id\":{id}}}"),
         }
     }
 }
 
 /// The events that turn `old` into `new`, in the order a client should see them. Monitors are
-/// added or changed first, then windows open (ascending id), then changes on windows already
-/// there (ascending id, and per window: title, app id, geometry, maximized, fullscreen,
-/// workspace), then the shown workspace, then focus, then windows close (ascending id, after
-/// the focus event that moved away from them), then monitors removed, overview, screenshot.
+/// added or changed first, then panels open, then windows open (ascending id), then menus open,
+/// then changes on windows already there (ascending id, and per window: title, app id,
+/// geometry, maximized, fullscreen, workspace), then the shown workspace, then focus, then
+/// menus close, windows close (ascending id, after the focus event that moved away from them),
+/// panels close, then monitors removed, overview, screenshot, lock. A menu always opens after
+/// and closes before what it belongs to.
 ///
 /// Nothing changed means no events. A window's geometry is one event however many of x, y,
 /// width, height changed, which is also what coalesces a drag into one event per iteration.
@@ -352,6 +462,20 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
             Some(_) => {}
         }
     }
+
+    let old_layers: HashSet<u64> = old.layers.iter().map(|l| l.id).collect();
+    let new_layers: HashSet<u64> = new.layers.iter().map(|l| l.id).collect();
+    let mut layers_opened: Vec<&LayerInfo> = new
+        .layers
+        .iter()
+        .filter(|l| !old_layers.contains(&l.id))
+        .collect();
+    layers_opened.sort_by_key(|l| l.id);
+    events.extend(
+        layers_opened
+            .into_iter()
+            .map(|l| Event::LayerOpened(l.clone())),
+    );
 
     let old_views: HashMap<u64, &View> = old.views.iter().map(|v| (v.id, v)).collect();
     let new_views: HashMap<u64, &View> = new.views.iter().map(|v| (v.id, v)).collect();
@@ -370,6 +494,19 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
         .filter_map(|after| old_views.get(&after.id).map(|before| (*before, after)))
         .collect();
     kept.sort_by_key(|(_, after)| after.id);
+    let old_popups: HashSet<u64> = old.popups.iter().map(|p| p.id).collect();
+    let new_popups: HashSet<u64> = new.popups.iter().map(|p| p.id).collect();
+    let mut popups_opened: Vec<&PopupInfo> = new
+        .popups
+        .iter()
+        .filter(|p| !old_popups.contains(&p.id))
+        .collect();
+    popups_opened.sort_by_key(|p| p.id);
+    events.extend(
+        popups_opened
+            .into_iter()
+            .map(|p| Event::PopupOpened(p.clone())),
+    );
     for (before, after) in kept {
         let id = after.id;
         if before.title != after.title {
@@ -429,6 +566,19 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
         });
     }
 
+    let mut popups_closed: Vec<u64> = old
+        .popups
+        .iter()
+        .map(|p| p.id)
+        .filter(|id| !new_popups.contains(id))
+        .collect();
+    popups_closed.sort_unstable();
+    events.extend(
+        popups_closed
+            .into_iter()
+            .map(|id| Event::PopupClosed { id }),
+    );
+
     let mut closed: Vec<u64> = old
         .views
         .iter()
@@ -437,6 +587,19 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
         .collect();
     closed.sort_unstable();
     events.extend(closed.into_iter().map(|id| Event::ViewClosed { id }));
+
+    let mut layers_closed: Vec<u64> = old
+        .layers
+        .iter()
+        .map(|l| l.id)
+        .filter(|id| !new_layers.contains(id))
+        .collect();
+    layers_closed.sort_unstable();
+    events.extend(
+        layers_closed
+            .into_iter()
+            .map(|id| Event::LayerClosed { id }),
+    );
 
     for output in &old.outputs {
         if !new.outputs.iter().any(|o| o.name == output.name) {
@@ -453,6 +616,9 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
         events.push(Event::Screenshot {
             open: new.screenshot,
         });
+    }
+    if old.locked != new.locked {
+        events.push(Event::Lock { on: new.locked });
     }
 
     events
