@@ -14,6 +14,9 @@ A minimal stacking Wayland compositor, just for fun. Written in Rust, built on
   another monitor to move it there.
 - Screenshots: full monitor, single window, or a dragged rectangle. PNG,
   optionally to the clipboard.
+- Background blur (`ext-background-effect-v1`): translucent windows, panels and
+  popups get a blurred background. By default it blurs the wallpaper, so windows
+  behind stay sharp. Off until you add a `blur` block to the config.
 - X11 apps through `xwayland-satellite`.
 - Portals, with a `jff-portals.conf` written on first start.
 - A control socket: `jff msg <command>`, and `watch` that streams every change
@@ -23,7 +26,7 @@ A minimal stacking Wayland compositor, just for fun. Written in Rust, built on
 
 ## What it doesn't do
 
-Tiling, animations, blur, rounded corners, per-window rules, a settings GUI, a
+Tiling, animations, rounded corners, per-window rules, a settings GUI, a
 bar, a launcher, notifications, a lock screen.
 
 ## Build
@@ -88,6 +91,14 @@ Read from `$JFF_CONFIG`, then `$XDG_CONFIG_HOME/jff/config.kdl`, then
         repeat-rate 40
     }
 
+    blur {
+        passes 3            // 1-31, each pass doubles the radius
+        offset 3.0          // bigger is blurrier, and blockier
+        all-windows         // also blur windows that didn't ask for blur
+        all-layers          // also blur panels and launchers
+        // behind-windows   // also blur the windows behind (default: wallpaper only)
+    }
+
     outputs {
         output "DP-1" {
             position 0 0
@@ -95,6 +106,10 @@ Read from `$JFF_CONFIG`, then `$XDG_CONFIG_HOME/jff/config.kdl`, then
             adaptive-sync "fullscreen"
         }
     }
+
+Blur only shows on translucent surfaces and needs a wallpaper set (for example
+with `wbg` or `swaybg`). A full commented template is in
+[`config.example`](config.example).
 
 Every setting the config understands is documented in the module header of
 `src/config/mod.rs`. That file is the spec.
@@ -123,7 +138,7 @@ Reload with `Alt+Shift+R` after editing.
 - `protocol/` one file per Wayland protocol family
 - `feature/` overview, screenshots, workspaces, xwayland, portals, ICC
 - `ipc/` the control socket and its events
-- `render/` cursor, render elements, fast/animations split
+- `render/` cursor, render elements, blur effects, fast/animations split
 - `app/` startup, winit backend, TTY backend
 - `state/` `JffState` and the protocol handlers that hang off it
 
