@@ -94,12 +94,20 @@
 //! layer-opened     id, namespace, layer, output, x, y,       layers
 //!                  width, height
 //! layer-closed     id                                        layers
+//! click            button, x, y, target, + see below         clicks
 //! ```
 //!
 //! A popup (menu, popover) belongs to a `view` or to a `layer` (the id of a panel), the other
 //! one is null. Its `x`, `y` is its own top-left in the shared space, so a panel can tell where
 //! the menu it opened ended up. `layer` is `background`, `bottom`, `top` or `overlay`. Popup and
 //! layer ids are numbers of their own, never reused while jff runs.
+//!
+//! `click` is a mouse button press (`button` is the Linux code, 272 left, 273 right, 274 middle,
+//! `x`, `y` the pointer in the shared space). `target` is `view` (with `id`, `app_id`, `title`),
+//! `layer` (with `id`, `namespace`, `layer`, `output`, and `popup`, true when the press landed
+//! on a menu of that panel) or null for the empty desktop. `namespace` is what
+//! `blur { ignore-layer "…" }` matches. A popup also carries `layer_namespace`, the namespace
+//! of the panel it belongs to.
 //!
 //! `scanout` is true while the monitor's primary plane shows a client's buffer directly (direct
 //! scanout, no copy), false while it shows a frame jff composited. It changes with an
@@ -146,10 +154,11 @@ use crate::desk::Goto;
 use crate::feature::outputs::output_rect;
 use crate::input::spawn_command;
 use crate::ipc::events::{
-    Event, Group, GroupSet, LayerInfo, OutputInfo, PopupInfo, Snapshot, View,
+    ClickInfo, ClickTarget, Event, Group, GroupSet, LayerInfo, OutputInfo, PopupInfo, Snapshot,
+    View,
 };
 use crate::primitives::json::json_str;
-use crate::protocol::layer_shell::is_mapped;
+use crate::protocol::layer_shell::{is_mapped, Under};
 use crate::state::JffState;
 
 /// Requests longer than this are dropped.
@@ -171,7 +180,7 @@ struct SurfaceId(u64);
 
 static NEXT_SURFACE_ID: AtomicU64 = AtomicU64::new(1);
 
-fn surface_id(surface: &WlSurface) -> u64 {
+pub(crate) fn surface_id(surface: &WlSurface) -> u64 {
     with_states(surface, |states| {
         states.data_map.insert_if_missing_threadsafe(|| {
             SurfaceId(NEXT_SURFACE_ID.fetch_add(1, Ordering::Relaxed))
@@ -644,29 +653,31 @@ impl JffState {
     /// shared space.
     fn popup_list(&self) -> Vec<PopupInfo> {
         let mut out = Vec::new();
-        let mut add = |root: &WlSurface, origin: (i32, i32), view, layer| {
-            for (popup, offset) in PopupManager::popups_for_surface(root) {
-                if !is_mapped(popup.wl_surface()) {
-                    continue;
+        let mut add =
+            |root: &WlSurface, origin: (i32, i32), view, layer, layer_namespace: Option<String>| {
+                for (popup, offset) in PopupManager::popups_for_surface(root) {
+                    if !is_mapped(popup.wl_surface()) {
+                        continue;
+                    }
+                    let size = popup.geometry().size;
+                    out.push(PopupInfo {
+                        id: surface_id(popup.wl_surface()),
+                        view,
+                        layer,
+                        layer_namespace: layer_namespace.clone(),
+                        x: origin.0 + offset.x,
+                        y: origin.1 + offset.y,
+                        width: size.w,
+                        height: size.h,
+                    });
                 }
-                let size = popup.geometry().size;
-                out.push(PopupInfo {
-                    id: surface_id(popup.wl_surface()),
-                    view,
-                    layer,
-                    x: origin.0 + offset.x,
-                    y: origin.1 + offset.y,
-                    width: size.w,
-                    height: size.h,
-                });
-            }
-        };
+            };
         for entry in self.desk.all_top_down() {
             let Some(toplevel) = entry.window.toplevel() else {
                 continue;
             };
             let view = entry.window.user_data().get::<ViewId>().map(|id| id.0);
-            add(toplevel.wl_surface(), entry.pos, view, None);
+            add(toplevel.wl_surface(), entry.pos, view, None, None);
         }
         for output in &self.outputs {
             let (ox, oy, _, _) = output_rect(output);
@@ -677,7 +688,13 @@ impl JffState {
                 };
                 let layer = Some(surface_id(surface.wl_surface()));
                 let origin = (ox + geo.loc.x, oy + geo.loc.y);
-                add(surface.wl_surface(), origin, None, layer);
+                add(
+                    surface.wl_surface(),
+                    origin,
+                    None,
+                    layer,
+                    Some(surface.namespace().to_string()),
+                );
             }
         }
         out.sort_by_key(|p| p.id);
@@ -841,13 +858,20 @@ impl JffState {
     /// when the event loop says the socket is writable again.
     pub fn publish_events(&mut self) {
         if self.subscribers.is_empty() {
+            self.pending_events.clear();
             return;
         }
         let new = self.take_snapshot();
-        let events: Vec<Event> = match self.last_snapshot.take() {
+        let mut events: Vec<Event> = match self.last_snapshot.take() {
             Some(old) => events::diff(&old, &new),
             None => Vec::new(),
         };
+        // Clicks happened before whatever changed because of them.
+        if !self.pending_events.is_empty() {
+            let mut clicks = std::mem::take(&mut self.pending_events);
+            clicks.append(&mut events);
+            events = clicks;
+        }
         self.last_snapshot = Some(new);
         if events.is_empty() {
             return;
@@ -868,6 +892,68 @@ impl JffState {
             bytes.is_empty() || watcher.send(&bytes)
         });
         self.subscribers_changed();
+    }
+
+    /// Queue a `click` event for watchers: the button, where the pointer was, and what was
+    /// under it (a window, a panel's namespace, a panel's menu, or nothing). Costs one
+    /// `is_empty()` check while nobody watches.
+    pub fn record_click(&mut self, button: u32, pos: (f64, f64), under: Option<&Under>) {
+        if self.subscribers.is_empty() {
+            return;
+        }
+        let target = match under {
+            Some(Under::Window(window, _, _)) => ClickTarget::View {
+                id: window.user_data().get::<ViewId>().map(|id| id.0),
+                app_id: window.toplevel().and_then(|t| {
+                    with_states(t.wl_surface(), |states| {
+                        states
+                            .data_map
+                            .get::<XdgToplevelSurfaceData>()
+                            .and_then(|d| d.lock().unwrap().app_id.clone())
+                    })
+                }),
+                title: window.toplevel().and_then(|t| {
+                    with_states(t.wl_surface(), |states| {
+                        states
+                            .data_map
+                            .get::<XdgToplevelSurfaceData>()
+                            .and_then(|d| d.lock().unwrap().title.clone())
+                    })
+                }),
+            },
+            Some(Under::Layer(layer, surface, _)) => {
+                let output = self
+                    .outputs
+                    .iter()
+                    .find(|o| {
+                        layer_map_for_output(o)
+                            .layers()
+                            .any(|l| l.wl_surface() == layer.wl_surface())
+                    })
+                    .map(|o| o.name());
+                ClickTarget::Layer {
+                    id: surface_id(layer.wl_surface()),
+                    namespace: layer.namespace().to_string(),
+                    layer: match layer.layer() {
+                        Layer::Background => "background",
+                        Layer::Bottom => "bottom",
+                        Layer::Top => "top",
+                        Layer::Overlay => "overlay",
+                    }
+                    .to_string(),
+                    output,
+                    // The press landed on a menu of the panel, not the panel itself.
+                    popup: surface != layer.wl_surface(),
+                }
+            }
+            None => ClickTarget::None,
+        };
+        self.pending_events.push(Event::Click(ClickInfo {
+            button,
+            x: pos.0.round() as i32,
+            y: pos.1.round() as i32,
+            target,
+        }));
     }
 
     /// Forget the snapshot when the last watcher is gone.

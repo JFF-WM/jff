@@ -371,6 +371,8 @@ impl JffState {
                 // Click-to-focus and click-to-raise, before the click reaches the client.
                 if state == ButtonState::Pressed && !self.session_locked() {
                     let under = self.under(pointer.current_location());
+                    let at = pointer.current_location();
+                    self.record_click(event.button_code(), (at.x, at.y), under.as_ref());
                     if let Some(Under::Layer(layer, _, _)) = &under {
                         // A panel or launcher was clicked: it may take the keyboard, and the
                         // windows stay as they are.

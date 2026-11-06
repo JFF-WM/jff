@@ -29,11 +29,13 @@ pub enum Group {
     Popups,
     /// Panels, bars, launchers and wallpapers (layer-shell surfaces) appearing or going away.
     Layers,
+    /// Mouse button presses, with what was under the pointer.
+    Clicks,
 }
 
 impl Group {
     /// Group names as typed on the command line, for error messages.
-    pub const NAMES: &'static str = "views, focus, workspaces, outputs, modes, popups, layers";
+    pub const NAMES: &'static str = "views, focus, workspaces, outputs, modes, popups, layers, clicks";
 
     pub fn parse(word: &str) -> Option<Group> {
         match word {
@@ -44,6 +46,7 @@ impl Group {
             "modes" => Some(Group::Modes),
             "popups" => Some(Group::Popups),
             "layers" => Some(Group::Layers),
+            "clicks" => Some(Group::Clicks),
             _ => None,
         }
     }
@@ -58,7 +61,7 @@ impl Group {
 pub struct GroupSet(u8);
 
 impl GroupSet {
-    pub const ALL: GroupSet = GroupSet(0b111_1111);
+    pub const ALL: GroupSet = GroupSet(0b1111_1111);
 
     /// No groups named means all of them.
     pub fn from_groups(groups: &[Group]) -> GroupSet {
@@ -160,6 +163,8 @@ pub struct PopupInfo {
     pub view: Option<u64>,
     /// The layer surface it belongs to, if it belongs to a panel.
     pub layer: Option<u64>,
+    /// Namespace of that layer surface (the same `namespace` `layers` shows), if any.
+    pub layer_namespace: Option<String>,
     pub x: i32,
     pub y: i32,
     pub width: i32,
@@ -169,10 +174,11 @@ pub struct PopupInfo {
 impl PopupInfo {
     fn members(&self) -> String {
         format!(
-            "\"id\":{},\"view\":{},\"layer\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{}",
+            "\"id\":{},\"view\":{},\"layer\":{},\"layer_namespace\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{}",
             self.id,
             json_id(self.view),
             json_id(self.layer),
+            json_opt(self.layer_namespace.as_deref()),
             self.x,
             self.y,
             self.width,
@@ -182,6 +188,66 @@ impl PopupInfo {
 
     pub fn to_json(&self) -> String {
         format!("{{{}}}", self.members())
+    }
+}
+
+/// What a mouse button press landed on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClickTarget {
+    /// A window (`id` is the view id).
+    View {
+        id: Option<u64>,
+        app_id: Option<String>,
+        title: Option<String>,
+    },
+    /// A panel, bar, launcher or wallpaper, or a menu of one (`popup`).
+    Layer {
+        id: u64,
+        namespace: String,
+        layer: String,
+        output: Option<String>,
+        popup: bool,
+    },
+    /// Nothing: empty desktop.
+    None,
+}
+
+/// A button press, with the pointer position in the shared space.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClickInfo {
+    pub button: u32,
+    pub x: i32,
+    pub y: i32,
+    pub target: ClickTarget,
+}
+
+impl ClickInfo {
+    fn members(&self) -> String {
+        let head = format!(
+            "\"button\":{},\"x\":{},\"y\":{}",
+            self.button, self.x, self.y
+        );
+        match &self.target {
+            ClickTarget::View { id, app_id, title } => format!(
+                "{head},\"target\":\"view\",\"id\":{},\"app_id\":{},\"title\":{}",
+                json_id(*id),
+                json_opt(app_id.as_deref()),
+                json_opt(title.as_deref())
+            ),
+            ClickTarget::Layer {
+                id,
+                namespace,
+                layer,
+                output,
+                popup,
+            } => format!(
+                "{head},\"target\":\"layer\",\"id\":{id},\"namespace\":{},\"layer\":{},\"output\":{},\"popup\":{popup}",
+                json_str(namespace),
+                json_str(layer),
+                json_opt(output.as_deref())
+            ),
+            ClickTarget::None => format!("{head},\"target\":null"),
+        }
     }
 }
 
@@ -344,6 +410,8 @@ pub enum Event {
     LayerClosed {
         id: u64,
     },
+    /// A mouse button was pressed (not part of the snapshot diff, queued by the input code).
+    Click(ClickInfo),
 }
 
 fn json_id(id: Option<u64>) -> String {
@@ -370,6 +438,7 @@ impl Event {
             Event::Overview { .. } | Event::Screenshot { .. } | Event::Lock { .. } => Group::Modes,
             Event::PopupOpened(_) | Event::PopupClosed { .. } => Group::Popups,
             Event::LayerOpened(_) | Event::LayerClosed { .. } => Group::Layers,
+            Event::Click(_) => Group::Clicks,
         }
     }
 
@@ -438,6 +507,7 @@ impl Event {
                 format!("{{\"event\":\"layer-opened\",{}}}", layer.members())
             }
             Event::LayerClosed { id } => format!("{{\"event\":\"layer-closed\",\"id\":{id}}}"),
+            Event::Click(click) => format!("{{\"event\":\"click\",{}}}", click.members()),
         }
     }
 }

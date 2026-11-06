@@ -50,6 +50,7 @@ fn popup(id: u64, view: u64) -> PopupInfo {
         id,
         view: Some(view),
         layer: None,
+        layer_namespace: None,
         x: 100,
         y: 200,
         width: 150,
@@ -808,4 +809,27 @@ fn popup_and_layer_events_are_flat_json() {
     );
     assert_eq!(Event::PopupClosed { id: 7 }.group(), Group::Popups);
     assert_eq!(Event::LayerClosed { id: 3 }.group(), Group::Layers);
+}
+
+#[test]
+fn click_event_names_the_layer() {
+    use jff_wm::ipc::events::{ClickInfo, ClickTarget};
+    let event = Event::Click(ClickInfo {
+        button: 273,
+        x: 10,
+        y: 20,
+        target: ClickTarget::Layer {
+            id: 4,
+            namespace: "Nbar-Top".into(),
+            layer: "top".into(),
+            output: Some("DP-1".into()),
+            popup: false,
+        },
+    });
+    assert_eq!(event.group(), Group::Clicks);
+    let json = event.to_json();
+    assert!(json.contains("\"event\":\"click\""), "{json}");
+    assert!(json.contains("\"namespace\":\"Nbar-Top\""), "{json}");
+    assert!(json.contains("\"popup\":false"), "{json}");
+    assert_eq!(Group::parse("clicks"), Some(Group::Clicks));
 }

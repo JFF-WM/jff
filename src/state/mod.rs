@@ -241,6 +241,8 @@ pub struct JffState {
     pub next_subscriber_id: u64,
     /// What the watchers were told last. Only kept while there is a watcher.
     pub last_snapshot: Option<crate::ipc::events::Snapshot>,
+    /// Events that are not a change of the snapshot (button presses), sent with the next diff.
+    pub pending_events: Vec<crate::ipc::events::Event>,
 
     pub desk: Desk<Window>,
     /// Tracks popups (menus, tooltips) so they're drawn and receive input with their parent.
@@ -494,6 +496,7 @@ impl JffState {
             subscribers: Vec::new(),
             next_subscriber_id: 1,
             last_snapshot: None,
+            pending_events: Vec::new(),
             desk: Desk::default(),
             popups: PopupManager::default(),
             resize: None,
@@ -809,7 +812,11 @@ impl XdgSystemBellHandler for JffState {
     fn ring(&mut self, surface: Option<WlSurface>) {
         tracing::debug!(
             "system bell rung{}",
-            if surface.is_some() { " for a surface" } else { "" }
+            if surface.is_some() {
+                " for a surface"
+            } else {
+                ""
+            }
         );
         self.show_bell(surface);
     }
