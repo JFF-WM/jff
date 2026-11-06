@@ -584,6 +584,8 @@ pub struct Config {
     border: Border,
     screenshot: ScreenshotConfig,
     blur: Blur,
+    /// Layer-surface namespaces the blur leaves alone (`blur { ignore-layer "…" }`).
+    blur_ignore_layers: Vec<String>,
     osd: OsdConfig,
     autostart: Vec<Action>,
 }
@@ -619,6 +621,7 @@ impl Default for Config {
                 border: Border::default(),
                 screenshot: ScreenshotConfig::default(),
                 blur: Blur::default(),
+                blur_ignore_layers: Vec::new(),
                 osd: OsdConfig::default(),
                 autostart: Vec::new(),
             }
@@ -797,8 +800,8 @@ impl Config {
             Some(node) => parse_screenshot(node).context("in screenshot")?,
         };
 
-        let blur = match doc.get("blur") {
-            None => Blur::default(),
+        let (blur, blur_ignore_layers) = match doc.get("blur") {
+            None => (Blur::default(), Vec::new()),
             Some(node) => parse_blur(node).context("in blur")?,
         };
 
@@ -830,6 +833,7 @@ impl Config {
             border,
             screenshot,
             blur,
+            blur_ignore_layers,
             osd,
             autostart,
         })
@@ -873,6 +877,12 @@ impl Config {
     /// The blur block.
     pub fn blur(&self) -> Blur {
         self.blur
+    }
+
+    /// Namespaces of layer surfaces (see `layers` in `jff msg`) that never get blur, neither
+    /// their own nor behind their menus, whatever they ask for and whatever `all-layers` says.
+    pub fn blur_ignore_layers(&self) -> &[String] {
+        &self.blur_ignore_layers
     }
 
     pub fn osd(&self) -> &OsdConfig {
@@ -1164,17 +1174,20 @@ fn float_arg(node: &KdlNode) -> anyhow::Result<f64> {
 }
 
 /// The `blur { … }` block. Having the block at all turns blur on.
-fn parse_blur(node: &KdlNode) -> anyhow::Result<Blur> {
+fn parse_blur(node: &KdlNode) -> anyhow::Result<(Blur, Vec<String>)> {
     let mut config = Blur {
         off: false,
         ..Blur::default()
     };
+    let mut ignore_layers: Vec<String> = Vec::new();
     for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
         match child.name().value() {
             "off" => config.off = flag_value(child)?,
             "all-windows" => config.all_windows = flag_value(child)?,
             "all-layers" => config.all_layers = flag_value(child)?,
             "behind-windows" => config.behind_windows = flag_value(child)?,
+            // The namespace a panel reports in `jff msg` (`layers`), e.g. `ignore-layer "Nbar-Top"`.
+            "ignore-layer" => ignore_layers.push(string_arg(child)?),
             "passes" => {
                 config.passes = u8::try_from(int_arg(child, 31)?)
                     .ok()
@@ -1189,7 +1202,7 @@ fn parse_blur(node: &KdlNode) -> anyhow::Result<Blur> {
             other => bail!("unknown blur setting {other:?}"),
         }
     }
-    Ok(config)
+    Ok((config, ignore_layers))
 }
 
 /// `window-animations` as a flag, or as a block with `off`, `open-ms` and `close-ms`.
@@ -1201,16 +1214,18 @@ fn parse_window_animations(node: &KdlNode) -> anyhow::Result<WindowAnimations> {
     for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
         match child.name().value() {
             "off" => config.on = !flag_value(child)?,
-            "open" => config.open = match string_arg(child)?.as_str() {
-                "fade" => OpenStyle::Fade,
-                "zoom" => OpenStyle::Zoom,
-                "slide" => OpenStyle::Slide,
-                "pop" => OpenStyle::Pop,
-                "none" => OpenStyle::None,
-                other => bail!(
+            "open" => {
+                config.open = match string_arg(child)?.as_str() {
+                    "fade" => OpenStyle::Fade,
+                    "zoom" => OpenStyle::Zoom,
+                    "slide" => OpenStyle::Slide,
+                    "pop" => OpenStyle::Pop,
+                    "none" => OpenStyle::None,
+                    other => bail!(
                     "open takes \"fade\", \"zoom\", \"slide\", \"pop\" or \"none\", not {other:?}"
                 ),
-            },
+                }
+            }
             "open-ms" => config.open_ms = u32::try_from(int_arg(child, MAX_WINDOW_ANIM_MS)?)?,
             "close-ms" => config.close_ms = u32::try_from(int_arg(child, MAX_WINDOW_ANIM_MS)?)?,
             other => bail!("unknown window-animations setting {other:?}"),

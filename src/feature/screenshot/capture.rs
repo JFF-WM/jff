@@ -311,12 +311,13 @@ impl JffState {
             ));
         }
         let above = layers_above(&fullscreen, rect, false);
-        elements.extend(layer_elements(&mut *renderer, output, above, None));
+        elements.extend(layer_elements(&mut *renderer, output, above, None, &[]));
         elements.extend(layer_popup_elements(
             &mut *renderer,
             output,
             &BELOW_WINDOWS,
             None,
+            &[],
         ));
         for entry in self.desk.top_down() {
             let geo = entry.window.geometry();
@@ -344,6 +345,7 @@ impl JffState {
             output,
             &BELOW_WINDOWS,
             None,
+            &[],
         ));
 
         render_to_rgba(

@@ -1137,7 +1137,13 @@ impl JffState {
             // blur needs the frame composited.
             let blur = (!direct_scanout && !self.config.blur().off).then(|| self.config.blur());
             let above = layers_above(&fullscreen, rect, overview_here.is_some());
-            elements.extend(layer_elements(&mut *renderer, &lit.output, above, blur));
+            elements.extend(layer_elements(
+                &mut *renderer,
+                &lit.output,
+                above,
+                blur,
+                self.config.blur_ignore_layers(),
+            ));
             // popups of layers below the windows draw above them, except over a fullscreen
             // window: only the overlay layer is in front of that
             if !direct_scanout {
@@ -1146,6 +1152,7 @@ impl JffState {
                     &lit.output,
                     &BELOW_WINDOWS,
                     blur,
+                    self.config.blur_ignore_layers(),
                 ));
             }
             if let Some(plan) = overview_here {
@@ -1227,6 +1234,7 @@ impl JffState {
                     &lit.output,
                     &BELOW_WINDOWS,
                     blur,
+                    self.config.blur_ignore_layers(),
                 ));
             }
         }

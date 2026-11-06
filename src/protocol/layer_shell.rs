@@ -128,6 +128,7 @@ pub fn layer_elements(
     output: &Output,
     layers: &[Layer],
     blur: Option<config::Blur>,
+    ignore: &[String],
 ) -> Vec<JffElement> {
     let scale = Scale::from(1.0f64);
     let map = layer_map_for_output(output);
@@ -140,6 +141,8 @@ pub fn layer_elements(
             };
             // Layer geometry is relative to the monitor, like the frame being drawn.
             let loc: Point<i32, Physical> = geo.loc.to_physical_precise_round(scale);
+            // A layer on the ignore list (`blur { ignore-layer "…" }`) gets no blur at all.
+            let blur = blur.filter(|_| !ignore.iter().any(|n| n == surface.namespace()));
             // Popups in front, each with its blur right behind it.
             popup_elements(
                 &mut *renderer,
@@ -200,6 +203,7 @@ pub fn layer_body_elements(
     output: &Output,
     layers: &[Layer],
     blur: Option<config::Blur>,
+    ignore: &[String],
 ) -> Vec<JffElement> {
     let scale = Scale::from(1.0f64);
     let map = layer_map_for_output(output);
@@ -209,6 +213,7 @@ pub fn layer_body_elements(
             let Some(geo) = map.layer_geometry(surface) else {
                 continue;
             };
+            let blur = blur.filter(|_| !ignore.iter().any(|n| n == surface.namespace()));
             let loc: Point<i32, Physical> = geo.loc.to_physical_precise_round(scale);
             let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(
@@ -233,6 +238,7 @@ pub fn layer_popup_elements(
     output: &Output,
     layers: &[Layer],
     blur: Option<config::Blur>,
+    ignore: &[String],
 ) -> Vec<JffElement> {
     let map = layer_map_for_output(output);
     let mut out: Vec<JffElement> = Vec::new();
@@ -241,6 +247,7 @@ pub fn layer_popup_elements(
             let Some(geo) = map.layer_geometry(surface) else {
                 continue;
             };
+            let blur = blur.filter(|_| !ignore.iter().any(|n| n == surface.namespace()));
             popup_elements(
                 &mut *renderer,
                 surface.wl_surface(),

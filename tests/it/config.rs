@@ -772,6 +772,11 @@ fn blur_settings_are_read() {
             .blur()
             .all_layers
     );
+    assert!(Config::parse("blur {}").unwrap().blur_ignore_layers().is_empty());
+    let cfg = Config::parse("blur { ignore-layer \"Nbar-Top\"; ignore-layer \"wallpaper\"; }").unwrap();
+    assert_eq!(cfg.blur_ignore_layers(), ["Nbar-Top", "wallpaper"]);
+    assert!(Config::parse("blur { ignore-layer; }").is_err());
+    assert!(Config::parse("blur { ignore-layer 3; }").is_err());
     assert!(!Config::parse("blur {}").unwrap().blur().behind_windows);
     assert!(
         Config::parse("blur { behind-windows; }")

@@ -57,6 +57,7 @@ radius 12
 // opacity below 1.0, and only where the app asked for blur or `all-windows` is set.
 // By default windows blur the WALLPAPER, so a wallpaper must be set (see autostart below).
 blur {
+    // ignore-layer "layer-name"
     passes 3            // 1-31. Each pass doubles the blur radius
     offset 3.0          // Sample stretch above 0. Bigger is blurrier, and blockier
     all-windows         // Also blur windows that did not ask for blur themselves
