@@ -80,6 +80,7 @@ use smithay::wayland::shell::xdg::{
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::viewporter::ViewporterState;
+use smithay::wayland::xdg_system_bell::{XdgSystemBellHandler, XdgSystemBellState};
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
@@ -146,6 +147,8 @@ pub struct JffState {
     pub xdg_foreign_state: XdgForeignState,
     /// xdg-activation: lets an app (or a portal) ask for one of its windows to be focused.
     pub xdg_activation_state: XdgActivationState,
+    #[allow(dead_code)]
+    pub xdg_system_bell_state: XdgSystemBellState,
     #[allow(dead_code)]
     pub viewporter_state: ViewporterState,
     // Pointer lock/confine and raw relative motion: what games need for mouse look.
@@ -304,6 +307,7 @@ impl JffState {
         // it's shown as its dialog, not as a window of its own), and asks to be activated.
         let xdg_foreign_state = XdgForeignState::new::<Self>(&display_handle);
         let xdg_activation_state = XdgActivationState::new::<Self>(&display_handle);
+        let xdg_system_bell_state = XdgSystemBellState::new::<Self>(&display_handle);
 
         // wp_viewporter: xwayland-satellite needs it to scale X11 windows.
         let viewporter_state = ViewporterState::new::<Self>(&display_handle);
@@ -449,6 +453,7 @@ impl JffState {
             dnd_icon: None,
             xdg_foreign_state,
             xdg_activation_state,
+            xdg_system_bell_state,
             viewporter_state,
             pointer_constraints_state,
             cursor_shape_manager_state,
@@ -794,6 +799,16 @@ impl XdgActivationHandler for JffState {
         }
         // A token is good for one request.
         self.xdg_activation_state.remove_token(&token);
+    }
+}
+
+// xdg-system-bell: jff has no sound and no urgency hint to show, so a ring is just logged.
+impl XdgSystemBellHandler for JffState {
+    fn ring(&mut self, surface: Option<WlSurface>) {
+        tracing::debug!(
+            "system bell rung{}",
+            if surface.is_some() { " for a surface" } else { "" }
+        );
     }
 }
 
