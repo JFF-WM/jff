@@ -22,6 +22,11 @@ screenshot {
     copy-to-clipboard #true
 }
 
+window-animations {
+    open-ms 100
+    close-ms 80
+}
+
 border {
     width 3
     color "#333567"
