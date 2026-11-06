@@ -97,6 +97,7 @@ use crate::protocol::foreign_toplevel::ForeignToplevel;
 use crate::protocol::image_copy::ImageCopy;
 use crate::protocol::output_management::OutputManagement;
 use crate::protocol::output_power::OutputPower;
+use crate::protocol::pointer_warp::PointerWarp;
 use crate::protocol::session_lock::SessionLock;
 use crate::protocol::tearing_control::TearingControlState;
 use crate::protocol::text_input::TextInput;
@@ -225,6 +226,7 @@ pub struct JffState {
     /// State of the `wlr-output-management` protocol.
     pub output_management: OutputManagement,
     pub output_power: OutputPower,
+    pub pointer_warp: PointerWarp,
     /// State of the `wlr-layer-shell` protocol (panels, launchers, wallpapers).
     pub layer_shell_state: WlrLayerShellState,
     /// The id the next window gets (see `ipc.rs`).
@@ -401,6 +403,7 @@ impl JffState {
 
         let output_management = OutputManagement::new(&display_handle);
         let output_power = OutputPower::new(&display_handle, backend.is_tty());
+        let pointer_warp = PointerWarp::new(&display_handle);
 
         // wlr-layer-shell: lets bars, launchers, wallpapers, and notification daemons place
         // themselves on a monitor.
@@ -478,6 +481,7 @@ impl JffState {
             config,
             output_management,
             output_power,
+            pointer_warp,
             layer_shell_state,
             next_view_id: 1,
             subscribers: Vec::new(),
