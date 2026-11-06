@@ -2,6 +2,7 @@
 
 pub mod dnd;
 pub mod icc;
+pub mod osd;
 pub mod outputs;
 pub mod overview_mode;
 pub mod portals;

@@ -22,6 +22,12 @@ screenshot {
     copy-to-clipboard #true
 }
 
+osd {
+    // off
+    timeout-ms 5000
+    font "Inter"
+}
+
 window-animations {
     open-ms 100
     close-ms 80

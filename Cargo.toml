@@ -17,6 +17,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 png = "0.18.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+fontdue = "0.9"
 
 [dependencies.smithay]
 git = "https://github.com/Smithay/smithay.git"

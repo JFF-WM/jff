@@ -142,6 +142,7 @@ pub struct JffState {
     pub ext_data_control_state: ExtDataControlState,
     /// The picture the dragging client attached to the drag in progress (see `dnd.rs`).
     pub dnd_icon: Option<WlSurface>,
+    pub osd: crate::feature::osd::Osd,
     /// xdg-foreign: lets a portal dialog say which window it belongs to.
     #[allow(dead_code)]
     pub xdg_foreign_state: XdgForeignState,
@@ -451,6 +452,7 @@ impl JffState {
             data_control_state,
             ext_data_control_state,
             dnd_icon: None,
+            osd: crate::feature::osd::Osd::new(config.osd().font.clone()),
             xdg_foreign_state,
             xdg_activation_state,
             xdg_system_bell_state,
@@ -802,13 +804,14 @@ impl XdgActivationHandler for JffState {
     }
 }
 
-// xdg-system-bell: jff has no sound and no urgency hint to show, so a ring is just logged.
+// xdg-system-bell: no sound, so it's logged and shown as a toast.
 impl XdgSystemBellHandler for JffState {
     fn ring(&mut self, surface: Option<WlSurface>) {
         tracing::debug!(
             "system bell rung{}",
             if surface.is_some() { " for a surface" } else { "" }
         );
+        self.show_bell(surface);
     }
 }
 

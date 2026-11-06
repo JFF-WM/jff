@@ -1090,6 +1090,8 @@ impl JffState {
             rect,
             scale,
         ));
+        // toasts go in here, above windows and panels
+        let osd_at = elements.len();
         // while an area screenshot is open here, the frozen frame replaces layers and windows
         // (cursor stays on top)
         let frozen = self.screenshot.as_ref().filter(|ui| ui.shows(&lit.output));
@@ -1219,6 +1221,14 @@ impl JffState {
                     blur,
                 ));
             }
+        }
+
+        // no toasts over direct scanout, the lock screen or the frozen screenshot
+        if !direct_scanout && !locked && frozen.is_none() && !self.osd.is_empty() {
+            let mut toasts = Vec::new();
+            self.osd
+                .elements(&mut *renderer, &lit.output, pointer, &mut toasts);
+            elements.splice(osd_at..osd_at, toasts);
         }
 
         // Plane scanout is off by default. When a fullscreen window covers the monitor, allow

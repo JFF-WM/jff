@@ -5,7 +5,7 @@
 //!
 //! The format is one KDL document. Top-level nodes: `workspaces`, `maximize-new-windows`,
 //! `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
-//! `keyboard { … }`, `blur { … }`, `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
+//! `keyboard { … }`, `blur { … }`, `osd { … }`, `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
 //! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -116,6 +116,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "screenshot",
     "keyboard",
     "blur",
+    "osd",
     "autostart",
     "sh-autostart",
     "outputs",
@@ -385,6 +386,25 @@ impl Default for Blur {
     }
 }
 
+/// The `osd { … }` block, the toasts shown for the system bell. On unless `off`. `font` is only
+/// read at startup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OsdConfig {
+    pub off: bool,
+    pub timeout_ms: u32,
+    pub font: String,
+}
+
+impl Default for OsdConfig {
+    fn default() -> Self {
+        Self {
+            off: false,
+            timeout_ms: 1800,
+            font: "sans-serif".to_owned(),
+        }
+    }
+}
+
 /// How the border of the focused window moves.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BorderAnimation {
@@ -527,6 +547,7 @@ pub struct Config {
     border: Border,
     screenshot: ScreenshotConfig,
     blur: Blur,
+    osd: OsdConfig,
     autostart: Vec<Action>,
 }
 
@@ -561,6 +582,7 @@ impl Default for Config {
                 border: Border::default(),
                 screenshot: ScreenshotConfig::default(),
                 blur: Blur::default(),
+                osd: OsdConfig::default(),
                 autostart: Vec::new(),
             }
         })
@@ -738,6 +760,11 @@ impl Config {
             Some(node) => parse_blur(node).context("in blur")?,
         };
 
+        let osd = match doc.get("osd") {
+            None => OsdConfig::default(),
+            Some(node) => parse_osd(node).context("in osd")?,
+        };
+
         let mut autostart = Vec::new();
         for node in doc.nodes() {
             let name = node.name().value();
@@ -761,6 +788,7 @@ impl Config {
             border,
             screenshot,
             blur,
+            osd,
             autostart,
         })
     }
@@ -803,6 +831,10 @@ impl Config {
     /// The blur block.
     pub fn blur(&self) -> Blur {
         self.blur
+    }
+
+    pub fn osd(&self) -> &OsdConfig {
+        &self.osd
     }
 
     /// The screenshot block.
@@ -1099,6 +1131,29 @@ fn parse_blur(node: &KdlNode) -> anyhow::Result<Blur> {
                     .context("offset takes a number above 0")?;
             }
             other => bail!("unknown blur setting {other:?}"),
+        }
+    }
+    Ok(config)
+}
+
+fn parse_osd(node: &KdlNode) -> anyhow::Result<OsdConfig> {
+    let mut config = OsdConfig::default();
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "off" => config.off = flag_value(child)?,
+            "timeout-ms" => {
+                let ms = int_arg(child, 60_000)?;
+                if ms < 100 {
+                    bail!("timeout-ms takes a number from 100 to 60000");
+                }
+                config.timeout_ms = u32::try_from(ms)?;
+            }
+            "font" => {
+                config.font = Some(string_arg(child)?)
+                    .filter(|f| !f.trim().is_empty())
+                    .context("font takes a family name, like \"Inter\"")?;
+            }
+            other => bail!("unknown osd setting {other:?}"),
         }
     }
     Ok(config)

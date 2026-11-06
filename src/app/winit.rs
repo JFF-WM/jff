@@ -165,6 +165,8 @@ impl JffState {
                     scale,
                 ));
             }
+            // toasts go in here, above windows and panels
+            let osd_at = elements.len();
             // while selecting a screenshot area the frozen frame replaces the live scene
             let frozen = layer_output
                 .as_ref()
@@ -251,6 +253,19 @@ impl JffState {
                         &BELOW_WINDOWS,
                         blur,
                     ));
+                }
+            }
+            if !locked && frozen.is_none() && !self.osd.is_empty() {
+                if let Some(output) = &layer_output {
+                    let mut toasts = Vec::new();
+                    let pointer = self
+                        .seat
+                        .get_pointer()
+                        .map(|p| p.current_location())
+                        .unwrap_or_default();
+                    self.osd
+                        .elements(&mut *renderer, output, pointer, &mut toasts);
+                    elements.splice(osd_at..osd_at, toasts);
                 }
             }
         }
