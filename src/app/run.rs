@@ -33,8 +33,10 @@ pub fn run() -> anyhow::Result<()> {
     let mut event_loop: EventLoop<JffState> = EventLoop::try_new()?;
     let display: Display<JffState> = Display::new()?;
 
+    let mut startup_error = None;
     let config = Config::load().unwrap_or_else(|err| {
         tracing::warn!("invalid config, using defaults: {err:#}");
+        startup_error = Some(format!("{err:#}"));
         Config::default()
     });
 
@@ -54,6 +56,9 @@ pub fn run() -> anyhow::Result<()> {
         outputs,
         config,
     );
+    if let Some(why) = startup_error {
+        state.show_error("Config error, using defaults", &why);
+    }
 
     let socket = ListeningSocketSource::new_auto()?;
     let socket_name = socket.socket_name().to_os_string();

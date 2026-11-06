@@ -39,12 +39,14 @@ pub const FADE_IN: Duration = Duration::from_millis(140);
 pub const FADE_OUT: Duration = Duration::from_millis(220);
 /// Time left after the pointer leaves a toast.
 pub const GRACE: Duration = Duration::from_millis(600);
+pub const ERROR_TIMEOUT: Duration = Duration::from_secs(8);
 
 const ICON: i32 = 32;
 const PAD_LEFT: i32 = 12;
 const GAP: i32 = 12;
 const PAD_RIGHT: i32 = 24;
 const MAX_TEXT: f32 = 380.0;
+const MAX_TEXT_ERROR: f32 = 620.0;
 const TITLE_PX: f32 = 15.0;
 const SUBTITLE_PX: f32 = 12.0;
 const STACK_GAP: i32 = 8;
@@ -58,6 +60,8 @@ const BELL_DISC: [f32; 3] = [0.29, 0.24, 0.157];
 const BELL_GLYPH: [f32; 3] = [0.96, 0.72, 0.18];
 const INFO_DISC: [f32; 3] = [0.15, 0.21, 0.31];
 const INFO_GLYPH: [f32; 3] = [0.35, 0.66, 0.96];
+const ERROR_DISC: [f32; 3] = [0.33, 0.15, 0.16];
+const ERROR_GLYPH: [f32; 3] = [0.93, 0.36, 0.36];
 
 /// Used when fc-match finds nothing.
 const FALLBACK_FONTS: &[&str] = &[
@@ -74,6 +78,7 @@ const FALLBACK_FONTS: &[&str] = &[
 pub enum Icon {
     Bell,
     Info,
+    Error,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -208,6 +213,10 @@ impl Osd {
 
     pub fn fades_at(&self, index: usize) -> Option<Instant> {
         self.toasts.get(index).map(|t| t.expires)
+    }
+
+    pub fn dismiss(&mut self, icon: Icon) {
+        self.toasts.retain(|t| t.notice.icon != icon);
     }
 
     pub fn expire(&mut self, now: Instant) {
@@ -466,14 +475,21 @@ fn info_mark(x: f32, y: f32) -> bool {
     dist(x, y, 12.0, 8.3) <= 1.25 || ((10.9..=13.1).contains(&x) && (10.8..=16.4).contains(&y))
 }
 
+fn error_mark(x: f32, y: f32) -> bool {
+    dist(x, y, 12.0, 16.6) <= 1.3 || ((10.9..=13.1).contains(&x) && (6.6..=13.6).contains(&y))
+}
+
 /// With no `fonts` only the badge is painted.
 pub fn paint(fonts: Option<&Fonts>, title: &str, subtitle: &str, icon: Icon) -> Picture {
     let (title, subtitle, text_w) = match fonts {
         Some(f) => {
-            let title = elide(title, MAX_TEXT, |s| text_width(&f.medium, s, TITLE_PX));
-            let subtitle = elide(subtitle, MAX_TEXT, |s| {
-                text_width(&f.regular, s, SUBTITLE_PX)
-            });
+            let max = if icon == Icon::Error {
+                MAX_TEXT_ERROR
+            } else {
+                MAX_TEXT
+            };
+            let title = elide(title, max, |s| text_width(&f.medium, s, TITLE_PX));
+            let subtitle = elide(subtitle, max, |s| text_width(&f.regular, s, SUBTITLE_PX));
             let w = text_width(&f.medium, &title, TITLE_PX).max(text_width(
                 &f.regular,
                 &subtitle,
@@ -516,6 +532,7 @@ pub fn paint(fonts: Option<&Fonts>, title: &str, subtitle: &str, icon: Icon) -> 
     let (disc, glyph_color) = match icon {
         Icon::Bell => (BELL_DISC, BELL_GLYPH),
         Icon::Info => (INFO_DISC, INFO_GLYPH),
+        Icon::Error => (ERROR_DISC, ERROR_GLYPH),
     };
     let badge_x = (SHADOW + PAD_LEFT) as f32 + ICON as f32 / 2.0;
     let badge_y = (SHADOW as f32) + HEIGHT as f32 / 2.0;
@@ -524,6 +541,10 @@ pub fn paint(fonts: Option<&Fonts>, title: &str, subtitle: &str, icon: Icon) -> 
         Icon::Info => vec![
             (glyph_color, info_disc as fn(f32, f32) -> bool),
             ([1.0; 3], info_mark as fn(f32, f32) -> bool),
+        ],
+        Icon::Error => vec![
+            (glyph_color, info_disc as fn(f32, f32) -> bool),
+            ([1.0; 3], error_mark as fn(f32, f32) -> bool),
         ],
     };
     const K: f32 = 0.8; // pixels per glyph unit
@@ -678,6 +699,15 @@ fn toplevel_names(surface: &WlSurface) -> (String, String) {
     })
 }
 
+/// The first line with something in it. Parse errors come with a source excerpt below.
+pub fn first_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(clean)
+        .unwrap_or_default()
+}
+
 pub fn subtitle_of(app_id: &str, title: &str, workspace: Option<usize>) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !app_id.is_empty() {
@@ -739,5 +769,20 @@ impl JffState {
         };
         notice.output = output;
         self.osd.show(notice, timeout, Instant::now());
+    }
+
+    /// Show an error toast. Not affected by `osd { off }`, an error you can't see is worse.
+    pub fn show_error(&mut self, title: &str, message: &str) {
+        let Some(output) = self.output_at_pointer().map(|o| o.name()) else {
+            return;
+        };
+        let notice = Notice {
+            key: None,
+            icon: Icon::Error,
+            title: title.to_owned(),
+            subtitle: first_line(message),
+            output,
+        };
+        self.osd.show(notice, ERROR_TIMEOUT, Instant::now());
     }
 }

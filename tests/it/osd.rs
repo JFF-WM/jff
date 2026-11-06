@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use jff_wm::config::Config;
 use jff_wm::feature::osd::{
-    alpha_at, elide, paint, subtitle_of, Icon, Notice, Osd, FADE_IN, FADE_OUT, GRACE, HEIGHT,
-    MAX_TOASTS, SHADOW,
+    alpha_at, elide, first_line, paint, subtitle_of, Icon, Notice, Osd, FADE_IN, FADE_OUT, GRACE,
+    HEIGHT, MAX_TOASTS, SHADOW,
 };
 
 const TIMEOUT: Duration = Duration::from_millis(1800);
@@ -234,4 +234,35 @@ fn holding_a_toast_that_is_not_there_does_nothing() {
     let mut osd = Osd::without_fonts();
     osd.hold(3, Instant::now());
     assert!(osd.is_empty());
+}
+
+#[test]
+fn dismissing_an_icon_removes_only_those_toasts() {
+    let mut osd = Osd::without_fonts();
+    let t0 = Instant::now();
+    osd.show(bell(Some(1), "DP-1"), TIMEOUT, t0);
+    let mut error = bell(None, "DP-1");
+    error.icon = Icon::Error;
+    osd.show(error, TIMEOUT, t0);
+    assert_eq!(osd.len(), 2);
+    osd.dismiss(Icon::Error);
+    assert_eq!(osd.len(), 1);
+    assert_eq!(osd.active().next().unwrap().0.icon, Icon::Bell);
+}
+
+#[test]
+fn an_error_message_is_cut_to_its_first_line() {
+    assert_eq!(
+        first_line("in osd: bad\n\n  1 | osd {\n  2 | }"),
+        "in osd: bad"
+    );
+    assert_eq!(first_line("\n  \nsecond"), "second");
+    assert_eq!(first_line(""), "");
+}
+
+#[test]
+fn the_error_icon_paints_too() {
+    let picture = paint(None, "Config error", "", Icon::Error);
+    let alpha = |x: i32, y: i32| picture.rgba[((y * picture.width + x) * 4 + 3) as usize];
+    assert!(alpha(picture.width / 2, picture.height / 2) > 250);
 }

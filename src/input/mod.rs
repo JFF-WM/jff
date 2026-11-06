@@ -585,14 +585,12 @@ impl JffState {
                 self.apply_workspace_count();
                 self.reconcile_outputs();
                 self.apply_decoration_mode();
+                self.osd.dismiss(crate::feature::osd::Icon::Error);
                 tracing::info!("config reloaded");
             }
             Err(err) => {
                 tracing::warn!("config not reloaded: {err:#}");
-                crate::feature::screenshot::save::notify(
-                    "jff: config not reloaded",
-                    &format!("{err:#}"),
-                );
+                self.show_error("Config error", &format!("{err:#}"));
             }
         }
     }
