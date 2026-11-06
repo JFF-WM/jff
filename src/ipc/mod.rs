@@ -134,7 +134,7 @@ use crate::state::JffState;
 const MAX_REQUEST: usize = 4096;
 
 /// Bytes of events a slow watcher can have waiting before it's dropped.
-const MAX_PENDING: usize = 256 * 1024;
+pub const MAX_PENDING: usize = 256 * 1024;
 
 /// A watcher may send nothing but EOF. Past this, it's dropped (also keeps one client from
 /// keeping the event loop busy reading what's ignored anyway).
@@ -147,14 +147,14 @@ pub struct ViewId(pub u64);
 // ---- requests ---------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Maximize {
+pub enum Maximize {
     On,
     Off,
     Toggle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Request {
+pub enum Request {
     Views,
     Status,
     Focused,
@@ -182,7 +182,7 @@ enum Request {
     Watch(Vec<Group>),
 }
 
-const COMMANDS: &str =
+pub const COMMANDS: &str =
     "views, status, focused, view-info, close, maximize, unmaximize, toggle-maximize, \
      fullscreen, unfullscreen, focus, workspaces, workspace, move-to-workspace, spawn, spawn-sh, \
      screenshot-area, screenshot-fullscreen, screenshot-window, watch";
@@ -194,7 +194,7 @@ fn parse_workspace_number(word: &str) -> Result<usize, String> {
         .ok_or_else(|| format!("{word:?} is not a workspace number (they count from 1)"))
 }
 
-fn parse_request(line: &str) -> Result<Request, String> {
+pub fn parse_request(line: &str) -> Result<Request, String> {
     let line = line.trim();
     let mut words = line.split_whitespace();
     let Some(command) = words.next() else {
@@ -605,13 +605,13 @@ impl JffState {
 // ---- watchers ---------------------------------------------------------------------------------
 
 /// Bytes waiting to be written to a watcher: what its socket didn't take yet.
-struct Outbox {
-    pending: VecDeque<u8>,
+pub struct Outbox {
+    pub pending: VecDeque<u8>,
     limit: usize,
 }
 
 impl Outbox {
-    fn new(limit: usize) -> Self {
+    pub fn new(limit: usize) -> Self {
         Self {
             pending: VecDeque::new(),
             limit,
@@ -619,7 +619,7 @@ impl Outbox {
     }
 
     /// Queue `bytes`. Returns false (and queues nothing) when that would go over the limit.
-    fn enqueue(&mut self, bytes: &[u8]) -> bool {
+    pub fn enqueue(&mut self, bytes: &[u8]) -> bool {
         if self.pending.len().saturating_add(bytes.len()) > self.limit {
             return false;
         }
@@ -629,7 +629,7 @@ impl Outbox {
 
     /// Write as much as `to` takes. A full socket (`WouldBlock`) isn't an error, the rest stays
     /// queued for the next try. Any other error means the watcher is gone.
-    fn flush<W: Write>(&mut self, to: &mut W) -> io::Result<()> {
+    pub fn flush<W: Write>(&mut self, to: &mut W) -> io::Result<()> {
         while !self.pending.is_empty() {
             match to.write(self.pending.make_contiguous()) {
                 Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
@@ -647,15 +647,15 @@ impl Outbox {
 
 /// A client that sent `watch` and gets events (see `JffState::publish_events`).
 pub struct Subscriber {
-    id: u64,
-    stream: UnixStream,
-    groups: GroupSet,
-    out: Outbox,
+    pub id: u64,
+    pub stream: UnixStream,
+    pub groups: GroupSet,
+    pub out: Outbox,
 }
 
 impl Subscriber {
     /// Queue `bytes` and write what the socket takes. False means drop this watcher.
-    fn send(&mut self, bytes: &[u8]) -> bool {
+    pub fn send(&mut self, bytes: &[u8]) -> bool {
         if !self.out.enqueue(bytes) {
             tracing::warn!(
                 "ipc watcher {} does not read its events (over {MAX_PENDING} bytes waiting), \
@@ -668,7 +668,7 @@ impl Subscriber {
     }
 
     /// Write what's queued. False means drop this watcher.
-    fn flush(&mut self) -> bool {
+    pub fn flush(&mut self) -> bool {
         let mut conn: &UnixStream = &self.stream;
         match self.out.flush(&mut conn) {
             Ok(()) => true,
@@ -681,7 +681,7 @@ impl Subscriber {
 
     /// The socket became readable or writable: look for EOF, write what's queued. Whatever the
     /// client sends is read and thrown away. False means drop this watcher.
-    fn service(&mut self) -> bool {
+    pub fn service(&mut self) -> bool {
         let mut conn: &UnixStream = &self.stream;
         let mut chunk = [0u8; 512];
         let mut total = 0usize;
@@ -1039,368 +1039,5 @@ fn watch_client(args: &[String]) -> anyhow::Result<i32> {
             return Ok(1);
         }
         first = false;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::primitives::json::json_opt;
-
-    #[test]
-    fn requests_are_parsed() {
-        assert_eq!(parse_request("views"), Ok(Request::Views));
-        assert_eq!(parse_request("status"), Ok(Request::Status));
-        assert_eq!(parse_request("  focused \n"), Ok(Request::Focused));
-        assert_eq!(parse_request("view-info"), Ok(Request::Info(None)));
-        assert_eq!(parse_request("view-info 7"), Ok(Request::Info(Some(7))));
-        assert_eq!(parse_request("close 3"), Ok(Request::Close(Some(3))));
-        assert_eq!(
-            parse_request("toggle-maximize"),
-            Ok(Request::Maximize(None, Maximize::Toggle))
-        );
-        assert_eq!(
-            parse_request("unmaximize 2"),
-            Ok(Request::Maximize(Some(2), Maximize::Off))
-        );
-        assert_eq!(
-            parse_request("fullscreen"),
-            Ok(Request::Fullscreen(None, true))
-        );
-        assert_eq!(
-            parse_request("fullscreen 5"),
-            Ok(Request::Fullscreen(Some(5), true))
-        );
-        assert_eq!(
-            parse_request("unfullscreen 5"),
-            Ok(Request::Fullscreen(Some(5), false))
-        );
-        assert_eq!(parse_request("focus 4"), Ok(Request::Focus(4)));
-        assert_eq!(parse_request("workspaces"), Ok(Request::Workspaces));
-        assert_eq!(
-            parse_request("screenshot-area"),
-            Ok(Request::ScreenshotArea)
-        );
-        assert_eq!(
-            parse_request(" screenshot-fullscreen \n"),
-            Ok(Request::ScreenshotFullscreen)
-        );
-        assert_eq!(
-            parse_request("screenshot-window"),
-            Ok(Request::ScreenshotWindow)
-        );
-        assert!(parse_request("screenshot-area now").is_err());
-        assert_eq!(
-            parse_request("workspace 3"),
-            Ok(Request::Workspace(Goto::To(2)))
-        );
-        assert_eq!(
-            parse_request("workspace next"),
-            Ok(Request::Workspace(Goto::Next))
-        );
-        assert_eq!(
-            parse_request("workspace prev"),
-            Ok(Request::Workspace(Goto::Prev))
-        );
-        assert_eq!(
-            parse_request("move-to-workspace 2"),
-            Ok(Request::MoveToWorkspace(None, 2))
-        );
-        assert_eq!(
-            parse_request("move-to-workspace 2 9"),
-            Ok(Request::MoveToWorkspace(Some(9), 2))
-        );
-    }
-
-    #[test]
-    fn watch_is_parsed() {
-        assert_eq!(parse_request("watch"), Ok(Request::Watch(vec![])));
-        assert_eq!(parse_request("  watch \n"), Ok(Request::Watch(vec![])));
-        assert_eq!(
-            parse_request("watch views workspaces"),
-            Ok(Request::Watch(vec![Group::Views, Group::Workspaces]))
-        );
-        assert_eq!(
-            parse_request("watch focus outputs modes"),
-            Ok(Request::Watch(vec![
-                Group::Focus,
-                Group::Outputs,
-                Group::Modes
-            ]))
-        );
-        let err = parse_request("watch views panels").unwrap_err();
-        assert!(err.contains("\"panels\""), "{err}");
-        assert!(err.contains(Group::NAMES), "{err}");
-        assert!(parse_request("views focus").is_err());
-        assert!(parse_request("watch close").is_err());
-        assert!(parse_request("watch 3").is_err());
-        assert!(COMMANDS.contains("watch"));
-    }
-
-    #[test]
-    fn spawn_commands_are_parsed() {
-        assert_eq!(
-            parse_request("spawn firefox"),
-            Ok(Request::Spawn(vec!["firefox".into()]))
-        );
-        assert_eq!(
-            parse_request("spawn firefox --new-window https://example.com"),
-            Ok(Request::Spawn(vec![
-                "firefox".into(),
-                "--new-window".into(),
-                "https://example.com".into(),
-            ]))
-        );
-        assert_eq!(
-            parse_request("spawn-sh grim -g \"$(slurp)\" out.png"),
-            Ok(Request::SpawnShell("grim -g \"$(slurp)\" out.png".into()))
-        );
-        assert_eq!(
-            parse_request("spawn-sh echo 'a  b'"),
-            Ok(Request::SpawnShell("echo 'a  b'".into()))
-        );
-        assert_eq!(
-            parse_request("spawn-sh   swaylock"),
-            Ok(Request::SpawnShell("swaylock".into()))
-        );
-        assert!(parse_request("spawn").is_err());
-        assert!(parse_request("spawn-sh").is_err());
-        assert!(parse_request("spawn-sh   ").is_err());
-    }
-
-    #[test]
-    fn bad_workspace_requests_are_refused() {
-        assert!(parse_request("workspace").is_err());
-        assert!(parse_request("workspace 0").is_err());
-        assert!(parse_request("workspace x").is_err());
-        assert!(parse_request("workspace 1 2").is_err());
-        assert!(parse_request("workspaces 1").is_err());
-        assert!(parse_request("move-to-workspace").is_err());
-        assert!(parse_request("move-to-workspace 1 x").is_err());
-    }
-
-    #[test]
-    fn bad_requests_are_refused() {
-        assert!(parse_request("").is_err());
-        assert!(parse_request("fly").is_err());
-        assert!(parse_request("close abc").is_err());
-        assert!(parse_request("close 1 2").is_err());
-        assert!(parse_request("focus").is_err());
-        assert!(parse_request("views 1").is_err());
-        assert!(parse_request("status 1").is_err());
-        assert!(parse_request("fullscreen 1 2").is_err());
-    }
-
-    #[test]
-    fn json_strings_are_escaped() {
-        assert_eq!(json_str("plain"), "\"plain\"");
-        assert_eq!(json_str("a\"b\\c\nd"), "\"a\\\"b\\\\c\\nd\"");
-        assert_eq!(json_str("\u{1}"), "\"\\u0001\"");
-        assert_eq!(json_str("héllo ✓"), "\"héllo ✓\"");
-        assert_eq!(json_opt(None), "null");
-    }
-
-    struct FakeSocket {
-        taken: Vec<u8>,
-        take: usize,
-        room: usize,
-        error: Option<io::ErrorKind>,
-        writes: usize,
-    }
-
-    impl FakeSocket {
-        fn new(take: usize, room: usize) -> Self {
-            Self {
-                taken: Vec::new(),
-                take,
-                room,
-                error: None,
-                writes: 0,
-            }
-        }
-    }
-
-    impl Write for FakeSocket {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.writes += 1;
-            if let Some(kind) = self.error {
-                return Err(kind.into());
-            }
-            if self.room == 0 {
-                return Err(io::ErrorKind::WouldBlock.into());
-            }
-            let n = buf.len().min(self.take).min(self.room);
-            self.taken.extend_from_slice(&buf[..n]);
-            self.room -= n;
-            Ok(n)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn a_roomy_socket_takes_everything_at_once() {
-        let mut out = Outbox::new(1024);
-        let mut socket = FakeSocket::new(usize::MAX, usize::MAX);
-        assert!(out.enqueue(b"one\n"));
-        assert!(out.enqueue(b"two\n"));
-        out.flush(&mut socket).unwrap();
-        assert_eq!(socket.taken, b"one\ntwo\n");
-        assert!(out.pending.is_empty());
-        let writes = socket.writes;
-        out.flush(&mut socket).unwrap();
-        assert_eq!(socket.writes, writes);
-    }
-
-    #[test]
-    fn a_full_socket_keeps_the_rest_queued_in_order() {
-        let mut out = Outbox::new(1024);
-        let mut socket = FakeSocket::new(3, 5);
-        assert!(out.enqueue(b"abcdefghij"));
-        out.flush(&mut socket).unwrap();
-        assert_eq!(socket.taken, b"abcde");
-        assert_eq!(out.pending.len(), 5);
-        assert!(out.enqueue(b"KLM"));
-        socket.room = 100;
-        out.flush(&mut socket).unwrap();
-        assert_eq!(socket.taken, b"abcdefghijKLM");
-        assert!(out.pending.is_empty());
-    }
-
-    #[test]
-    fn the_queue_has_a_limit_and_refuses_whole_messages() {
-        let mut out = Outbox::new(10);
-        assert!(out.enqueue(b"123456"));
-        assert!(!out.enqueue(b"78901"));
-        assert_eq!(out.pending.len(), 6);
-        assert!(out.enqueue(b"7890"));
-        assert!(!out.enqueue(b"1"));
-        assert!(!Outbox::new(0).enqueue(b"x"));
-        assert!(Outbox::new(0).enqueue(b""));
-        let mut socket = FakeSocket::new(4, 4);
-        out.flush(&mut socket).unwrap();
-        assert!(out.enqueue(b"abcd"));
-    }
-
-    #[test]
-    fn socket_errors_are_reported() {
-        for kind in [
-            io::ErrorKind::BrokenPipe,
-            io::ErrorKind::ConnectionReset,
-            io::ErrorKind::PermissionDenied,
-        ] {
-            let mut out = Outbox::new(1024);
-            let mut socket = FakeSocket::new(usize::MAX, usize::MAX);
-            socket.error = Some(kind);
-            assert!(out.enqueue(b"x\n"));
-            assert_eq!(out.flush(&mut socket).unwrap_err().kind(), kind);
-        }
-    }
-
-    #[test]
-    fn interrupted_writes_are_retried_and_zero_writes_are_an_error() {
-        struct Flaky(u8, Vec<u8>);
-        impl Write for Flaky {
-            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                if self.0 > 0 {
-                    self.0 -= 1;
-                    return Err(io::ErrorKind::Interrupted.into());
-                }
-                self.1.extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut out = Outbox::new(64);
-        let mut flaky = Flaky(2, Vec::new());
-        assert!(out.enqueue(b"hello\n"));
-        out.flush(&mut flaky).unwrap();
-        assert_eq!(flaky.1, b"hello\n");
-
-        struct Zero;
-        impl Write for Zero {
-            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-                Ok(0)
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        assert!(out.enqueue(b"x"));
-        assert_eq!(
-            out.flush(&mut Zero).unwrap_err().kind(),
-            io::ErrorKind::WriteZero
-        );
-    }
-
-    #[test]
-    fn a_slow_reader_is_dropped_when_events_pile_up() {
-        let mut out = Outbox::new(MAX_PENDING);
-        let mut socket = FakeSocket::new(usize::MAX, 0);
-        let event = vec![b'x'; 1024];
-        let mut queued = 0;
-        while out.enqueue(&event) {
-            out.flush(&mut socket).unwrap();
-            queued += 1;
-        }
-        assert_eq!(queued, MAX_PENDING / 1024);
-        assert!(socket.taken.is_empty());
-    }
-
-    #[test]
-    fn a_watcher_over_a_real_socket_pair() {
-        let (ours, mut theirs) = UnixStream::pair().unwrap();
-        ours.set_nonblocking(true).unwrap();
-        let mut watcher = Subscriber {
-            id: 1,
-            stream: ours,
-            groups: GroupSet::ALL,
-            out: Outbox::new(MAX_PENDING),
-        };
-        assert!(watcher.send(b"{\"event\":\"snapshot\"}\n"));
-        assert!(watcher.service());
-        let mut got = [0u8; 64];
-        let n = theirs.read(&mut got).unwrap();
-        assert_eq!(&got[..n], b"{\"event\":\"snapshot\"}\n");
-
-        theirs.write_all(b"hello?\n").unwrap();
-        assert!(watcher.service());
-
-        theirs.shutdown(Shutdown::Write).unwrap();
-        assert!(!watcher.service());
-    }
-
-    #[test]
-    fn a_dropped_watcher_hangs_up() {
-        let (ours, mut theirs) = UnixStream::pair().unwrap();
-        let polled = ours.try_clone().unwrap();
-        let watcher = Subscriber {
-            id: 1,
-            stream: ours,
-            groups: GroupSet::ALL,
-            out: Outbox::new(MAX_PENDING),
-        };
-        drop(watcher);
-        let mut buf = [0u8; 8];
-        assert_eq!(theirs.read(&mut buf).unwrap(), 0, "the client sees EOF");
-        drop(polled);
-    }
-
-    #[test]
-    fn a_dead_peer_is_noticed_on_write() {
-        let (ours, theirs) = UnixStream::pair().unwrap();
-        ours.set_nonblocking(true).unwrap();
-        let mut watcher = Subscriber {
-            id: 1,
-            stream: ours,
-            groups: GroupSet::ALL,
-            out: Outbox::new(MAX_PENDING),
-        };
-        drop(theirs);
-        assert!(!watcher.send(b"a\n"));
     }
 }

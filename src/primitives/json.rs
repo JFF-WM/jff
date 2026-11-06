@@ -2,7 +2,7 @@
 //! `ipc` and `ipc::events`.
 
 /// `s` as a JSON string literal.
-pub(crate) fn json_str(s: &str) -> String {
+pub fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -20,6 +20,6 @@ pub(crate) fn json_str(s: &str) -> String {
     out
 }
 
-pub(crate) fn json_opt(s: Option<&str>) -> String {
+pub fn json_opt(s: Option<&str>) -> String {
     s.map_or_else(|| "null".to_string(), json_str)
 }

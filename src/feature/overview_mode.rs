@@ -1114,23 +1114,3 @@ impl PointerGrab<JffState> for OverviewGrab {
 
     fn unset(&mut self, _data: &mut JffState) {}
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn overview_keys() {
-        assert_eq!(overview_key(Keysym::Escape), Some(OverviewKey::Cancel));
-        assert_eq!(overview_key(Keysym::Return), Some(OverviewKey::Select));
-        assert_eq!(
-            overview_key(Keysym::ISO_Left_Tab),
-            Some(OverviewKey::Cycle { backwards: true })
-        );
-        assert_eq!(
-            overview_key(Keysym::Left),
-            Some(OverviewKey::Move(Dir::Left))
-        );
-        assert_eq!(overview_key(Keysym::a), None);
-    }
-}
