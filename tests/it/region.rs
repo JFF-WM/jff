@@ -127,7 +127,7 @@ fn output_rectangles_never_overlap_and_cover_the_same_pixels() {
             let mut inside = false;
             for &(kind, (x1, y1, x2, y2)) in &steps {
                 if x1 <= x && x < x2 && y1 <= y && y < y2 {
-                    inside = kind == RectangleKind::Add;
+                    inside = matches!(kind, RectangleKind::Add);
                 }
             }
             let hits = rects

@@ -29,10 +29,10 @@ fn mods(ctrl: bool, alt: bool, shift: bool, logo: bool) -> ModifiersState {
 #[test]
 fn new_windows_maximize_unless_disabled() {
     assert!(Config::default().maximize_new_windows());
-    assert!(!Config::parse("maximize-new-windows false")
+    assert!(!Config::parse("maximize-new-windows #false")
         .unwrap()
         .maximize_new_windows());
-    assert!(Config::parse("maximize-new-windows true")
+    assert!(Config::parse("maximize-new-windows #true")
         .unwrap()
         .maximize_new_windows());
     assert!(Config::parse("maximize-new-windows 3").is_err());
@@ -44,10 +44,10 @@ fn csd_is_kept_unless_no_csd_is_preferred() {
     assert!(Config::parse("no-client-decorations")
         .unwrap()
         .no_client_decorations());
-    assert!(Config::parse("no-client-decorations true")
+    assert!(Config::parse("no-client-decorations #true")
         .unwrap()
         .no_client_decorations());
-    assert!(!Config::parse("no-client-decorations false")
+    assert!(!Config::parse("no-client-decorations #false")
         .unwrap()
         .no_client_decorations());
     assert!(Config::parse("no-client-decorations 3").is_err());
@@ -78,13 +78,13 @@ fn keyboard_defaults_match_builtin_behaviour() {
 #[test]
 fn numlock_can_be_disabled() {
     assert!(
-        Config::parse("keyboard { numlock true; }")
+        Config::parse("keyboard { numlock #true; }")
             .unwrap()
             .keyboard()
             .numlock
     );
     assert!(
-        !Config::parse("keyboard { numlock false; }")
+        !Config::parse("keyboard { numlock #false; }")
             .unwrap()
             .keyboard()
             .numlock
@@ -204,8 +204,8 @@ fn screenshot_block_defaults_and_settings() {
     let config = Config::parse(
         r#"screenshot {
                 path "~/Pictures/Shots"
-                include-cursor true
-                copy-to-clipboard false
+                include-cursor #true
+                copy-to-clipboard #false
             }"#,
     )
     .unwrap();
@@ -271,7 +271,7 @@ fn workspaces_are_bound_by_default() {
 #[test]
 fn workspace_actions_and_count_are_parsed() {
     let config = Config::parse(
-        "workspaces 3\nbinds { Super+1 { workspace 1; } Super+P { workspace-prev; } }",
+        "workspaces 3\nbinds { Super+1 { workspace 1; }; Super+P { workspace-prev; } }",
     )
     .unwrap();
     let logo = mods(false, false, false, true);
@@ -302,7 +302,7 @@ fn rejects_bad_workspaces() {
 #[test]
 fn mouse_buttons_can_be_bound() {
     let config =
-        Config::parse("binds { MouseBack { overview; } Alt+MouseForward { maximize; } }").unwrap();
+        Config::parse("binds { MouseBack { overview; }; Alt+MouseForward { maximize; } }").unwrap();
     let none = mods(false, false, false, false);
     let alt = mods(false, true, false, false);
     assert_eq!(

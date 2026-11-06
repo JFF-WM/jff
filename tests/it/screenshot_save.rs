@@ -27,8 +27,10 @@ fn gradient(w: u32, h: u32) -> Vec<u8> {
 }
 
 fn decode(png_bytes: &[u8]) -> (png::OutputInfo, Vec<u8>) {
-    let mut reader = png::Decoder::new(png_bytes).read_info().unwrap();
-    let mut buf = vec![0; reader.output_buffer_size()];
+    let mut reader = png::Decoder::new(std::io::Cursor::new(png_bytes))
+        .read_info()
+        .unwrap();
+    let mut buf = vec![0; reader.output_buffer_size().unwrap()];
     let info = reader.next_frame(&mut buf).unwrap();
     buf.truncate(info.buffer_size());
     (info, buf)
