@@ -24,11 +24,6 @@ A minimal stacking Wayland compositor, just for fun. Written in Rust, built on
 - Gaming plumbing: explicit sync, adaptive sync, `wp_content_type_v1`, direct
   scanout, tearing hints, fifo and commit-timing, pointer constraints.
 
-## What it doesn't do
-
-Tiling, animations, rounded corners, per-window rules, a settings GUI, a
-bar, a launcher, notifications, a lock screen.
-
 ## Build
 
 Requires a recent Rust toolchain, seatd or logind, and the usual libinput / DRM /
