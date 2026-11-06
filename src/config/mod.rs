@@ -101,6 +101,26 @@ binds {
 }
 "#;
 
+/// All the top-level settings jff knows. Anything else in the file is silently ignored, and
+/// `jff check-config` warns about it.
+pub const TOP_LEVEL_NODES: &[&str] = &[
+    "workspaces",
+    "maximize-new-windows",
+    "no-client-decorations",
+    "drag-modifier",
+    "gaps",
+    "radius",
+    "popup-radius",
+    "border",
+    "screenshot",
+    "keyboard",
+    "blur",
+    "autostart",
+    "sh-autostart",
+    "outputs",
+    "binds",
+];
+
 /// Something a key binding can do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -586,6 +606,37 @@ impl Config {
         })
     }
 
+    /// What `jff check-config` runs. Fails with the same errors as `parse`, and on top of that
+    /// returns warnings for things that load fine but probably aren't what you meant.
+    pub fn check_text(text: &str) -> anyhow::Result<Vec<String>> {
+        let config = Self::parse(text)?;
+        let doc: KdlDocument = text.parse()?;
+        let mut warnings = Vec::new();
+        for node in doc.nodes() {
+            let name = node.name().value();
+            if !TOP_LEVEL_NODES.contains(&name) {
+                let hint = closest(name, TOP_LEVEL_NODES)
+                    .map(|near| format!(", did you mean {near:?}?"))
+                    .unwrap_or_default();
+                warnings.push(format!("unknown setting {name:?} is ignored{hint}"));
+            }
+        }
+        let border = config.border();
+        if border.animate != BorderAnimation::None && !border.animated() {
+            let why = if !border.on() {
+                "the border has width 0"
+            } else if border.period_ms == 0 {
+                "period-ms is 0"
+            } else {
+                "focus-color-2 is missing or the same as focus-color"
+            };
+            warnings.push(format!(
+                "border animate is set but nothing will move: {why}"
+            ));
+        }
+        Ok(warnings)
+    }
+
     /// Parse config text.
     ///
     /// # Errors
@@ -884,6 +935,34 @@ fn int_arg(node: &KdlNode, max: i32) -> anyhow::Result<i32> {
             .with_context(|| format!("{name} takes a number from 0 to {max}")),
         _ => bail!("{name} takes one number from 0 to {max}"),
     }
+}
+
+/// How many single-letter changes it takes to turn `a` into `b`.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (diagonal + usize::from(ca != *cb))
+                .min(above + 1)
+                .min(row[j] + 1);
+            diagonal = above;
+        }
+    }
+    row[b.len()]
+}
+
+/// The known name that `name` looks like a typo of, if there is one.
+fn closest<'a>(name: &str, options: &[&'a str]) -> Option<&'a str> {
+    options
+        .iter()
+        .map(|option| (edit_distance(name, option), *option))
+        .filter(|(distance, _)| *distance <= 2 && *distance < name.chars().count())
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, option)| option)
 }
 
 /// `period-ms`: a number of milliseconds, or `"none"` for 0 (standing still).
@@ -1908,6 +1987,60 @@ sh-autostart "a && b""#,
         // Deleted: the defaults come back.
         assert!(!watch.poll(None));
         assert!(watch.poll(None));
+    }
+
+    #[test]
+    fn check_accepts_the_built_in_config_without_warnings() {
+        assert_eq!(
+            Config::check_text(DEFAULT_CONFIG).unwrap(),
+            Vec::<String>::new()
+        );
+        assert!(Config::check_text("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn check_reports_errors_like_parse() {
+        assert!(Config::check_text("border { glow 1; }").is_err());
+        assert!(Config::check_text("gaps -1").is_err());
+        assert!(Config::check_text("binds {").is_err());
+    }
+
+    #[test]
+    fn check_warns_about_ignored_top_level_settings() {
+        let warnings = Config::check_text("gap 10\nradius 8\nfoo 1").unwrap();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("\"gap\"") && warnings[0].contains("\"gaps\""));
+        assert!(warnings[1].contains("\"foo\"") && !warnings[1].contains("did you mean"));
+        // Real settings don't get a warning.
+        let known = "workspaces 4\ngaps 4\nautostart \"true\"\nsh-autostart \"true\"\nblur {}";
+        assert!(Config::check_text(known).unwrap().is_empty());
+    }
+
+    #[test]
+    fn check_warns_when_an_animation_cannot_show() {
+        let nothing = Config::check_text("border { animate \"spin\"; }").unwrap();
+        assert_eq!(nothing.len(), 1, "{nothing:?}");
+        assert!(nothing[0].contains("focus-color-2"));
+        let still = "border { animate \"spin\"; focus-color-2 \"#f00\"; period-ms 0; }";
+        assert!(Config::check_text(still).unwrap()[0].contains("period-ms"));
+        let flat = "border { width 0; animate \"spin\"; focus-color-2 \"#f00\"; }";
+        assert!(Config::check_text(flat).unwrap()[0].contains("width 0"));
+        let works = "border { animate \"spin\"; focus-color-2 \"#f00\"; }";
+        assert!(Config::check_text(works).unwrap().is_empty());
+        assert!(Config::check_text("border { width 2; }")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn typos_find_their_setting() {
+        assert_eq!(closest("gap", TOP_LEVEL_NODES), Some("gaps"));
+        assert_eq!(closest("raduis", TOP_LEVEL_NODES), Some("radius"));
+        assert_eq!(closest("bind", TOP_LEVEL_NODES), Some("binds"));
+        assert_eq!(closest("foo", TOP_LEVEL_NODES), None);
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("same", "same"), 0);
     }
 
     #[test]

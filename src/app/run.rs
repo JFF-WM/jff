@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
@@ -14,6 +16,12 @@ pub fn run() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("msg") {
         std::process::exit(crate::ipc::client(&args[2..])?);
+    }
+
+    // `jff check-config [FILE]` looks at a config file and says what's wrong with it. It doesn't
+    // start the compositor.
+    if args.get(1).map(String::as_str) == Some("check-config") {
+        std::process::exit(check_config(&args[2..]));
     }
 
     tracing_subscriber::fmt()
@@ -158,4 +166,53 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Runs `jff check-config`. Reads FILE (or the config jff would normally load) and says if it
+/// works. Errors go to stderr, warnings to stdout. Exit code is 0 if the config loads (warnings
+/// or no file at all are fine), 1 if it doesn't, 2 if the command line is wrong.
+fn check_config(args: &[String]) -> i32 {
+    let (path, explicit) = match args {
+        [] => (Config::path(), false),
+        [file] => (Some(PathBuf::from(file)), true),
+        _ => {
+            eprintln!("usage: jff check-config [FILE]");
+            return 2;
+        }
+    };
+    let Some(path) = path else {
+        eprintln!("no config path: JFF_CONFIG, XDG_CONFIG_HOME and HOME are all unset");
+        return 2;
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && !explicit => {
+            println!(
+                "{}: no file, the built-in defaults are used",
+                path.display()
+            );
+            return 0;
+        }
+        Err(err) => {
+            eprintln!("{}: error: {err}", path.display());
+            return 1;
+        }
+    };
+    match Config::check_text(&text) {
+        Ok(warnings) if warnings.is_empty() => {
+            println!("{}: ok", path.display());
+            0
+        }
+        Ok(warnings) => {
+            for warning in &warnings {
+                println!("{}: warning: {warning}", path.display());
+            }
+            println!("{}: ok, with {} warning(s)", path.display(), warnings.len());
+            0
+        }
+        Err(err) => {
+            eprintln!("{}: error: {err:#}", path.display());
+            1
+        }
+    }
 }
