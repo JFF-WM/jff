@@ -20,6 +20,7 @@
 //! goes through `parse()` and logs an error if it fails.
 
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context};
 use kdl::{KdlDocument, KdlNode, KdlValue};
@@ -432,6 +433,57 @@ impl Default for Border {
     }
 }
 
+/// How often the config file is looked at for changes.
+pub const CONFIG_WATCH_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Modification time and size of the config file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+/// Decides when the config file has been saved and should be read again.
+///
+/// Fed what the file looks like (`None` = missing) at every poll. A change is not acted on
+/// at once: editors write a file in several steps, or replace it by renaming another over it,
+/// and reading in the middle would see half a file. [`ConfigWatch::poll`] reports it once the
+/// file looked the same on two polls in a row. A file that is saved again while that wait
+/// goes on restarts the wait.
+#[derive(Debug)]
+pub struct ConfigWatch {
+    /// What the config in use was read from.
+    loaded: Option<FileStamp>,
+    /// A change seen on the last poll, not yet acted on.
+    pending: Option<Option<FileStamp>>,
+}
+
+impl ConfigWatch {
+    /// `loaded` is the file as the running config was read from it.
+    pub fn new(loaded: Option<FileStamp>) -> Self {
+        Self {
+            loaded,
+            pending: None,
+        }
+    }
+
+    /// `true` when the file has changed and then held still: read the config again now.
+    pub fn poll(&mut self, now: Option<FileStamp>) -> bool {
+        if now == self.loaded {
+            // Back to what was loaded (or never left it).
+            self.pending = None;
+            return false;
+        }
+        if self.pending == Some(now) {
+            self.loaded = now;
+            self.pending = None;
+            return true;
+        }
+        self.pending = Some(now);
+        false
+    }
+}
+
 /// The parsed configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -521,6 +573,17 @@ impl Config {
             .filter(|p| p.is_absolute())
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
         Some(base.join("jff").join("config.kdl"))
+    }
+
+    /// What the config file looks like on disk right now, for [`ConfigWatch`]. `None` when
+    /// there is no file (or no path). Follows symlinks, so a config kept elsewhere and linked
+    /// in is noticed when the real file changes.
+    pub fn stamp() -> Option<FileStamp> {
+        let meta = std::fs::metadata(Self::path()?).ok()?;
+        Some(FileStamp {
+            modified: meta.modified().ok(),
+            len: meta.len(),
+        })
     }
 
     /// Parse config text.
@@ -1790,6 +1853,61 @@ sh-autostart "a && b""#,
         assert_eq!(both.maximize_inset(), 10);
         let wide = Config::parse("gaps 2\nborder { width 6; }").unwrap();
         assert_eq!(wide.maximize_inset(), 6);
+    }
+
+    fn stamp(len: u64) -> Option<FileStamp> {
+        Some(FileStamp {
+            modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(len)),
+            len,
+        })
+    }
+
+    #[test]
+    fn watch_is_quiet_while_the_file_does_not_change() {
+        let mut watch = ConfigWatch::new(stamp(1));
+        for _ in 0..5 {
+            assert!(!watch.poll(stamp(1)));
+        }
+        let mut missing = ConfigWatch::new(None);
+        assert!(!missing.poll(None));
+    }
+
+    #[test]
+    fn watch_reloads_once_the_file_has_held_still_for_a_poll() {
+        let mut watch = ConfigWatch::new(stamp(1));
+        assert!(!watch.poll(stamp(2)), "first sight of a change waits");
+        assert!(watch.poll(stamp(2)), "unchanged since: save is done");
+        // And then it is the new normal.
+        assert!(!watch.poll(stamp(2)));
+        assert!(!watch.poll(stamp(2)));
+    }
+
+    #[test]
+    fn watch_waits_while_the_file_is_still_being_written() {
+        let mut watch = ConfigWatch::new(stamp(1));
+        assert!(!watch.poll(stamp(2)));
+        assert!(!watch.poll(stamp(3)), "changed again: wait again");
+        assert!(!watch.poll(stamp(4)));
+        assert!(watch.poll(stamp(4)));
+    }
+
+    #[test]
+    fn watch_ignores_a_change_that_goes_back() {
+        // An editor that writes a temporary file and removes it again.
+        let mut watch = ConfigWatch::new(stamp(1));
+        assert!(!watch.poll(None));
+        assert!(!watch.poll(stamp(1)));
+        assert!(!watch.poll(stamp(1)));
+    }
+
+    #[test]
+    fn watch_notices_a_file_appearing_and_disappearing() {
+        let mut watch = ConfigWatch::new(None);
+        assert!(!watch.poll(stamp(7)));
+        assert!(watch.poll(stamp(7)));
+        // Deleted: the defaults come back.
+        assert!(!watch.poll(None));
+        assert!(watch.poll(None));
     }
 
     #[test]

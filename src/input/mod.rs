@@ -479,18 +479,7 @@ impl JffState {
             Action::Overview => self.toggle_overview(),
             Action::Workspace(goto) => self.goto_workspace(goto),
             Action::MoveToWorkspace(workspace) => self.move_focused_to_workspace(workspace),
-            Action::ReloadConfig => match Config::load() {
-                Ok(config) => {
-                    let old_keyboard = self.config.keyboard().clone();
-                    self.config = config;
-                    self.apply_keyboard_config(&old_keyboard);
-                    self.apply_workspace_count();
-                    self.reconcile_outputs();
-                    self.apply_decoration_mode();
-                    tracing::info!("config reloaded");
-                }
-                Err(err) => tracing::warn!("config not reloaded: {err:#}"),
-            },
+            Action::ReloadConfig => self.reload_config(),
             Action::ScreenshotArea => {
                 if let Err(why) = self.start_screenshot_area() {
                     report_failure(&why);
@@ -580,5 +569,31 @@ impl JffState {
             }
         }
         None
+    }
+}
+
+impl JffState {
+    /// Read the config file again and apply it to the running compositor. A file that can't be
+    /// read or parsed leaves the config in use as it is. Runs on the `reload-config` action
+    /// and when the file is saved (see `app::run`).
+    pub fn reload_config(&mut self) {
+        match Config::load() {
+            Ok(config) => {
+                let old_keyboard = self.config.keyboard().clone();
+                self.config = config;
+                self.apply_keyboard_config(&old_keyboard);
+                self.apply_workspace_count();
+                self.reconcile_outputs();
+                self.apply_decoration_mode();
+                tracing::info!("config reloaded");
+            }
+            Err(err) => {
+                tracing::warn!("config not reloaded: {err:#}");
+                crate::feature::screenshot::save::notify(
+                    "jff: config not reloaded",
+                    &format!("{err:#}"),
+                );
+            }
+        }
     }
 }

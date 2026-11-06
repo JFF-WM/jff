@@ -1,10 +1,11 @@
 use smithay::reexports::calloop::generic::Generic;
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::wayland_server::Display;
 use smithay::wayland::socket::ListeningSocketSource;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::{Action, Config};
+use crate::config::{Action, Config, ConfigWatch, CONFIG_WATCH_INTERVAL};
 use crate::input::spawn_command;
 use crate::state::JffState;
 
@@ -28,6 +29,13 @@ pub fn run() -> anyhow::Result<()> {
         tracing::warn!("invalid config, using defaults: {err:#}");
         Config::default()
     });
+
+    // Remember the file as it is read now, so saving it later is noticed.
+    let mut config_watch = ConfigWatch::new(Config::stamp());
+    match Config::path() {
+        Some(path) => tracing::info!("watching {} for changes", path.display()),
+        None => tracing::info!("no config path, not watching for changes"),
+    }
 
     let (backend, winit_loop, outputs) = super::init(&event_loop.handle(), &config)?;
     let mut state = JffState::new(
@@ -53,6 +61,22 @@ pub fn run() -> anyhow::Result<()> {
             Ok(PostAction::Continue)
         },
     )?;
+
+    // Apply the config when the file is saved: one stat of the file twice a second. A timer
+    // rather than inotify, which would lose the file when an editor saves by replacing it.
+    event_loop
+        .handle()
+        .insert_source(
+            Timer::from_duration(CONFIG_WATCH_INTERVAL),
+            move |_, _, state| {
+                if config_watch.poll(Config::stamp()) {
+                    tracing::info!("config file changed");
+                    state.reload_config();
+                }
+                TimeoutAction::ToDuration(CONFIG_WATCH_INTERVAL)
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("failed to insert the config watcher: {}", e.error))?;
 
     // The insert error holds the winit loop, which isn't Send, so anyhow can't wrap it directly.
     if let Some(winit_loop) = winit_loop {
