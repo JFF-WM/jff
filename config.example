@@ -22,6 +22,8 @@ screenshot {
     copy-to-clipboard #true
 }
 
+gaps 10
+
 // Background blur. Blur is OFF unless this block exists, writing it turns it on.
 // It only shows on surfaces that are (partly) transparent, for example a terminal with
 // opacity below 1.0, and only where the app asked for blur or `all-windows` is set.

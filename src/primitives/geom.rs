@@ -26,6 +26,15 @@ pub fn fit_size(size: Size, area: Size, margin: i32) -> Size {
     )
 }
 
+/// Shrink the rectangle `(x, y, w, h)` by `gap` px on every side. The gap is capped so the
+/// result is never smaller than 1x1, and a negative gap counts as 0.
+pub fn inset_rect(rect: (i32, i32, i32, i32), gap: i32) -> (i32, i32, i32, i32) {
+    let (x, y, w, h) = rect;
+    // Largest gap that still leaves one pixel on the narrower axis.
+    let gap = gap.clamp(0, (w.min(h) - 1).max(0) / 2);
+    (x + gap, y + gap, w - 2 * gap, h - 2 * gap)
+}
+
 /// The corner nearest to `p` (window-local). Used when the user starts a resize from the middle
 /// of a window, not from a specific edge.
 pub fn nearest_corner(p: (f64, f64), size: Size) -> Edges {
@@ -144,6 +153,20 @@ mod tests {
         assert_eq!(fit_size((1200, 700), (1000, 800), 40), (920, 700));
         assert_eq!(fit_size((300, 200), (1000, 800), 40), (300, 200));
         assert_eq!(fit_size((300, 200), (50, 50), 40), (1, 1));
+    }
+
+    #[test]
+    fn inset_shrinks_every_side() {
+        assert_eq!(inset_rect((0, 0, 1920, 1080), 0), (0, 0, 1920, 1080));
+        assert_eq!(inset_rect((0, 30, 1920, 1050), 10), (10, 40, 1900, 1030));
+        assert_eq!(inset_rect((1920, 0, 800, 600), 8), (1928, 8, 784, 584));
+    }
+
+    #[test]
+    fn inset_never_collapses() {
+        assert_eq!(inset_rect((0, 0, 100, 40), 500), (19, 19, 62, 2));
+        assert_eq!(inset_rect((0, 0, 1, 1), 5), (0, 0, 1, 1));
+        assert_eq!(inset_rect((5, 5, 100, 100), -3), (5, 5, 100, 100));
     }
 
     #[test]

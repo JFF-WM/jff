@@ -40,6 +40,7 @@ use smithay::wayland::shell::xdg::PopupSurface;
 use crate::config;
 use crate::desk::Desk;
 use crate::feature::outputs::output_rect;
+use crate::primitives::geom;
 use crate::primitives::layout::{self, Rect};
 use crate::render::effects::background_effect::{popup_elements, render_for_surface};
 use crate::render::elements::JffElement;
@@ -343,9 +344,15 @@ impl JffState {
             .cloned()
     }
 
-    /// The part of the monitor at `rect` that panels haven't reserved for themselves: what a
-    /// maximized window may use.
+    /// The part of the monitor at `rect` that panels haven't reserved for themselves, shrunk by
+    /// the `gaps` setting on every side: what a maximized window may use. Fullscreen windows
+    /// don't call this, they cover the whole monitor.
     pub fn usable_rect(&self, rect: Rect) -> Rect {
+        geom::inset_rect(self.panel_free_rect(rect), self.config.gaps())
+    }
+
+    /// The part of the monitor at `rect` that panels haven't reserved, before any gap.
+    fn panel_free_rect(&self, rect: Rect) -> Rect {
         let Some(output) = self.output_for_rect(rect) else {
             return rect;
         };

@@ -4,8 +4,8 @@
 //! `~/.config/jff/config.kdl`. When none exists, the built-in [`DEFAULT_CONFIG`] is used.
 //!
 //! The format is one KDL document. Top-level nodes: `workspaces`, `maximize-new-windows`,
-//! `no-client-decorations`, `drag-modifier`, `screenshot { … }`, `keyboard { … }`, `blur { … }`,
-//! `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
+//! `no-client-decorations`, `drag-modifier`, `gaps`, `screenshot { … }`, `keyboard { … }`,
+//! `blur { … }`, `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
 //! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -31,6 +31,11 @@ use crate::desk::Goto;
 pub const DEFAULT_WORKSPACES: usize = 9;
 /// Upper bound for `workspaces`.
 pub const MAX_WORKSPACES: usize = 64;
+
+/// Default gap (px) around maximized windows: none.
+pub const DEFAULT_GAPS: i32 = 0;
+/// Upper bound for `gaps`.
+pub const MAX_GAPS: i32 = 512;
 
 /// Default key repeat delay (ms) and rate (per second).
 pub const DEFAULT_REPEAT_DELAY: i32 = 200;
@@ -353,6 +358,8 @@ pub struct Config {
     maximize_new_windows: bool,
     no_client_decorations: bool,
     drag_modifier: DragModifier,
+    /// Pixels kept free on each side of a maximized window.
+    gaps: i32,
     screenshot: ScreenshotConfig,
     blur: Blur,
     autostart: Vec<Action>,
@@ -382,6 +389,7 @@ impl Default for Config {
                 maximize_new_windows: true,
                 no_client_decorations: false,
                 drag_modifier: DragModifier::Alt,
+                gaps: DEFAULT_GAPS,
                 screenshot: ScreenshotConfig::default(),
                 blur: Blur::default(),
                 autostart: Vec::new(),
@@ -487,6 +495,11 @@ impl Config {
             },
         };
 
+        let gaps = match doc.get("gaps") {
+            None => DEFAULT_GAPS,
+            Some(node) => int_arg(node, MAX_GAPS)?,
+        };
+
         let keyboard = match doc.get("keyboard") {
             None => KeyboardConfig::default(),
             Some(node) => parse_keyboard(node).context("in keyboard")?,
@@ -518,10 +531,17 @@ impl Config {
             maximize_new_windows,
             no_client_decorations,
             drag_modifier,
+            gaps,
             screenshot,
             blur,
             autostart,
         })
+    }
+
+    /// Pixels kept free on each side of a maximized window (0 by default). Fullscreen windows
+    /// ignore it.
+    pub fn gaps(&self) -> i32 {
+        self.gaps
     }
 
     /// `autostart` + `sh-autostart`, in file order. Only [`Action::Spawn`] and
@@ -1392,6 +1412,33 @@ sh-autostart "a && b""#,
         assert!(Config::parse("binds { Alt+M { fly; } }").is_err());
         assert!(Config::parse("binds { Alt+M { spawn; } }").is_err());
         assert!(Config::parse("binds { Alt+M { maximize 1; } }").is_err());
+    }
+
+    #[test]
+    fn gaps_default_to_zero() {
+        assert_eq!(Config::default().gaps(), 0);
+        assert_eq!(Config::parse("").unwrap().gaps(), 0);
+        assert_eq!(Config::parse("workspaces 3").unwrap().gaps(), 0);
+    }
+
+    #[test]
+    fn gaps_are_read() {
+        assert_eq!(Config::parse("gaps 10").unwrap().gaps(), 10);
+        assert_eq!(Config::parse("gaps 0").unwrap().gaps(), 0);
+        assert_eq!(
+            Config::parse(&format!("gaps {MAX_GAPS}")).unwrap().gaps(),
+            MAX_GAPS
+        );
+    }
+
+    #[test]
+    fn gaps_reject_bad_values() {
+        assert!(Config::parse("gaps").is_err());
+        assert!(Config::parse("gaps -1").is_err());
+        assert!(Config::parse(&format!("gaps {}", MAX_GAPS + 1)).is_err());
+        assert!(Config::parse("gaps 1.5").is_err());
+        assert!(Config::parse("gaps \"big\"").is_err());
+        assert!(Config::parse("gaps 4 6").is_err());
     }
 
     #[test]
