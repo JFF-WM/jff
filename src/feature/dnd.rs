@@ -73,7 +73,7 @@ pub fn icon_elements(
     renderer: &mut GlesRenderer,
     loc: Point<i32, Physical>,
     scale: Scale<f64>,
-) -> Vec<JffElement<GlesRenderer>> {
+) -> Vec<JffElement> {
     match icon.filter(|icon| icon.alive()) {
         Some(icon) => {
             render_elements_from_surface_tree(renderer, icon, loc, scale, 1.0, Kind::Unspecified)

@@ -4,5 +4,6 @@
 //! primary plane). `path/` is where the `NoAnimations` / `Animations` split lands, see `path/mod.rs`.
 
 pub mod cursor;
+pub mod effects;
 pub mod elements;
 pub mod path;

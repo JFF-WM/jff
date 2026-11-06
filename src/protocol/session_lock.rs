@@ -79,7 +79,7 @@ pub fn lock_surface_elements(
     lock: &SessionLock,
     output: &Output,
     scale: Scale<f64>,
-) -> Vec<JffElement<GlesRenderer>> {
+) -> Vec<JffElement> {
     let mut out = Vec::new();
     for (surface, on) in lock.surfaces.iter().rev() {
         if on != output || !surface.alive() {

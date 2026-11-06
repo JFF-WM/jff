@@ -44,6 +44,7 @@ use smithay::wayland::drm_syncobj::{
     supports_syncobj_eventfd, DrmSyncobjCachedState, DrmSyncobjHandler, DrmSyncobjState,
 };
 use smithay::wayland::commit_timing::CommitTimingManagerState;
+use smithay::wayland::background_effect::BackgroundEffectState;
 use smithay::wayland::content_type::ContentTypeState;
 use smithay::wayland::fifo::FifoManagerState;
 use smithay::wayland::idle_inhibit::IdleInhibitManagerState;
@@ -196,6 +197,10 @@ pub struct JffState {
     /// `content_type.rs`).
     #[allow(dead_code)]
     pub content_type_state: ContentTypeState,
+    /// ext_background_effect_v1: a surface asks for a blurred background (see
+    /// `protocol/background_effect.rs`). The global is always advertised, drawing is opt-in.
+    #[allow(dead_code)]
+    pub background_effect_state: BackgroundEffectState,
     /// zwp_keyboard_shortcuts_inhibit_v1: a client asks to get the keys jff keeps for its
     /// bindings (see `inhibit.rs`).
     pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
@@ -382,6 +387,7 @@ impl JffState {
         // wp_content_type_v1: read for a covering fullscreen window in `render_crtc` (connector
         // content type hint).
         let content_type_state = ContentTypeState::new::<Self>(&display_handle);
+        let background_effect_state = BackgroundEffectState::new::<Self>(&display_handle);
 
         // Inhibiting: keys for games, a screen that stays awake (see `inhibit.rs`).
         let keyboard_shortcuts_inhibit_state =
@@ -453,6 +459,7 @@ impl JffState {
             fractional_scale_manager_state,
             commit_timing_manager_state,
             content_type_state,
+            background_effect_state,
             keyboard_shortcuts_inhibit_state,
             idle_inhibit_state,
             idle_notifier_state,

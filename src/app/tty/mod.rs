@@ -17,12 +17,10 @@ use smithay::backend::egl::{EGLContext, EGLDevice, EGLDisplay};
 use smithay::backend::input::InputEvent;
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
-use smithay::backend::renderer::element::surface::{
-    render_elements_from_surface_tree, WaylandSurfaceRenderElement,
-};
+use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
 use smithay::backend::renderer::element::utils::select_dmabuf_feedback;
 use smithay::backend::renderer::element::{
-    default_primary_scanout_output_compare, AsRenderElements, Kind,
+    default_primary_scanout_output_compare, Kind,
     RenderElementStates,
 };
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -66,6 +64,8 @@ use crate::protocol::layer_shell::{
 };
 use crate::protocol::session_lock::LOCKED_BACKGROUND;
 use crate::render::cursor::RenderCursor;
+use crate::render::effects::background_effect::window_elements;
+use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
 use crate::render::elements::JffElement;
 use crate::state::JffState;
 
@@ -938,7 +938,7 @@ impl JffState {
             .unwrap_or_default();
 
         // front to back: cursor, then windows topmost first
-        let mut elements: Vec<JffElement<GlesRenderer>> = Vec::new();
+        let mut elements: Vec<JffElement> = Vec::new();
         let cursor_near =
             layout::contains(layout::grow(rect, CURSOR_MARGIN), (pointer.x, pointer.y));
         match self.cursor.render_cursor() {
@@ -948,15 +948,14 @@ impl JffState {
             RenderCursor::Surface { hotspot, surface } => {
                 let loc: Point<i32, Physical> =
                     (pointer.to_i32_round() - hotspot - origin).to_physical_precise_round(scale);
-                let cursor_elements: Vec<JffElement<GlesRenderer>> =
-                    render_elements_from_surface_tree(
-                        &mut *renderer,
-                        &surface,
-                        loc,
-                        scale,
-                        1.0,
-                        Kind::Cursor,
-                    );
+                let cursor_elements: Vec<JffElement> = render_elements_from_surface_tree(
+                    &mut *renderer,
+                    &surface,
+                    loc,
+                    scale,
+                    1.0,
+                    Kind::Cursor,
+                );
                 elements.extend(cursor_elements);
             }
             // themed cursor, frame picked by time (animated ones loop)
@@ -1014,6 +1013,12 @@ impl JffState {
         // frame then holds only that window (plus cursor and overlay layer), so DrmCompositor
         // can show the client's buffer on the primary plane without a copy.
         let mut direct_scanout = false;
+        // Blur is of the wallpaper alone unless `behind-windows` is set: a copy of the frame
+        // is taken once the background layers are drawn, and the window blurs read that.
+        let blur_config = (!self.config.blur().off).then(|| self.config.blur());
+        let snapshot = blur_config
+            .filter(|b| !b.behind_windows)
+            .map(|_| WallpaperSnapshot::for_output(&lit.output.name()));
         if locked {
             // locked: lock surface only
             elements.extend(crate::protocol::session_lock::lock_surface_elements(
@@ -1030,13 +1035,23 @@ impl JffState {
             // a thumbnail dragged onto another monitor stays on top there
             if overview_here.is_none() {
                 if let Some(plan) = &overview {
-                    elements.extend(overview_drag_elements(&mut *renderer, plan, origin, rect));
+                    elements.extend(overview_drag_elements(
+                        &mut *renderer,
+                        plan,
+                        origin,
+                        rect,
+                        blur_config,
+                        snapshot.as_ref(),
+                    ));
                 }
             }
             // With a fullscreen window on top only the overlay layer stays in front of it.
             direct_scanout = overview_here.is_none() && fullscreen_covers(&self.desk, rect);
+            // Blur is opt-in, and never with a window going straight to the primary plane: the
+            // blur needs the frame composited.
+            let blur = (!direct_scanout && !self.config.blur().off).then(|| self.config.blur());
             let above = layers_above(&fullscreen, rect, overview_here.is_some());
-            elements.extend(layer_elements(&mut *renderer, &lit.output, above));
+            elements.extend(layer_elements(&mut *renderer, &lit.output, above, blur));
             // popups of layers below the windows draw above them, except over a fullscreen
             // window: only the overlay layer is in front of that
             if !direct_scanout {
@@ -1044,10 +1059,17 @@ impl JffState {
                     &mut *renderer,
                     &lit.output,
                     &BELOW_WINDOWS,
+                    blur,
                 ));
             }
             if let Some(plan) = overview_here {
-                elements.extend(overview_elements(&mut *renderer, plan, origin));
+                elements.extend(overview_elements(
+                    &mut *renderer,
+                    plan,
+                    origin,
+                    blur,
+                    snapshot.as_ref(),
+                ));
             } else {
                 for entry in self.desk.top_down() {
                     let geo = entry.window.geometry();
@@ -1063,12 +1085,15 @@ impl JffState {
                     if !layout::intersects(area, rect) {
                         continue;
                     }
-                    let loc: Point<i32, Physical> =
-                        (window_origin - origin).to_physical_precise_round(scale);
-                    let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = entry
-                        .window
-                        .render_elements(&mut *renderer, loc, scale, 1.0);
-                    elements.extend(surfaces.into_iter().map(JffElement::from));
+                    // Popups and the window, each with its blur right behind it.
+                    window_elements(
+                        &mut *renderer,
+                        &entry.window,
+                        window_origin - origin,
+                        blur,
+                        snapshot.as_ref(),
+                        &mut elements,
+                    );
                     // nothing below the covering window goes in the frame
                     let size = entry.window.geometry().size;
                     if direct_scanout && (entry.pos.0, entry.pos.1, size.w, size.h) == rect {
@@ -1078,10 +1103,15 @@ impl JffState {
             }
             // Wallpapers and desktop widgets are behind everything.
             if !direct_scanout {
+                // Fills the wallpaper copy: drawn right after the background layers.
+                if let Some(snapshot) = &snapshot {
+                    elements.push(JffElement::from(snapshot.element((rect.2, rect.3).into())));
+                }
                 elements.extend(layer_body_elements(
                     &mut *renderer,
                     &lit.output,
                     &BELOW_WINDOWS,
+                    blur,
                 ));
             }
         }

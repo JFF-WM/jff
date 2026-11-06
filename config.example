@@ -1,0 +1,116 @@
+// jff example configuration
+//
+// Copy this file to ~/.config/jff/config.kdl (or point $JFF_CONFIG at it) and edit.
+// Every block is optional: anything you leave out uses the built-in default.
+
+// Number of workspaces.
+workspaces 9
+
+// Maximize new windows when they open.
+maximize-new-windows #true
+
+// Draw windows without client-side decorations (titlebars) where the app allows it.
+no-client-decorations #true
+
+// Hold this key and drag with the mouse to move/resize windows.
+drag-modifier "Super"
+
+screenshot {
+    // Where screenshots are saved. Leave out to only copy to the clipboard.
+    path "~/Pictures/"
+    include-cursor #false
+    copy-to-clipboard #true
+}
+
+// Background blur. Blur is OFF unless this block exists, writing it turns it on.
+// It only shows on surfaces that are (partly) transparent, for example a terminal with
+// opacity below 1.0, and only where the app asked for blur or `all-windows` is set.
+// By default windows blur the WALLPAPER, so a wallpaper must be set (see autostart below).
+blur {
+    passes 3            // 1-31. Each pass doubles the blur radius
+    offset 3.0          // Sample stretch above 0. Bigger is blurrier, and blockier
+    all-windows         // Also blur windows that did not ask for blur themselves
+    all-layers          // Also blur panels/launchers (top and overlay layers) that did not ask
+    // behind-windows   // Blur the windows behind a window too (default: wallpaper only)
+    // off              // Turn blur off without deleting the settings above
+}
+
+// Programs started with the session.
+// autostart "cmd" "arg" ...  runs a program directly.
+// sh-autostart "cmd"         runs a line through the shell (pipes, &, variables).
+// Examples (uncomment and adjust):
+// sh-autostart "wbg /path/to/wallpaper.jpg"
+// sh-autostart "waybar"
+// autostart "gnome-keyring-daemon" "--start" "--components=secrets"
+
+binds {
+    // Programs
+    Alt+Return { terminal; }
+    // Alt+D { spawn "fuzzel", }              // app launcher, needs fuzzel installed
+    // Super+L { spawn-sh "swaylock", }       // lock screen, needs swaylock installed
+
+    // Windows
+    Alt+M { maximize; }
+    Super+F { fullscreen; }
+    Alt+Q { close; }
+    Alt+O { overview; }
+    // MouseBack { overview, }                // mouse side button
+
+    // Session
+    Alt+Shift+R { reload-config; }
+    Ctrl+Alt+BackSpace { quit; }
+
+    // Screenshots
+    Print { screenshot-area; }
+    Ctrl+Print { screenshot-fullscreen; }
+    Alt+Print { screenshot-window; }
+
+    // Workspaces
+    Alt+1 { workspace 1; }
+    Alt+2 { workspace 2; }
+    Alt+3 { workspace 3; }
+    Alt+4 { workspace 4; }
+    Alt+5 { workspace 5; }
+    Alt+6 { workspace 6; }
+    Alt+7 { workspace 7; }
+    Alt+8 { workspace 8; }
+    Alt+9 { workspace 9; }
+    Ctrl+Alt+Right { workspace-next; }
+    Ctrl+Alt+Left { workspace-prev; }
+    Alt+Shift+1 { move-to-workspace 1; }
+    Alt+Shift+2 { move-to-workspace 2; }
+    Alt+Shift+3 { move-to-workspace 3; }
+    Alt+Shift+4 { move-to-workspace 4; }
+    Alt+Shift+5 { move-to-workspace 5; }
+    Alt+Shift+6 { move-to-workspace 6; }
+    Alt+Shift+7 { move-to-workspace 7; }
+    Alt+Shift+8 { move-to-workspace 8; }
+    Alt+Shift+9 { move-to-workspace 9; }
+}
+
+// Monitors. Optional: without this block monitors use their preferred mode.
+// Use the name your monitor has (for example from `wlr-randr`), one block per monitor.
+// outputs {
+//     output "HDMI-A-1" {
+//         position 0 0                       // top-left corner in the shared desktop
+//         mode "1920x1080@60"                // WIDTHxHEIGHT@REFRESH
+//         adaptive-sync "fullscreen"         // "off", "fullscreen" or "always" (quoted)
+//         content-type-hint
+//         // icc-profile "/path/to/profile.icm"
+//     }
+//     output "DP-1" {
+//         position 1920 0                    // place it to the right of the first
+//         mode "1920x1080@144"
+//     }
+// }
+
+keyboard {
+    // Keyboard layout (XKB). Examples: layout "us", layout "br" + variant "abnt2".
+    xkb {
+        layout "us"
+        // variant "intl"
+        // options "grp:alt_shift_toggle,caps:escape"
+    }
+    repeat-delay 300    // ms before a held key repeats
+    repeat-rate 40      // repeats per second
+}

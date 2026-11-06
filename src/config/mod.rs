@@ -4,7 +4,7 @@
 //! `~/.config/jff/config.kdl`. When none exists, the built-in [`DEFAULT_CONFIG`] is used.
 //!
 //! The format is one KDL document. Top-level nodes: `workspaces`, `maximize-new-windows`,
-//! `no-client-decorations`, `drag-modifier`, `screenshot { … }`, `keyboard { … }`,
+//! `no-client-decorations`, `drag-modifier`, `screenshot { … }`, `keyboard { … }`, `blur { … }`,
 //! `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
 //! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
@@ -305,6 +305,44 @@ impl Default for ScreenshotConfig {
     }
 }
 
+/// The `blur { … }` block: background blur for surfaces that ask for it (see
+/// `protocol/background_effect.rs`).
+///
+/// Blur is opt-in: with no `blur` block it is `off`. Writing the block turns it on, and a
+/// child `off` turns it back off without deleting the settings.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Blur {
+    pub off: bool,
+    /// Down/upsample rounds, 1 to 31. Each one doubles the blur radius.
+    pub passes: u8,
+    /// Stretch of the sample pattern, above 0. Bigger is blurrier, and blockier.
+    pub offset: f64,
+    /// Also blur behind every window that sent no blur region of its own, over the whole
+    /// window. A window that sent an empty region still gets none.
+    pub all_windows: bool,
+    /// Also blur behind panels and launchers (layer surfaces on the `top` and `overlay`
+    /// layers) that sent no blur region, over their whole area. Wallpapers (`background`)
+    /// and `bottom` widgets are left alone.
+    pub all_layers: bool,
+    /// What window blur samples. By default only the wallpaper (the `background` and `bottom`
+    /// layers): windows behind a blurred window stay sharp. With this set the blur also
+    /// takes in the windows behind, so they are blurred too.
+    pub behind_windows: bool,
+}
+
+impl Default for Blur {
+    fn default() -> Self {
+        Self {
+            off: true,
+            passes: 3,
+            offset: 3.0,
+            all_windows: false,
+            all_layers: false,
+            behind_windows: false,
+        }
+    }
+}
+
 /// The parsed configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -316,6 +354,7 @@ pub struct Config {
     no_client_decorations: bool,
     drag_modifier: DragModifier,
     screenshot: ScreenshotConfig,
+    blur: Blur,
     autostart: Vec<Action>,
 }
 
@@ -344,6 +383,7 @@ impl Default for Config {
                 no_client_decorations: false,
                 drag_modifier: DragModifier::Alt,
                 screenshot: ScreenshotConfig::default(),
+                blur: Blur::default(),
                 autostart: Vec::new(),
             }
         })
@@ -457,6 +497,11 @@ impl Config {
             Some(node) => parse_screenshot(node).context("in screenshot")?,
         };
 
+        let blur = match doc.get("blur") {
+            None => Blur::default(),
+            Some(node) => parse_blur(node).context("in blur")?,
+        };
+
         let mut autostart = Vec::new();
         for node in doc.nodes() {
             let name = node.name().value();
@@ -474,6 +519,7 @@ impl Config {
             no_client_decorations,
             drag_modifier,
             screenshot,
+            blur,
             autostart,
         })
     }
@@ -482,6 +528,11 @@ impl Config {
     /// [`Action::SpawnShell`] appear here.
     pub fn autostart(&self) -> &[Action] {
         &self.autostart
+    }
+
+    /// The blur block.
+    pub fn blur(&self) -> Blur {
+        self.blur
     }
 
     /// The screenshot block.
@@ -645,6 +696,47 @@ fn parse_keyboard(node: &KdlNode) -> anyhow::Result<KeyboardConfig> {
         }
     }
     config.validate()?;
+    Ok(config)
+}
+
+/// One number argument, as a float. Whole numbers are fine (`offset 3`).
+fn float_arg(node: &KdlNode) -> anyhow::Result<f64> {
+    let name = node.name().value();
+    match positional(node).as_slice() {
+        [value] => value
+            .as_float()
+            .or_else(|| value.as_integer().map(|n| n as f64))
+            .with_context(|| format!("{name} takes a number")),
+        _ => bail!("{name} takes one number"),
+    }
+}
+
+/// The `blur { … }` block. Having the block at all turns blur on.
+fn parse_blur(node: &KdlNode) -> anyhow::Result<Blur> {
+    let mut config = Blur {
+        off: false,
+        ..Blur::default()
+    };
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "off" => config.off = flag_value(child)?,
+            "all-windows" => config.all_windows = flag_value(child)?,
+            "all-layers" => config.all_layers = flag_value(child)?,
+            "behind-windows" => config.behind_windows = flag_value(child)?,
+            "passes" => {
+                config.passes = u8::try_from(int_arg(child, 31)?)
+                    .ok()
+                    .filter(|n| *n >= 1)
+                    .context("passes takes a number from 1 to 31")?;
+            }
+            "offset" => {
+                config.offset = Some(float_arg(child)?)
+                    .filter(|x| x.is_finite() && *x > 0.)
+                    .context("offset takes a number above 0")?;
+            }
+            other => bail!("unknown blur setting {other:?}"),
+        }
+    }
     Ok(config)
 }
 
@@ -1300,5 +1392,57 @@ sh-autostart "a && b""#,
         assert!(Config::parse("binds { Alt+M { fly; } }").is_err());
         assert!(Config::parse("binds { Alt+M { spawn; } }").is_err());
         assert!(Config::parse("binds { Alt+M { maximize 1; } }").is_err());
+    }
+
+    #[test]
+    fn blur_is_off_without_a_block_and_on_with_one() {
+        assert!(Config::default().blur().off);
+        let blur = Config::parse("blur {}").unwrap().blur();
+        assert!(!blur.off);
+        assert_eq!((blur.passes, blur.offset), (3, 3.0));
+    }
+
+    #[test]
+    fn blur_settings_are_read() {
+        let blur = Config::parse("blur { passes 5; offset 2.5; }")
+            .unwrap()
+            .blur();
+        assert_eq!((blur.passes, blur.offset), (5, 2.5));
+        assert_eq!(
+            Config::parse("blur { offset 2; }").unwrap().blur().offset,
+            2.0
+        );
+        assert!(Config::parse("blur { off; passes 4; }").unwrap().blur().off);
+        assert!(!Config::parse("blur {}").unwrap().blur().all_windows);
+        assert!(
+            Config::parse("blur { all-windows; }")
+                .unwrap()
+                .blur()
+                .all_windows
+        );
+        assert!(Config::parse("blur { all-windows 3; }").is_err());
+        assert!(!Config::parse("blur {}").unwrap().blur().all_layers);
+        assert!(
+            Config::parse("blur { all-layers; }")
+                .unwrap()
+                .blur()
+                .all_layers
+        );
+        assert!(!Config::parse("blur {}").unwrap().blur().behind_windows);
+        assert!(
+            Config::parse("blur { behind-windows; }")
+                .unwrap()
+                .blur()
+                .behind_windows
+        );
+    }
+
+    #[test]
+    fn blur_rejects_bad_values() {
+        assert!(Config::parse("blur { passes 0; }").is_err());
+        assert!(Config::parse("blur { passes 32; }").is_err());
+        assert!(Config::parse("blur { offset 0; }").is_err());
+        assert!(Config::parse("blur { offset \"x\"; }").is_err());
+        assert!(Config::parse("blur { radius 3; }").is_err());
     }
 }

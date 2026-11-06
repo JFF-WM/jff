@@ -37,12 +37,15 @@ use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Scale, Serial, SERIAL_COUNTER};
 
+use crate::config;
 use crate::feature::outputs::output_rect;
 use crate::input::{BTN_LEFT, BTN_MIDDLE};
 use crate::primitives::geom::Size;
 use crate::primitives::layout::{self, Rect};
 use crate::primitives::overview_grid::{self as overview, Dir, Thumb};
 use crate::protocol::layer_shell::{ABOVE_WINDOWS, BELOW_WINDOWS};
+use crate::render::effects::background_effect::render_for_surface_zoomed;
+use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
 use crate::render::elements::JffElement;
 use crate::state::JffState;
 
@@ -167,7 +170,9 @@ fn thumb_elements(
     window: &Window,
     thumb: &Thumb,
     origin: Point<i32, Logical>,
-    out: &mut Vec<JffElement<GlesRenderer>>,
+    blur: Option<config::Blur>,
+    out: &mut Vec<JffElement>,
+    snapshot: Option<&WallpaperSnapshot>,
 ) {
     let scale = Scale::from(1.0f64);
     // Draw the window at (0, 0) with its geometry corner, shrink it around that corner, then
@@ -192,16 +197,41 @@ fn thumb_elements(
             Relocate::Relative,
         )));
     }
+    // The blur goes right behind the thumbnail: after its elements in the list. The window's
+    // origin sits at the slot minus its geometry offset, both shrunk with the thumbnail.
+    if let (Some(blur), Some(toplevel)) = (blur, window.toplevel()) {
+        let surface_loc = Point::<f64, Logical>::from((
+            (thumb.pos.0 - origin.x) as f64 - geo.loc.x as f64 * thumb.scale,
+            (thumb.pos.1 - origin.y) as f64 - geo.loc.y as f64 * thumb.scale,
+        ));
+        render_for_surface_zoomed(
+            toplevel.wl_surface(),
+            surface_loc,
+            thumb.scale,
+            blur.all_windows.then_some(geo),
+            1.0,
+            blur,
+            &mut |element| {
+                // With a snapshot the blur is of the wallpaper alone, whatever is behind.
+                out.push(JffElement::from(element.with_wallpaper_source(snapshot)));
+            },
+        );
+    }
 }
 
 /// Thumbnails and highlight, front to back. `origin` is the monitor's top-left in the shared
 /// space, elements are placed relative to it.
+///
+/// `snapshot`: blur the wallpaper copy in it rather than the live frame (`None`: the live
+/// frame, so windows behind a thumbnail are blurred too).
 pub fn overview_elements(
     renderer: &mut GlesRenderer,
     plan: &OverviewPlan,
     origin: Point<i32, Logical>,
-) -> Vec<JffElement<GlesRenderer>> {
-    let mut out: Vec<JffElement<GlesRenderer>> = Vec::new();
+    blur: Option<config::Blur>,
+    snapshot: Option<&WallpaperSnapshot>,
+) -> Vec<JffElement> {
+    let mut out: Vec<JffElement> = Vec::new();
 
     // The dragged thumbnail sits in front of the rest.
     let order = plan
@@ -210,7 +240,7 @@ pub fn overview_elements(
         .chain((0..plan.thumbs.len()).filter(|i| Some(*i) != plan.dragged));
     for i in order {
         let (window, thumb) = &plan.thumbs[i];
-        thumb_elements(renderer, window, thumb, origin, &mut out);
+        thumb_elements(renderer, window, thumb, origin, blur, &mut out, snapshot);
     }
 
     // The highlight is pushed last so it's drawn behind: only its rim shows.
@@ -245,11 +275,13 @@ pub fn overview_drag_elements(
     plan: &OverviewPlan,
     origin: Point<i32, Logical>,
     rect: Rect,
-) -> Vec<JffElement<GlesRenderer>> {
-    let mut out: Vec<JffElement<GlesRenderer>> = Vec::new();
+    blur: Option<config::Blur>,
+    snapshot: Option<&WallpaperSnapshot>,
+) -> Vec<JffElement> {
+    let mut out: Vec<JffElement> = Vec::new();
     if let Some((window, thumb)) = plan.dragged.and_then(|i| plan.thumbs.get(i)) {
         if layout::intersects(thumb.rect(), rect) {
-            thumb_elements(renderer, window, thumb, origin, &mut out);
+            thumb_elements(renderer, window, thumb, origin, blur, &mut out, snapshot);
         }
     }
     out

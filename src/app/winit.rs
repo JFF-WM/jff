@@ -3,8 +3,6 @@
 use std::time::Duration;
 
 use anyhow::anyhow;
-use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
-use smithay::backend::renderer::element::AsRenderElements;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent, WinitEventLoop};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
@@ -17,6 +15,8 @@ use crate::protocol::layer_shell::{
     layer_body_elements, layer_elements, layer_popup_elements, layers_above, ABOVE_WINDOWS,
     BELOW_WINDOWS,
 };
+use crate::render::effects::background_effect::window_elements;
+use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
 use crate::render::elements::JffElement;
 use crate::state::JffState;
 
@@ -116,13 +116,21 @@ impl JffState {
             .map(|o| layers_above(&fullscreen, output_rect(o), overview.is_some()))
             .unwrap_or(&ABOVE_WINDOWS);
         let locked = self.session_lock.is_locked();
+        // Blur is opt-in: `None` keeps every blur call below out of the frame.
+        let blur = (!self.config.blur().off).then(|| self.config.blur());
         let Backend::Winit(winit) = &mut self.backend else {
             return;
         };
         let scale = Scale::from(1.0f64);
 
         // front to back: topmost first
-        let mut elements: Vec<JffElement<GlesRenderer>> = Vec::new();
+        let mut elements: Vec<JffElement> = Vec::new();
+        // Blur is of the wallpaper alone unless `behind-windows` is set: a copy of the frame
+        // is taken once the background layers are drawn, and the window blurs read that.
+        let snapshot = blur
+            .filter(|b| !b.behind_windows)
+            .zip(layer_output.as_ref())
+            .map(|(_, output)| WallpaperSnapshot::for_output(&output.name()));
         {
             let renderer = winit.renderer();
             // dnd icon goes above everything
@@ -177,25 +185,50 @@ impl JffState {
                 ));
             } else {
                 if let Some(output) = &layer_output {
-                    elements.extend(layer_elements(&mut *renderer, output, above));
+                    elements.extend(layer_elements(&mut *renderer, output, above, blur));
                     // popups of layers below the windows still draw above them
-                    elements.extend(layer_popup_elements(&mut *renderer, output, &BELOW_WINDOWS));
+                    elements.extend(layer_popup_elements(
+                        &mut *renderer,
+                        output,
+                        &BELOW_WINDOWS,
+                        blur,
+                    ));
                 }
                 if let Some(plan) = &overview {
-                    elements.extend(overview_elements(&mut *renderer, plan, origin));
+                    elements.extend(overview_elements(
+                        &mut *renderer,
+                        plan,
+                        origin,
+                        blur,
+                        snapshot.as_ref(),
+                    ));
                 } else {
                     for entry in self.desk.top_down() {
                         let geo = entry.window.geometry();
                         let pos: Point<i32, Logical> = Point::from(entry.pos) - geo.loc;
-                        let loc: Point<i32, Physical> = pos.to_physical_precise_round(scale);
-                        let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = entry
-                            .window
-                            .render_elements(&mut *renderer, loc, scale, 1.0);
-                        elements.extend(surfaces.into_iter().map(JffElement::from));
+                        // Popups and the window, each with its blur right behind it.
+                        window_elements(
+                            &mut *renderer,
+                            &entry.window,
+                            pos,
+                            blur,
+                            snapshot.as_ref(),
+                            &mut elements,
+                        );
                     }
                 }
+                // Fills the wallpaper copy: drawn right after the background layers.
+                if let (Some(snapshot), Some(output)) = (&snapshot, &layer_output) {
+                    let rect = output_rect(output);
+                    elements.push(JffElement::from(snapshot.element((rect.2, rect.3).into())));
+                }
                 if let Some(output) = &layer_output {
-                    elements.extend(layer_body_elements(&mut *renderer, output, &BELOW_WINDOWS));
+                    elements.extend(layer_body_elements(
+                        &mut *renderer,
+                        output,
+                        &BELOW_WINDOWS,
+                        blur,
+                    ));
                 }
             }
         }

@@ -167,7 +167,7 @@ pub fn input_popup_elements(
     placed: &[PlacedPopup],
     rect: Rect,
     scale: Scale<f64>,
-) -> Vec<JffElement<GlesRenderer>> {
+) -> Vec<JffElement> {
     let origin: Point<i32, Logical> = (rect.0, rect.1).into();
     let mut out = Vec::new();
     for popup in placed.iter().rev() {

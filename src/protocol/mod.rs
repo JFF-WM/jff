@@ -1,5 +1,6 @@
 //! One module per Wayland protocol family (handlers and their wiring).
 
+pub mod background_effect;
 pub mod content_type;
 pub mod ext_foreign_toplevel;
 pub mod foreign_toplevel;

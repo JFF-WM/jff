@@ -228,14 +228,14 @@ fn cursor_elements(
     origin: Point<i32, Logical>,
     scale: Scale<f64>,
     millis: u32,
-) -> Vec<JffElement<GlesRenderer>> {
-    let mut elements: Vec<JffElement<GlesRenderer>> = Vec::new();
+) -> Vec<JffElement> {
+    let mut elements: Vec<JffElement> = Vec::new();
     match cursor {
         RenderCursor::Hidden => {}
         RenderCursor::Surface { hotspot, surface } => {
             let loc: Point<i32, Physical> =
                 (pointer.to_i32_round() - hotspot - origin).to_physical_precise_round(scale);
-            let surfaces: Vec<JffElement<GlesRenderer>> = render_elements_from_surface_tree(
+            let surfaces: Vec<JffElement> = render_elements_from_surface_tree(
                 &mut *renderer,
                 &surface,
                 loc,
@@ -299,7 +299,7 @@ impl JffState {
             .then(|| self.cursor.render_cursor());
 
         let renderer = self.backend.renderer();
-        let mut elements: Vec<JffElement<GlesRenderer>> = Vec::new();
+        let mut elements: Vec<JffElement> = Vec::new();
         if let Some(cursor) = cursor {
             elements.extend(cursor_elements(
                 &mut *renderer,
@@ -311,8 +311,13 @@ impl JffState {
             ));
         }
         let above = layers_above(&fullscreen, rect, false);
-        elements.extend(layer_elements(&mut *renderer, output, above));
-        elements.extend(layer_popup_elements(&mut *renderer, output, &BELOW_WINDOWS));
+        elements.extend(layer_elements(&mut *renderer, output, above, None));
+        elements.extend(layer_popup_elements(
+            &mut *renderer,
+            output,
+            &BELOW_WINDOWS,
+            None,
+        ));
         for entry in self.desk.top_down() {
             let geo = entry.window.geometry();
             let window_origin: Point<i32, Logical> = Point::from(entry.pos) - geo.loc;
@@ -334,7 +339,12 @@ impl JffState {
                 .render_elements(&mut *renderer, loc, scale, 1.0);
             elements.extend(surfaces.into_iter().map(JffElement::from));
         }
-        elements.extend(layer_body_elements(&mut *renderer, output, &BELOW_WINDOWS));
+        elements.extend(layer_body_elements(
+            &mut *renderer,
+            output,
+            &BELOW_WINDOWS,
+            None,
+        ));
 
         render_to_rgba(
             renderer,
@@ -582,11 +592,8 @@ pub fn report_failure(why: &str) {
 
 /// The area selection as render elements, front to back: frame around the selection, dimmed
 /// rest, frozen monitor. They stand in for everything but the cursor on the frozen monitor.
-pub fn screenshot_elements(
-    renderer: &mut GlesRenderer,
-    ui: &ScreenshotUi,
-) -> Vec<JffElement<GlesRenderer>> {
-    let mut out: Vec<JffElement<GlesRenderer>> = Vec::new();
+pub fn screenshot_elements(renderer: &mut GlesRenderer, ui: &ScreenshotUi) -> Vec<JffElement> {
+    let mut out: Vec<JffElement> = Vec::new();
     let origin = (ui.rect.0, ui.rect.1);
     let full: Rect = (0, 0, ui.width as i32, ui.height as i32);
     // Selection in picture pixels, kept inside the picture.

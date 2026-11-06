@@ -17,7 +17,7 @@
 use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
 };
-use smithay::backend::renderer::element::{AsRenderElements, Kind};
+use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::desktop::utils::under_from_surface_tree;
@@ -37,9 +37,11 @@ use smithay::wayland::shell::wlr_layer::{
 };
 use smithay::wayland::shell::xdg::PopupSurface;
 
+use crate::config;
 use crate::desk::Desk;
 use crate::feature::outputs::output_rect;
 use crate::primitives::layout::{self, Rect};
+use crate::render::effects::background_effect::{popup_elements, render_for_surface};
 use crate::render::elements::JffElement;
 use crate::state::JffState;
 
@@ -117,14 +119,18 @@ pub(crate) fn is_mapped(surface: &WlSurface) -> bool {
 }
 
 /// Render elements of the layer surfaces of `output` on one of `layers`, front to back.
+///
+/// `blur`: `Some` draws the blurred background of surfaces that asked for one, right behind
+/// them. Pass `None` for no blur (screenshots, blur off).
 pub fn layer_elements(
     renderer: &mut GlesRenderer,
     output: &Output,
     layers: &[Layer],
-) -> Vec<JffElement<GlesRenderer>> {
+    blur: Option<config::Blur>,
+) -> Vec<JffElement> {
     let scale = Scale::from(1.0f64);
     let map = layer_map_for_output(output);
-    let mut out: Vec<JffElement<GlesRenderer>> = Vec::new();
+    let mut out: Vec<JffElement> = Vec::new();
     for layer in layers {
         // Later surfaces of a layer are drawn on top of earlier ones.
         for surface in map.layers_on(*layer).rev() {
@@ -133,12 +139,57 @@ pub fn layer_elements(
             };
             // Layer geometry is relative to the monitor, like the frame being drawn.
             let loc: Point<i32, Physical> = geo.loc.to_physical_precise_round(scale);
+            // Popups in front, each with its blur right behind it.
+            popup_elements(
+                &mut *renderer,
+                surface.wl_surface(),
+                geo.loc,
+                (0, 0).into(),
+                blur,
+                blur.is_some_and(|b| b.all_layers),
+                &mut out,
+            );
             let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                surface.render_elements(&mut *renderer, loc, scale, 1.0);
+                render_elements_from_surface_tree(
+                    &mut *renderer,
+                    surface.wl_surface(),
+                    loc,
+                    scale,
+                    1.0,
+                    Kind::Unspecified,
+                );
             out.extend(elements.into_iter().map(JffElement::from));
+            push_layer_blur(&mut out, surface.wl_surface(), geo, *layer, blur);
         }
     }
     out
+}
+
+/// The blur behind a layer surface, pushed after (behind) its own elements.
+fn push_layer_blur(
+    out: &mut Vec<JffElement>,
+    surface: &WlSurface,
+    geo: Rectangle<i32, Logical>,
+    layer: Layer,
+    blur: Option<config::Blur>,
+) {
+    let Some(blur) = blur else {
+        return;
+    };
+    // Without a region of its own, `all-layers` blurs panels and launchers whole. Not the
+    // wallpaper or `bottom` widgets: nothing worth blurring is behind them.
+    let on_blurred_layer = matches!(layer, Layer::Top | Layer::Overlay);
+    let fallback = (blur.all_layers && on_blurred_layer).then(|| Rectangle::from_size(geo.size));
+    render_for_surface(
+        surface,
+        geo.loc.to_f64(),
+        fallback,
+        1.0,
+        blur,
+        &mut |element| {
+            out.push(JffElement::from(element));
+        },
+    );
 }
 
 /// Like `layer_elements` but only the layer surfaces themselves, without their menus.
@@ -146,10 +197,11 @@ pub fn layer_body_elements(
     renderer: &mut GlesRenderer,
     output: &Output,
     layers: &[Layer],
-) -> Vec<JffElement<GlesRenderer>> {
+    blur: Option<config::Blur>,
+) -> Vec<JffElement> {
     let scale = Scale::from(1.0f64);
     let map = layer_map_for_output(output);
-    let mut out: Vec<JffElement<GlesRenderer>> = Vec::new();
+    let mut out: Vec<JffElement> = Vec::new();
     for layer in layers {
         for surface in map.layers_on(*layer).rev() {
             let Some(geo) = map.layer_geometry(surface) else {
@@ -166,6 +218,7 @@ pub fn layer_body_elements(
                     Kind::Unspecified,
                 );
             out.extend(elements.into_iter().map(JffElement::from));
+            push_layer_blur(&mut out, surface.wl_surface(), geo, *layer, blur);
         }
     }
     out
@@ -177,30 +230,24 @@ pub fn layer_popup_elements(
     renderer: &mut GlesRenderer,
     output: &Output,
     layers: &[Layer],
-) -> Vec<JffElement<GlesRenderer>> {
-    let scale = Scale::from(1.0f64);
+    blur: Option<config::Blur>,
+) -> Vec<JffElement> {
     let map = layer_map_for_output(output);
-    let mut out: Vec<JffElement<GlesRenderer>> = Vec::new();
+    let mut out: Vec<JffElement> = Vec::new();
     for layer in layers {
         for surface in map.layers_on(*layer).rev() {
             let Some(geo) = map.layer_geometry(surface) else {
                 continue;
             };
-            let loc: Point<i32, Physical> = geo.loc.to_physical_precise_round(scale);
-            for (popup, popup_offset) in PopupManager::popups_for_surface(surface.wl_surface()) {
-                let offset: Point<i32, Physical> =
-                    (popup_offset - popup.geometry().loc).to_physical_precise_round(scale);
-                let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                    render_elements_from_surface_tree(
-                        &mut *renderer,
-                        popup.wl_surface(),
-                        loc + offset,
-                        scale,
-                        1.0,
-                        Kind::Unspecified,
-                    );
-                out.extend(elements.into_iter().map(JffElement::from));
-            }
+            popup_elements(
+                &mut *renderer,
+                surface.wl_surface(),
+                geo.loc,
+                (0, 0).into(),
+                blur,
+                blur.is_some_and(|b| b.all_layers),
+                &mut out,
+            );
         }
     }
     out
