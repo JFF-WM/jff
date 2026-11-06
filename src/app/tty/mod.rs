@@ -65,6 +65,7 @@ use crate::protocol::layer_shell::{
 use crate::protocol::session_lock::LOCKED_BACKGROUND;
 use crate::render::cursor::RenderCursor;
 use crate::render::effects::background_effect::window_elements;
+use crate::render::effects::border::BorderPaint;
 use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
 use crate::render::elements::JffElement;
 use crate::state::JffState;
@@ -1073,6 +1074,7 @@ impl JffState {
             } else {
                 let radius = self.config.radius();
                 let popup_radius = self.config.popup_radius();
+                let border = self.config.border();
                 for entry in self.desk.top_down() {
                     let geo = entry.window.geometry();
                     let window_origin: Point<i32, Logical> = Point::from(entry.pos) - geo.loc;
@@ -1096,6 +1098,7 @@ impl JffState {
                         snapshot.as_ref(),
                         radius,
                         popup_radius,
+                        BorderPaint::of(border, &entry.window, self.focused_window.as_ref()),
                         &mut elements,
                     );
                     // nothing below the covering window goes in the frame

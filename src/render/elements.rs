@@ -9,6 +9,7 @@ use smithay::backend::renderer::element::utils::{RelocateRenderElement, RescaleR
 use smithay::backend::renderer::gles::element::PixelShaderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 
+use crate::render::effects::border::BorderElement;
 use crate::render::effects::framebuffer_effect::FramebufferEffectElement;
 use crate::render::effects::rounded::{RoundedSurfaceElement, RoundedThumbElement};
 
@@ -29,4 +30,6 @@ render_elements! {
     RoundedThumb = RoundedThumbElement,
     /// The rounded outline around the selected overview thumbnail.
     Ring = PixelShaderElement,
+    /// A window's border: a ring that keeps its id while it changes colour or turns.
+    Border = BorderElement,
 }

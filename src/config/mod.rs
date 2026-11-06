@@ -4,7 +4,7 @@
 //! `~/.config/jff/config.kdl`. When none exists, the built-in [`DEFAULT_CONFIG`] is used.
 //!
 //! The format is one KDL document. Top-level nodes: `workspaces`, `maximize-new-windows`,
-//! `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `screenshot { … }`,
+//! `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `keyboard { … }`, `blur { … }`, `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
 //! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
@@ -41,6 +41,16 @@ pub const MAX_GAPS: i32 = 512;
 pub const DEFAULT_RADIUS: i32 = 0;
 /// Upper bound for `radius`.
 pub const MAX_RADIUS: i32 = 256;
+
+/// Border around windows: width used when a `border { }` block gives none, its upper bound,
+/// and the focus fade.
+pub const DEFAULT_BORDER_WIDTH: i32 = 2;
+pub const MAX_BORDER_WIDTH: i32 = 64;
+pub const DEFAULT_BORDER_FADE_MS: i32 = 150;
+pub const MAX_BORDER_FADE_MS: i32 = 5000;
+/// Time one turn of an animated border takes, and its upper bound (10 minutes).
+pub const DEFAULT_BORDER_PERIOD_MS: i32 = 3000;
+pub const MAX_BORDER_PERIOD_MS: i32 = 600_000;
 
 /// Default key repeat delay (ms) and rate (per second).
 pub const DEFAULT_REPEAT_DELAY: i32 = 200;
@@ -353,6 +363,75 @@ impl Default for Blur {
     }
 }
 
+/// How the border of the focused window moves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BorderAnimation {
+    /// Standing still.
+    #[default]
+    None,
+    /// A two-colour gradient that turns around the window.
+    Spin,
+    /// A short highlight of the second colour that travels around the window.
+    Sweep,
+}
+
+/// The `border { … }` block: an outline drawn just outside every window that isn't fullscreen.
+///
+/// Opt-in: with no block `width` is 0 and nothing is drawn. Colours are straight (not
+/// premultiplied) RGBA, 0.0 to 1.0.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Border {
+    /// Width in pixels, 0 = no border.
+    pub width: i32,
+    /// Colour of a window that doesn't have the keyboard.
+    pub color: [f32; 4],
+    /// Colour of the window that has it.
+    pub focus_color: [f32; 4],
+    /// How long the colour takes to change when focus moves, in milliseconds (0 = at once).
+    pub fade_ms: i32,
+    /// Motion of the focused window's border.
+    pub animate: BorderAnimation,
+    /// Time of one turn of the animation, in milliseconds (0 = standing still).
+    pub period_ms: i32,
+    /// Second colour of the animation, `None` = the same as `focus_color` (nothing to see).
+    pub focus_color_2: Option<[f32; 4]>,
+}
+
+impl Border {
+    pub fn on(&self) -> bool {
+        self.width > 0
+    }
+
+    /// Second colour of the animation.
+    pub fn focus_color_2(&self) -> [f32; 4] {
+        self.focus_color_2.unwrap_or(self.focus_color)
+    }
+
+    /// Whether the focused window's border moves at all. It doesn't with `animate none`, a
+    /// period of 0, or a second colour equal to the first (the motion would be invisible), so
+    /// no frames are spent on it then.
+    pub fn animated(&self) -> bool {
+        self.on()
+            && self.animate != BorderAnimation::None
+            && self.period_ms > 0
+            && self.focus_color_2() != self.focus_color
+    }
+}
+
+impl Default for Border {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            color: [0.35, 0.35, 0.40, 1.0],
+            focus_color: [0.35, 0.55, 0.95, 1.0],
+            fade_ms: DEFAULT_BORDER_FADE_MS,
+            animate: BorderAnimation::None,
+            period_ms: DEFAULT_BORDER_PERIOD_MS,
+            focus_color_2: None,
+        }
+    }
+}
+
 /// The parsed configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -370,6 +449,7 @@ pub struct Config {
     /// Corner radius of popups (menus, popovers) for the blur behind them. `None`: same as
     /// `radius`.
     popup_radius: Option<i32>,
+    border: Border,
     screenshot: ScreenshotConfig,
     blur: Blur,
     autostart: Vec<Action>,
@@ -402,6 +482,7 @@ impl Default for Config {
                 gaps: DEFAULT_GAPS,
                 radius: DEFAULT_RADIUS,
                 popup_radius: None,
+                border: Border::default(),
                 screenshot: ScreenshotConfig::default(),
                 blur: Blur::default(),
                 autostart: Vec::new(),
@@ -520,6 +601,11 @@ impl Config {
             Some(node) => Some(int_arg(node, MAX_RADIUS)?),
         };
 
+        let border = match doc.get("border") {
+            None => Border::default(),
+            Some(node) => parse_border(node).context("in border")?,
+        };
+
         let keyboard = match doc.get("keyboard") {
             None => KeyboardConfig::default(),
             Some(node) => parse_keyboard(node).context("in keyboard")?,
@@ -554,6 +640,7 @@ impl Config {
             gaps,
             radius,
             popup_radius,
+            border,
             screenshot,
             blur,
             autostart,
@@ -563,6 +650,17 @@ impl Config {
     /// Corner radius in pixels of windows that aren't fullscreen (0 by default: square).
     pub fn radius(&self) -> i32 {
         self.radius
+    }
+
+    /// The border block (`width` 0 when there is none).
+    pub fn border(&self) -> Border {
+        self.border
+    }
+
+    /// Pixels kept free on each side of a maximized window: `gaps`, but at least the border
+    /// width, which is drawn outside the window and would otherwise be cut off by the screen.
+    pub fn maximize_inset(&self) -> i32 {
+        self.gaps.max(self.border.width)
     }
 
     /// Corner radius in pixels the blur behind popups (menus, popovers) is shaped with: the
@@ -723,6 +821,67 @@ fn int_arg(node: &KdlNode, max: i32) -> anyhow::Result<i32> {
             .with_context(|| format!("{name} takes a number from 0 to {max}")),
         _ => bail!("{name} takes one number from 0 to {max}"),
     }
+}
+
+/// `period-ms`: a number of milliseconds, or `"none"` for 0 (standing still).
+fn period_arg(node: &KdlNode) -> anyhow::Result<i32> {
+    if let [value] = positional(node).as_slice() {
+        if value.as_string() == Some("none") {
+            return Ok(0);
+        }
+    }
+    int_arg(node, MAX_BORDER_PERIOD_MS)
+}
+
+/// A colour written as `"#rgb"`, `"#rgba"`, `"#rrggbb"` or `"#rrggbbaa"`, as straight RGBA.
+fn parse_color(text: &str) -> anyhow::Result<[f32; 4]> {
+    let hex = text
+        .strip_prefix('#')
+        .with_context(|| format!("colour {text:?} must start with #"))?;
+    let digits: Vec<u8> = hex
+        .chars()
+        .map(|c| c.to_digit(16).and_then(|d| u8::try_from(d).ok()))
+        .collect::<Option<_>>()
+        .with_context(|| format!("colour {text:?} has a character that isn't a hex digit"))?;
+    let [r, g, b, a] = match digits.as_slice() {
+        [r, g, b] => [r * 17, g * 17, b * 17, 255],
+        [r, g, b, a] => [r * 17, g * 17, b * 17, a * 17],
+        [r1, r2, g1, g2, b1, b2] => [r1 * 16 + r2, g1 * 16 + g2, b1 * 16 + b2, 255],
+        [r1, r2, g1, g2, b1, b2, a1, a2] => {
+            [r1 * 16 + r2, g1 * 16 + g2, b1 * 16 + b2, a1 * 16 + a2]
+        }
+        _ => bail!("colour {text:?} must have 3, 4, 6 or 8 hex digits"),
+    };
+    Ok([r, g, b, a].map(|v| f32::from(v) / 255.0))
+}
+
+/// The `border { … }` block. Having the block at all turns borders on (2 px unless `width`
+/// says otherwise, `width 0` turns them off again).
+fn parse_border(node: &KdlNode) -> anyhow::Result<Border> {
+    let mut config = Border {
+        width: DEFAULT_BORDER_WIDTH,
+        ..Border::default()
+    };
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "width" => config.width = int_arg(child, MAX_BORDER_WIDTH)?,
+            "color" => config.color = parse_color(&string_arg(child)?)?,
+            "focus-color" => config.focus_color = parse_color(&string_arg(child)?)?,
+            "fade-ms" => config.fade_ms = int_arg(child, MAX_BORDER_FADE_MS)?,
+            "focus-color-2" => config.focus_color_2 = Some(parse_color(&string_arg(child)?)?),
+            "animate" => {
+                config.animate = match string_arg(child)?.as_str() {
+                    "none" => BorderAnimation::None,
+                    "spin" => BorderAnimation::Spin,
+                    "sweep" => BorderAnimation::Sweep,
+                    other => bail!("animate takes \"none\", \"spin\" or \"sweep\", not {other:?}"),
+                }
+            }
+            "period-ms" => config.period_ms = period_arg(child)?,
+            other => bail!("unknown border setting {other:?}"),
+        }
+    }
+    Ok(config)
 }
 
 /// The `keyboard { … }` block.
@@ -1503,9 +1662,134 @@ sh-autostart "a && b""#,
         assert_eq!(Config::parse("radius 12").unwrap().popup_radius(), 12);
         let own = Config::parse("radius 16\npopup-radius 10").unwrap();
         assert_eq!((own.radius(), own.popup_radius()), (16, 10));
-        assert_eq!(Config::parse("popup-radius 0\nradius 8").unwrap().popup_radius(), 0);
+        assert_eq!(
+            Config::parse("popup-radius 0\nradius 8")
+                .unwrap()
+                .popup_radius(),
+            0
+        );
         assert!(Config::parse("popup-radius -1").is_err());
         assert!(Config::parse(&format!("popup-radius {}", MAX_RADIUS + 1)).is_err());
+    }
+
+    #[test]
+    fn colours_parse() {
+        assert_eq!(parse_color("#000").unwrap(), [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(parse_color("#fff").unwrap(), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(parse_color("#ff0000").unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(
+            parse_color("#0f08").unwrap(),
+            [0.0, 1.0, 0.0, 136.0 / 255.0]
+        );
+        assert_eq!(parse_color("#00000000").unwrap()[3], 0.0);
+        assert_eq!(parse_color("#FFFFFF80").unwrap()[3], 128.0 / 255.0);
+        assert!(parse_color("ffffff").is_err());
+        assert!(parse_color("#ff").is_err());
+        assert!(parse_color("#fffff").is_err());
+        assert!(parse_color("#gggggg").is_err());
+        assert!(parse_color("#").is_err());
+    }
+
+    #[test]
+    fn border_is_off_without_a_block_and_on_with_one() {
+        assert!(!Config::default().border().on());
+        assert!(!Config::parse("gaps 4").unwrap().border().on());
+        let on = Config::parse("border {}").unwrap().border();
+        assert!(on.on());
+        assert_eq!(on.width, DEFAULT_BORDER_WIDTH);
+        assert_eq!(on.fade_ms, DEFAULT_BORDER_FADE_MS);
+        // Nothing moves unless asked to.
+        assert_eq!(on.animate, BorderAnimation::None);
+        assert_eq!(on.period_ms, DEFAULT_BORDER_PERIOD_MS);
+        assert_eq!(on.focus_color_2(), on.focus_color);
+        assert!(!on.animated());
+    }
+
+    #[test]
+    fn border_animation_is_read() {
+        let b = Config::parse(
+            "border { animate \"spin\"; period-ms 2000; focus-color-2 \"#ff0000\"; }",
+        )
+        .unwrap()
+        .border();
+        assert_eq!(b.animate, BorderAnimation::Spin);
+        assert_eq!(b.period_ms, 2000);
+        assert_eq!(b.focus_color_2(), [1.0, 0.0, 0.0, 1.0]);
+        assert!(b.animated());
+        let sweep = Config::parse("border { animate \"sweep\"; focus-color-2 \"#fff\"; }")
+            .unwrap()
+            .border();
+        assert_eq!(sweep.animate, BorderAnimation::Sweep);
+        assert_eq!(sweep.period_ms, DEFAULT_BORDER_PERIOD_MS);
+        assert!(sweep.animated());
+    }
+
+    #[test]
+    fn border_animation_needs_all_of_its_parts() {
+        // The default second colour is the first one: nothing to see, nothing to render.
+        assert!(!Config::parse("border { animate \"spin\"; }")
+            .unwrap()
+            .border()
+            .animated());
+        // A period of 0 or "none" stands still.
+        let zero = "border { animate \"spin\"; focus-color-2 \"#f00\"; period-ms 0; }";
+        assert!(!Config::parse(zero).unwrap().border().animated());
+        let none = "border { animate \"spin\"; focus-color-2 \"#f00\"; period-ms \"none\"; }";
+        let none = Config::parse(none).unwrap().border();
+        assert_eq!(none.period_ms, 0);
+        assert!(!none.animated());
+        // `animate none` ignores the rest.
+        let off = "border { animate \"none\"; focus-color-2 \"#f00\"; }";
+        assert!(!Config::parse(off).unwrap().border().animated());
+        // No width, no border, no animation.
+        let flat = "border { width 0; animate \"spin\"; focus-color-2 \"#f00\"; }";
+        assert!(!Config::parse(flat).unwrap().border().animated());
+    }
+
+    #[test]
+    fn border_settings_are_read() {
+        let b = Config::parse(
+            "border { width 3; color \"#102030\"; focus-color \"#ff000080\"; fade-ms 0; }",
+        )
+        .unwrap()
+        .border();
+        assert_eq!(b.width, 3);
+        assert_eq!(b.color, [16.0 / 255.0, 32.0 / 255.0, 48.0 / 255.0, 1.0]);
+        assert_eq!(b.focus_color, [1.0, 0.0, 0.0, 128.0 / 255.0]);
+        assert_eq!(b.fade_ms, 0);
+        assert!(!Config::parse("border { width 0; }").unwrap().border().on());
+    }
+
+    #[test]
+    fn border_rejects_bad_values() {
+        assert!(Config::parse("border { width -1; }").is_err());
+        assert!(Config::parse(&format!("border {{ width {}; }}", MAX_BORDER_WIDTH + 1)).is_err());
+        assert!(Config::parse("border { color 3; }").is_err());
+        assert!(Config::parse("border { color \"red\"; }").is_err());
+        assert!(Config::parse("border { fade-ms 99999; }").is_err());
+        assert!(Config::parse("border { glow 1; }").is_err());
+        assert!(Config::parse("border { animate \"pulse\"; }").is_err());
+        assert!(Config::parse("border { animate 1; }").is_err());
+        assert!(Config::parse("border { period-ms -1; }").is_err());
+        assert!(Config::parse("border { period-ms \"fast\"; }").is_err());
+        let too_long = format!("border {{ period-ms {}; }}", MAX_BORDER_PERIOD_MS + 1);
+        assert!(Config::parse(&too_long).is_err());
+        assert!(Config::parse("border { focus-color-2 \"blue\"; }").is_err());
+    }
+
+    #[test]
+    fn maximized_windows_leave_room_for_the_border() {
+        assert_eq!(Config::parse("gaps 10").unwrap().maximize_inset(), 10);
+        assert_eq!(
+            Config::parse("border { width 4; }")
+                .unwrap()
+                .maximize_inset(),
+            4
+        );
+        let both = Config::parse("gaps 10\nborder { width 4; }").unwrap();
+        assert_eq!(both.maximize_inset(), 10);
+        let wide = Config::parse("gaps 2\nborder { width 6; }").unwrap();
+        assert_eq!(wide.maximize_inset(), 6);
     }
 
     #[test]

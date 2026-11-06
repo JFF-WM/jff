@@ -20,6 +20,7 @@ use smithay::utils::{Logical, Physical, Point, Rectangle, Scale};
 use smithay::wayland::compositor::{with_states, SurfaceData};
 
 use super::blur::BlurOptions;
+use super::border::{border_element, BorderPaint};
 use super::framebuffer_effect::{FramebufferEffect, FramebufferEffectElement, WallpaperSnapshot};
 use super::rounded::{is_fullscreen, Rounding};
 use crate::config;
@@ -247,6 +248,7 @@ pub fn popup_elements(
 /// wallpaper copy instead of the live frame (see `WallpaperSnapshot`). `radius` is the corner
 /// radius in pixels (0 = square), fullscreen windows are never rounded. `popup_radius` is the
 /// same for the blur behind the window's popups.
+/// `border` is the outline around the window (see `border`), `None` for none.
 pub fn window_elements(
     renderer: &mut GlesRenderer,
     window: &Window,
@@ -255,6 +257,7 @@ pub fn window_elements(
     snapshot: Option<&WallpaperSnapshot>,
     radius: i32,
     popup_radius: i32,
+    border: Option<BorderPaint>,
     out: &mut Vec<JffElement>,
 ) {
     let scale = Scale::from(1.0f64);
@@ -274,11 +277,21 @@ pub fn window_elements(
         )
     };
 
+    // The outline goes last in the list: drawn behind the window and its blur.
+    let ring = border_element(
+        renderer,
+        window,
+        Rectangle::new(surface_loc + geo.loc, geo.size),
+        radius,
+        border,
+    );
+
     // Without blur and rounding (or for an X11 window) there's nothing to interleave.
     let (Some(toplevel), true) = (toplevel, blur.is_some() || rounding.is_some()) else {
         let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
             window.render_elements(&mut *renderer, loc, scale, 1.0);
         out.extend(surfaces.into_iter().map(JffElement::from));
+        out.extend(ring.map(JffElement::Border));
         return;
     };
     popup_elements(
@@ -317,4 +330,5 @@ pub fn window_elements(
             &mut |element| out.push(JffElement::from(element.with_wallpaper_source(snapshot))),
         );
     }
+    out.extend(ring.map(JffElement::Border));
 }

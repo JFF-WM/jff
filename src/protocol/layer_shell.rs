@@ -347,10 +347,10 @@ impl JffState {
     }
 
     /// The part of the monitor at `rect` that panels haven't reserved for themselves, shrunk by
-    /// the `gaps` setting on every side: what a maximized window may use. Fullscreen windows
-    /// don't call this, they cover the whole monitor.
+    /// the `gaps` setting (or the border width, if that is more) on every side: what a maximized
+    /// window may use. Fullscreen windows don't call this, they cover the whole monitor.
     pub fn usable_rect(&self, rect: Rect) -> Rect {
-        geom::inset_rect(self.panel_free_rect(rect), self.config.gaps())
+        geom::inset_rect(self.panel_free_rect(rect), self.config.maximize_inset())
     }
 
     /// The part of the monitor at `rect` that panels haven't reserved, before any gap.

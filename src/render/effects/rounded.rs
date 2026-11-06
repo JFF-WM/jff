@@ -306,6 +306,10 @@ fn ring_program(renderer: &mut GlesRenderer) -> Option<GlesPixelProgram> {
                 UniformName::new("border", UniformType::_1f),
                 UniformName::new("radius", UniformType::_1f),
                 UniformName::new("color", UniformType::_4f),
+                UniformName::new("color2", UniformType::_4f),
+                UniformName::new("phase", UniformType::_1f),
+                UniformName::new("animated", UniformType::_1f),
+                UniformName::new("sweep", UniformType::_1f),
             ],
         )
         .map_err(|err| tracing::warn!("error compiling the outline shader: {err:#}"))
@@ -347,10 +351,7 @@ pub fn ring_element(
     radius: i32,
     color: [f32; 4],
 ) -> Option<PixelShaderElement> {
-    let area = Rectangle::new(
-        (thumb.loc.x - border, thumb.loc.y - border).into(),
-        (thumb.size.w + 2 * border, thumb.size.h + 2 * border).into(),
-    );
+    let area = ring_area(thumb, border);
     let key = RingKey {
         area,
         border,
@@ -366,8 +367,47 @@ pub fn ring_element(
         return Some(element);
     }
 
+    let element = make_ring(renderer, area, border, radius, color, RingMotion::default())?;
+    RING.with(|ring| *ring.borrow_mut() = Some((key, element.clone())));
+    Some(element)
+}
+
+/// The area a ring around `inner` covers: `inner` grown by `border` on every side.
+pub fn ring_area(inner: Rectangle<i32, Logical>, border: i32) -> Rectangle<i32, Logical> {
+    Rectangle::new(
+        (inner.loc.x - border, inner.loc.y - border).into(),
+        (inner.size.w + 2 * border, inner.size.h + 2 * border).into(),
+    )
+}
+
+/// The turning part of a ring (window borders only). The default is a ring that stands still,
+/// which is what the overview's outline is.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RingMotion {
+    /// Second colour (straight RGBA).
+    pub color2: [f32; 4],
+    /// Position in the turn, 0.0 to 1.0.
+    pub phase: f32,
+    /// How much of the motion shows, 0.0 (none) to 1.0.
+    pub amount: f32,
+    /// A travelling highlight instead of a turning gradient.
+    pub sweep: bool,
+}
+
+/// A new ring element, with its own id: `area` as [`ring_area`] gave it, the rest as in
+/// [`ring_element`]. The caller keeps it for as long as nothing about it changes (see the cache
+/// in `ring_element`), a fresh one every frame would be repainted every frame. `None` if the
+/// shader is unavailable.
+pub fn make_ring(
+    renderer: &mut GlesRenderer,
+    area: Rectangle<i32, Logical>,
+    border: i32,
+    radius: i32,
+    color: [f32; 4],
+    motion: RingMotion,
+) -> Option<PixelShaderElement> {
     let program = ring_program(renderer)?;
-    let element = PixelShaderElement::new(
+    Some(PixelShaderElement::new(
         program,
         area,
         None,
@@ -376,9 +416,11 @@ pub fn ring_element(
             Uniform::new("border", border as f32),
             Uniform::new("radius", radius as f32),
             Uniform::new("color", color),
+            Uniform::new("color2", motion.color2),
+            Uniform::new("phase", motion.phase),
+            Uniform::new("animated", motion.amount),
+            Uniform::new("sweep", if motion.sweep { 1.0f32 } else { 0.0 }),
         ],
         Kind::Unspecified,
-    );
-    RING.with(|ring| *ring.borrow_mut() = Some((key, element.clone())));
-    Some(element)
+    ))
 }

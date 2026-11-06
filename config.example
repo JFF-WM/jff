@@ -22,6 +22,16 @@ screenshot {
     copy-to-clipboard #true
 }
 
+border {
+    width 3
+    color "#333567"
+    focus-color "#333436"
+    focus-color-2 "#ff3c36"
+    fade-ms 300
+    animate "none" // spin, sweep, none
+    period-ms 3000
+}
+
 gaps 10
 radius 12
 

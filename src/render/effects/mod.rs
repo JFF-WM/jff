@@ -4,6 +4,8 @@
 //! * `framebuffer_effect`: a render element that copies the pixels already drawn behind it,
 //!   blurs them, and paints them back.
 //! * `background_effect`: per-surface state that decides where the element goes.
+//! * `border`: a rounded outline around windows (the `border` block), with a colour fade when
+//!   focus moves. Also opt-in.
 //! * `rounded`: rounded window corners (`radius` setting) - a texture shader masking the
 //!   window's surface. Also opt-in: nothing runs with `radius 0`.
 //!
@@ -14,5 +16,6 @@
 
 pub mod background_effect;
 pub mod blur;
+pub mod border;
 pub mod framebuffer_effect;
 pub mod rounded;
