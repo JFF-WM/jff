@@ -20,6 +20,7 @@
 //! workspaces                 the shown workspace and how many there are
 //! workspace N|next|prev      show a workspace (N counts from 1)
 //! move-to-workspace N [ID]   send a view (the focused one without an ID) to workspace N
+//! move-cursor X Y            put the pointer at X, Y (pixels in the shared space, like events)
 //! status                     views and workspace state in one reply (for panels)
 //! screenshot-area            freeze the monitor under the pointer and pick a rectangle to save
 //! screenshot-fullscreen      save a picture of the monitor under the pointer
@@ -222,6 +223,8 @@ pub enum Request {
     ScreenshotFullscreen,
     /// `screenshot-window`: the window the user works in.
     ScreenshotWindow,
+    /// `move-cursor X Y`: put the pointer there (clamped to the monitors).
+    MoveCursor(i32, i32),
     /// `watch [GROUP...]`: keep the connection and stream events. No groups means all of them.
     /// Only the accept loop can carry this out (see `serve`).
     Watch(Vec<Group>),
@@ -230,7 +233,7 @@ pub enum Request {
 pub const COMMANDS: &str =
     "views, status, focused, view-info, close, maximize, unmaximize, toggle-maximize, \
      fullscreen, unfullscreen, focus, workspaces, workspace, move-to-workspace, spawn, spawn-sh, \
-     screenshot-area, screenshot-fullscreen, screenshot-window, watch";
+     screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
     word.parse::<usize>()
@@ -291,6 +294,14 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         ("screenshot-area" | "screenshot-fullscreen" | "screenshot-window", _) => {
             return Err(format!("{command} takes no arguments"));
         }
+        ("move-cursor", [x, y]) => {
+            let coord = |word: &str| {
+                word.parse::<i32>()
+                    .map_err(|_| format!("{word:?} is not a whole number of pixels"))
+            };
+            return Ok(Request::MoveCursor(coord(x)?, coord(y)?));
+        }
+        ("move-cursor", _) => return Err("move-cursor needs X and Y".to_string()),
         ("workspace", ["next"]) => return Ok(Request::Workspace(Goto::Next)),
         ("workspace", ["prev"]) => return Ok(Request::Workspace(Goto::Prev)),
         ("workspace", [n]) => {
@@ -497,6 +508,10 @@ impl JffState {
             Request::ScreenshotWindow => self
                 .screenshot_window()
                 .map(|()| "{\"ok\":true}\n".to_string()),
+            Request::MoveCursor(x, y) => {
+                let (x, y) = self.move_cursor((f64::from(x), f64::from(y)));
+                Ok(format!("{{\"ok\":true,\"x\":{x},\"y\":{y}}}\n"))
+            }
             // The connection has to stay open, which a reply can't express. `serve` handles
             // `watch` before it gets here.
             Request::Watch(_) => {

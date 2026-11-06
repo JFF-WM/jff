@@ -367,3 +367,20 @@ fn a_dead_peer_is_noticed_on_write() {
     drop(theirs);
     assert!(!watcher.send(b"a\n"));
 }
+
+#[test]
+fn move_cursor_parses_two_numbers() {
+    assert_eq!(
+        parse_request("move-cursor 100 200"),
+        Ok(Request::MoveCursor(100, 200))
+    );
+    assert_eq!(
+        parse_request("move-cursor -50 3000"),
+        Ok(Request::MoveCursor(-50, 3000))
+    );
+    assert!(parse_request("move-cursor").is_err());
+    assert!(parse_request("move-cursor 1").is_err());
+    assert!(parse_request("move-cursor 1 2 3").is_err());
+    assert!(parse_request("move-cursor a b").is_err());
+    assert!(parse_request("move-cursor 1.5 2").is_err());
+}

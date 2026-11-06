@@ -551,6 +551,27 @@ impl JffState {
         true
     }
 
+    /// Put the pointer at `pos` in the shared space, clamped to the monitors, as if the mouse
+    /// had moved there: the surface under it gets the enter/motion. Returns where it ended up.
+    pub fn move_cursor(&mut self, pos: (f64, f64)) -> (i32, i32) {
+        let (x, y) = layout::clamp_to_rects(pos, &self.pointer_bounds());
+        let pos: Point<f64, Logical> = (x, y).into();
+        let under = self.pointer_focus_under(pos);
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.motion(
+                self,
+                under,
+                &MotionEvent {
+                    location: pos,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: smithay::backend::input::InputTime::now(),
+                },
+            );
+            pointer.frame(self);
+        }
+        (x.round() as i32, y.round() as i32)
+    }
+
     /// Topmost window surface under `pos`, with that surface's origin in global coordinates.
     pub fn surface_under(
         &self,
