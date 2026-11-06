@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex};
 use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
 };
+use smithay::backend::renderer::element::utils::{
+    Relocate, RelocateRenderElement, RescaleRenderElement,
+};
 use smithay::backend::renderer::element::{AsRenderElements, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
@@ -24,6 +27,7 @@ use super::border::{border_element, BorderPaint};
 use super::framebuffer_effect::{FramebufferEffect, FramebufferEffectElement, WallpaperSnapshot};
 use super::rounded::{is_fullscreen, Rounding};
 use crate::config;
+use crate::feature::window_anim::OpenFrame;
 use crate::primitives::region::TransformedRegion;
 use crate::protocol::background_effect::get_cached_blur_region;
 use crate::render::elements::JffElement;
@@ -249,7 +253,7 @@ pub fn popup_elements(
 /// radius in pixels (0 = square), fullscreen windows are never rounded. `popup_radius` is the
 /// same for the blur behind the window's popups.
 /// `border` is the outline around the window (see `border`), `None` for none. `alpha` is the
-/// opacity of the window (1.0 = opaque, less while it fades in).
+/// look of the window while it opens (`OpenFrame::DONE` once it has).
 pub fn window_elements(
     renderer: &mut GlesRenderer,
     window: &Window,
@@ -259,19 +263,24 @@ pub fn window_elements(
     radius: i32,
     popup_radius: i32,
     border: Option<BorderPaint>,
-    alpha: f32,
+    open: OpenFrame,
     out: &mut Vec<JffElement>,
 ) {
-    // A window that is still fading in has no blur and no outline: both would show at full
-    // strength behind a half-transparent window.
-    let (blur, border) = if alpha < 1.0 {
-        (None, None)
-    } else {
+    let alpha = open.alpha;
+    // A window that is still opening has no blur and no outline: both would show at full
+    // strength behind a half-transparent or moving window.
+    let (blur, border) = if open.settled() {
         (blur, border)
+    } else {
+        (None, None)
     };
     let scale = Scale::from(1.0f64);
     let loc: Point<i32, Physical> = surface_loc.to_physical_precise_round(scale);
     let geo = window.geometry();
+    if open.scale != 1.0 || open.dy != 0 {
+        scaled_window(renderer, window, surface_loc, radius, open, out);
+        return;
+    }
     let toplevel = window.toplevel();
 
     // A fullscreen window covers the monitor with square corners, and stays eligible for
@@ -340,4 +349,56 @@ pub fn window_elements(
         );
     }
     out.extend(ring.map(JffElement::Border));
+}
+
+/// A window that is growing or sliding in, drawn like an overview thumbnail: at the origin,
+/// scaled around its geometry's top-left, then moved so it stays centered. No popups.
+fn scaled_window(
+    renderer: &mut GlesRenderer,
+    window: &Window,
+    surface_loc: Point<i32, Logical>,
+    radius: i32,
+    open: OpenFrame,
+    out: &mut Vec<JffElement>,
+) {
+    let scale = Scale::from(1.0f64);
+    let geo = window.geometry();
+    let from: Point<i32, Physical> =
+        Point::<i32, Logical>::from((-geo.loc.x, -geo.loc.y)).to_physical_precise_round(scale);
+    let size = (
+        f64::from(geo.size.w) * open.scale,
+        f64::from(geo.size.h) * open.scale,
+    );
+    let place: Point<i32, Logical> = (
+        surface_loc.x + geo.loc.x + ((f64::from(geo.size.w) - size.0) / 2.0).round() as i32,
+        surface_loc.y
+            + geo.loc.y
+            + ((f64::from(geo.size.h) - size.1) / 2.0).round() as i32
+            + open.dy,
+    )
+        .into();
+    let slot: Point<i32, Physical> = place.to_physical_precise_round(scale);
+    let rounding = if is_fullscreen(window) {
+        None
+    } else {
+        Rounding::new(
+            renderer,
+            Rectangle::new(place, (size.0.round() as i32, size.1.round() as i32).into()),
+            (f64::from(radius) * open.scale).round() as i32,
+        )
+    };
+    let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+        window.render_elements(&mut *renderer, from, scale, open.alpha);
+    for surface in surfaces {
+        let shrunk = RescaleRenderElement::from_element(
+            surface,
+            Point::<i32, Physical>::from((0, 0)),
+            open.scale,
+        );
+        let placed = RelocateRenderElement::from_element(shrunk, slot, Relocate::Relative);
+        out.push(match &rounding {
+            Some(rounding) => rounding.wrap_thumb(placed),
+            None => JffElement::Thumb(placed),
+        });
+    }
 }

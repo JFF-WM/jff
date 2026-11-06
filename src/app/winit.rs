@@ -210,6 +210,8 @@ impl JffState {
                     let popup_radius = self.config.popup_radius();
                     let border = self.config.border();
                     let animate = self.config.window_animations();
+                    let (open_time, close_time) = self.config.window_animation_times();
+                    let open_style = self.config.window_open_style();
                     let now = std::time::Instant::now();
                     // windows that were just closed, fading out, are on top
                     crate::feature::window_anim::ghost_elements(
@@ -217,6 +219,7 @@ impl JffState {
                         &mut self.closing,
                         self.desk.current(),
                         origin,
+                        close_time,
                         &mut elements,
                     );
                     for entry in self.desk.top_down() {
@@ -233,9 +236,14 @@ impl JffState {
                             popup_radius,
                             BorderPaint::of(border, &entry.window, self.focused_window.as_ref()),
                             if animate {
-                                crate::feature::window_anim::open_alpha(entry.shown, now)
+                                crate::feature::window_anim::open_frame(
+                                    open_style,
+                                    entry.shown,
+                                    now,
+                                    open_time,
+                                )
                             } else {
-                                1.0
+                                crate::feature::window_anim::OpenFrame::DONE
                             },
                             &mut elements,
                         );

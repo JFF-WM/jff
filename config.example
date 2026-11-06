@@ -29,6 +29,12 @@ osd {
 }
 
 window-animations {
+    open "slide" // zoom, slide, pop, none. Zoom, slide
+    open-ms 250
+    close-ms 80
+}
+
+window-animations {
     open-ms 100
     close-ms 80
 }

@@ -4,7 +4,7 @@
 //! `~/.config/jff/config.kdl`. When none exists, the built-in [`DEFAULT_CONFIG`] is used.
 //!
 //! The format is one KDL document. Top-level nodes: `workspaces`, `maximize-new-windows`,
-//! `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
+//! `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `keyboard { … }`, `blur { … }`, `osd { … }`, `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
 //! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
@@ -52,6 +52,9 @@ pub const MAX_BORDER_FADE_MS: i32 = 5000;
 /// Time one turn of an animated border takes, and its upper bound (10 minutes).
 pub const DEFAULT_BORDER_PERIOD_MS: i32 = 3000;
 pub const MAX_BORDER_PERIOD_MS: i32 = 600_000;
+
+/// Upper bound for the window fade times (ms).
+pub const MAX_WINDOW_ANIM_MS: i32 = 10_000;
 
 /// Default key repeat delay (ms) and rate (per second).
 pub const DEFAULT_REPEAT_DELAY: i32 = 200;
@@ -405,6 +408,41 @@ impl Default for OsdConfig {
     }
 }
 
+/// How a new window appears.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OpenStyle {
+    #[default]
+    Fade,
+    /// Grows from a bit smaller while fading in.
+    Zoom,
+    /// Rises into place while fading in.
+    Slide,
+    /// Grows from small and overshoots a little.
+    Pop,
+    /// Appears at once.
+    None,
+}
+
+/// `window-animations`: how windows open and close.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowAnimations {
+    pub on: bool,
+    pub open: OpenStyle,
+    pub open_ms: u32,
+    pub close_ms: u32,
+}
+
+impl Default for WindowAnimations {
+    fn default() -> Self {
+        Self {
+            on: true,
+            open: OpenStyle::Fade,
+            open_ms: 100,
+            close_ms: 80,
+        }
+    }
+}
+
 /// How the border of the focused window moves.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BorderAnimation {
@@ -533,8 +571,7 @@ pub struct Config {
     outputs: Vec<OutputConfig>,
     workspaces: usize,
     maximize_new_windows: bool,
-    /// Fade windows in when they open and out when they close.
-    window_animations: bool,
+    window_animations: WindowAnimations,
     no_client_decorations: bool,
     drag_modifier: DragModifier,
     /// Pixels kept free on each side of a maximized window.
@@ -573,7 +610,7 @@ impl Default for Config {
                 outputs: Vec::new(),
                 workspaces: DEFAULT_WORKSPACES,
                 maximize_new_windows: true,
-                window_animations: true,
+                window_animations: WindowAnimations::default(),
                 no_client_decorations: false,
                 drag_modifier: DragModifier::Alt,
                 gaps: DEFAULT_GAPS,
@@ -656,7 +693,9 @@ impl Config {
             } else {
                 "focus-color-2 is missing or the same as focus-color"
             };
-            warnings.push(format!("border animate is set but nothing will move: {why}"));
+            warnings.push(format!(
+                "border animate is set but nothing will move: {why}"
+            ));
         }
         Ok(warnings)
     }
@@ -711,7 +750,10 @@ impl Config {
         };
 
         let maximize_new_windows = parse_flag(&doc, "maximize-new-windows", true)?;
-        let window_animations = parse_flag(&doc, "window-animations", true)?;
+        let window_animations = match doc.get("window-animations") {
+            None => WindowAnimations::default(),
+            Some(node) => parse_window_animations(node).context("in window-animations")?,
+        };
         let no_client_decorations = parse_flag(&doc, "no-client-decorations", false)?;
         let drag_modifier = match doc.get("drag-modifier") {
             None => DragModifier::Alt,
@@ -854,7 +896,21 @@ impl Config {
 
     /// Whether windows fade in and out (`window-animations`, on by default).
     pub fn window_animations(&self) -> bool {
-        self.window_animations
+        self.window_animations.on
+    }
+
+    /// How new windows appear.
+    pub fn window_open_style(&self) -> OpenStyle {
+        self.window_animations.open
+    }
+
+    /// How long the open and close fades take.
+    pub fn window_animation_times(&self) -> (Duration, Duration) {
+        let a = self.window_animations;
+        (
+            Duration::from_millis(a.open_ms.into()),
+            Duration::from_millis(a.close_ms.into()),
+        )
     }
 
     /// Whether apps are asked to drop their own titlebar and borders.
@@ -1131,6 +1187,33 @@ fn parse_blur(node: &KdlNode) -> anyhow::Result<Blur> {
                     .context("offset takes a number above 0")?;
             }
             other => bail!("unknown blur setting {other:?}"),
+        }
+    }
+    Ok(config)
+}
+
+/// `window-animations` as a flag, or as a block with `off`, `open-ms` and `close-ms`.
+fn parse_window_animations(node: &KdlNode) -> anyhow::Result<WindowAnimations> {
+    let mut config = WindowAnimations::default();
+    if !positional(node).is_empty() {
+        config.on = flag_value(node)?;
+    }
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "off" => config.on = !flag_value(child)?,
+            "open" => config.open = match string_arg(child)?.as_str() {
+                "fade" => OpenStyle::Fade,
+                "zoom" => OpenStyle::Zoom,
+                "slide" => OpenStyle::Slide,
+                "pop" => OpenStyle::Pop,
+                "none" => OpenStyle::None,
+                other => bail!(
+                    "open takes \"fade\", \"zoom\", \"slide\", \"pop\" or \"none\", not {other:?}"
+                ),
+            },
+            "open-ms" => config.open_ms = u32::try_from(int_arg(child, MAX_WINDOW_ANIM_MS)?)?,
+            "close-ms" => config.close_ms = u32::try_from(int_arg(child, MAX_WINDOW_ANIM_MS)?)?,
+            other => bail!("unknown window-animations setting {other:?}"),
         }
     }
     Ok(config)
