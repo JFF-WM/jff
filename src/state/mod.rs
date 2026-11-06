@@ -1248,6 +1248,11 @@ impl JffState {
     ) {
         let wl_surface = surface.wl_surface();
         let is_this = |w: &Window| is_window_for(w, wl_surface);
+        // Leaving fullscreen with the maximized state still set: the window was maximized
+        // before it went fullscreen.
+        let back_to_maximized = !on
+            && state_kind == xdg_toplevel::State::Fullscreen
+            && surface.with_pending_state(|s| s.states.contains(xdg_toplevel::State::Maximized));
 
         let new_size = if on {
             let current = self
@@ -1271,6 +1276,20 @@ impl JffState {
                 self.desk.set_pos_where(is_this, (out_x, out_y));
             }
             Some((out_w, out_h).into())
+        } else if back_to_maximized {
+            // Fullscreen was entered from a maximized window (the state is still set, and the
+            // remembered floating geometry is still in `restore`): go back to the maximized
+            // window, not past it to the floating one.
+            let current = self
+                .desk
+                .find_by(is_this)
+                .map(|e| e.window.geometry().size)
+                .unwrap_or_default();
+            let pos = self.desk.pos_of(is_this).unwrap_or_default();
+            let monitor = self.rect_for_window(pos, (current.w, current.h));
+            let (out_x, out_y, out_w, out_h) = self.usable_rect(monitor);
+            self.desk.set_pos_where(is_this, (out_x, out_y));
+            Some((out_w, out_h).into())
         } else {
             self.desk
                 .unmaximize_where(is_this)
@@ -1281,6 +1300,8 @@ impl JffState {
         surface.with_pending_state(|state| {
             if on {
                 state.states.set(state_kind);
+            } else if back_to_maximized {
+                state.states.unset(xdg_toplevel::State::Fullscreen);
             } else {
                 // Leaving either mode returns the window to its normal geometry.
                 state.states.unset(xdg_toplevel::State::Maximized);
