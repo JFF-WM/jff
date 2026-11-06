@@ -1075,6 +1075,16 @@ impl JffState {
                 let radius = self.config.radius();
                 let popup_radius = self.config.popup_radius();
                 let border = self.config.border();
+                let animate = self.config.window_animations();
+                let now = std::time::Instant::now();
+                // windows that were just closed, fading out, are on top
+                crate::feature::window_anim::ghost_elements(
+                    &mut *renderer,
+                    &mut self.closing,
+                    self.desk.current(),
+                    origin,
+                    &mut elements,
+                );
                 for entry in self.desk.top_down() {
                     let geo = entry.window.geometry();
                     let window_origin: Point<i32, Logical> = Point::from(entry.pos) - geo.loc;
@@ -1099,6 +1109,11 @@ impl JffState {
                         radius,
                         popup_radius,
                         BorderPaint::of(border, &entry.window, self.focused_window.as_ref()),
+                        if animate {
+                            crate::feature::window_anim::open_alpha(entry.shown, now)
+                        } else {
+                            1.0
+                        },
                         &mut elements,
                     );
                     // nothing below the covering window goes in the frame

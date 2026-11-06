@@ -248,7 +248,8 @@ pub fn popup_elements(
 /// wallpaper copy instead of the live frame (see `WallpaperSnapshot`). `radius` is the corner
 /// radius in pixels (0 = square), fullscreen windows are never rounded. `popup_radius` is the
 /// same for the blur behind the window's popups.
-/// `border` is the outline around the window (see `border`), `None` for none.
+/// `border` is the outline around the window (see `border`), `None` for none. `alpha` is the
+/// opacity of the window (1.0 = opaque, less while it fades in).
 pub fn window_elements(
     renderer: &mut GlesRenderer,
     window: &Window,
@@ -258,8 +259,16 @@ pub fn window_elements(
     radius: i32,
     popup_radius: i32,
     border: Option<BorderPaint>,
+    alpha: f32,
     out: &mut Vec<JffElement>,
 ) {
+    // A window that is still fading in has no blur and no outline: both would show at full
+    // strength behind a half-transparent window.
+    let (blur, border) = if alpha < 1.0 {
+        (None, None)
+    } else {
+        (blur, border)
+    };
     let scale = Scale::from(1.0f64);
     let loc: Point<i32, Physical> = surface_loc.to_physical_precise_round(scale);
     let geo = window.geometry();
@@ -289,7 +298,7 @@ pub fn window_elements(
     // Without blur and rounding (or for an X11 window) there's nothing to interleave.
     let (Some(toplevel), true) = (toplevel, blur.is_some() || rounding.is_some()) else {
         let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-            window.render_elements(&mut *renderer, loc, scale, 1.0);
+            window.render_elements(&mut *renderer, loc, scale, alpha);
         out.extend(surfaces.into_iter().map(JffElement::from));
         out.extend(ring.map(JffElement::Border));
         return;
@@ -310,7 +319,7 @@ pub fn window_elements(
             toplevel.wl_surface(),
             loc,
             scale,
-            1.0,
+            alpha,
             Kind::Unspecified,
         );
     // Popups above stay square: only the window's own surfaces go through the mask.

@@ -106,6 +106,7 @@ binds {
 pub const TOP_LEVEL_NODES: &[&str] = &[
     "workspaces",
     "maximize-new-windows",
+    "window-animations",
     "no-client-decorations",
     "drag-modifier",
     "gaps",
@@ -512,6 +513,8 @@ pub struct Config {
     outputs: Vec<OutputConfig>,
     workspaces: usize,
     maximize_new_windows: bool,
+    /// Fade windows in when they open and out when they close.
+    window_animations: bool,
     no_client_decorations: bool,
     drag_modifier: DragModifier,
     /// Pixels kept free on each side of a maximized window.
@@ -549,6 +552,7 @@ impl Default for Config {
                 outputs: Vec::new(),
                 workspaces: DEFAULT_WORKSPACES,
                 maximize_new_windows: true,
+                window_animations: true,
                 no_client_decorations: false,
                 drag_modifier: DragModifier::Alt,
                 gaps: DEFAULT_GAPS,
@@ -685,6 +689,7 @@ impl Config {
         };
 
         let maximize_new_windows = parse_flag(&doc, "maximize-new-windows", true)?;
+        let window_animations = parse_flag(&doc, "window-animations", true)?;
         let no_client_decorations = parse_flag(&doc, "no-client-decorations", false)?;
         let drag_modifier = match doc.get("drag-modifier") {
             None => DragModifier::Alt,
@@ -747,6 +752,7 @@ impl Config {
             outputs,
             workspaces,
             maximize_new_windows,
+            window_animations,
             no_client_decorations,
             drag_modifier,
             gaps,
@@ -812,6 +818,11 @@ impl Config {
     /// Whether new windows start maximized.
     pub fn maximize_new_windows(&self) -> bool {
         self.maximize_new_windows
+    }
+
+    /// Whether windows fade in and out (`window-animations`, on by default).
+    pub fn window_animations(&self) -> bool {
+        self.window_animations
     }
 
     /// Whether apps are asked to drop their own titlebar and borders.

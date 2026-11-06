@@ -241,6 +241,8 @@ pub struct JffState {
     pub resize: Option<crate::input::grabs::resize::ActiveResize>,
     /// The window overview, while open (or animating closed).
     pub overview: Option<crate::feature::overview_mode::Overview>,
+    /// Pictures of windows that were just closed, fading out (`window-animations`).
+    pub closing: Vec<crate::feature::window_anim::Ghost>,
     /// The area screenshot selection, while open (see `screenshot.rs`).
     pub screenshot: Option<crate::feature::screenshot::ScreenshotUi>,
     /// Mouse buttons whose press ran a compositor binding: their release isn't forwarded.
@@ -481,6 +483,7 @@ impl JffState {
             popups: PopupManager::default(),
             resize: None,
             overview: None,
+            closing: Vec::new(),
             screenshot: None,
             swallowed_buttons: Default::default(),
             suppressed_keys: Default::default(),
@@ -946,6 +949,14 @@ impl XdgShellHandler for JffState {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        // Take the last picture of the window while it can still be drawn.
+        let closing = self
+            .desk
+            .find_by(|w| w.toplevel().map(|t| t == &surface).unwrap_or(false))
+            .map(|e| (e.window.clone(), e.pos, e.workspace));
+        if let Some((window, pos, workspace)) = closing {
+            self.start_close_fade(&window, pos, workspace);
+        }
         self.desk
             .remove_where(|w| w.toplevel().map(|t| t == &surface).unwrap_or(false));
     }

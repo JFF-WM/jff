@@ -37,6 +37,10 @@ pub struct Entry<W> {
     /// Whether the window's first real size has already been checked against the output. Set
     /// once, see `mark_fitted_where`.
     pub fitted: bool,
+    /// When the window first had something to show (the same moment `fitted` is set). The open
+    /// animation runs from here, not from `add`: a client can take 100 ms to send its first
+    /// frame, and the fade would be over by then.
+    pub shown: Option<std::time::Instant>,
 }
 
 pub struct Desk<W> {
@@ -68,6 +72,7 @@ impl<W> Desk<W> {
             workspace: self.current,
             restore: None,
             fitted: false,
+            shown: None,
         });
         pos
     }
@@ -160,6 +165,7 @@ impl<W> Desk<W> {
         match self.entries.iter_mut().find(|e| pred(&e.window)) {
             Some(e) if !e.fitted => {
                 e.fitted = true;
+                e.shown = Some(std::time::Instant::now());
                 true
             }
             _ => false,

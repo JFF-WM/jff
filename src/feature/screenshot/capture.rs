@@ -357,7 +357,7 @@ impl JffState {
 
     /// A picture of `window` alone (its geometry, with its menus) on a transparent background.
     /// Pixels are premultiplied.
-    fn capture_window(&mut self, window: &Window) -> Result<Captured, String> {
+    pub(crate) fn capture_window(&mut self, window: &Window) -> Result<Captured, String> {
         let geo = window.geometry();
         if geo.size.w <= 0 || geo.size.h <= 0 {
             return Err("the window has nothing on screen yet".to_string());

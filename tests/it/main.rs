@@ -16,3 +16,4 @@ mod region;
 mod screenshot_area;
 mod screenshot_capture;
 mod screenshot_save;
+mod window_anim;
