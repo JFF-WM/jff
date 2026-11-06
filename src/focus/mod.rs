@@ -119,7 +119,9 @@ impl JffState {
             return;
         };
 
-        tracing::debug!("keyboard focus: {:?} -> {:?}", self.keyboard_focus, focus);
+        if self.keyboard_focus != focus {
+            tracing::debug!("keyboard focus: {:?} -> {:?}", self.keyboard_focus, focus);
+        }
 
         // A menu belongs to its window: when the window loses the keyboard, the menu closes and
         // lets go of the seat, or it would keep input nobody can see.
