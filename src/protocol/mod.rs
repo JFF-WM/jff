@@ -8,6 +8,7 @@ pub mod idle;
 pub mod image_copy;
 pub mod layer_shell;
 pub mod output_management;
+pub mod output_power;
 pub mod presentation;
 pub mod session_lock;
 pub mod shortcuts_inhibit;

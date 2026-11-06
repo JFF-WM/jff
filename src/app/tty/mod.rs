@@ -229,6 +229,8 @@ struct TtyOutput {
     scanning_out: bool,
     /// A fullscreen window covered the monitor last frame. Only used to log changes.
     covering: bool,
+    /// Switched off by a client. We must not draw, a frame would light it again.
+    powered_off: bool,
 }
 
 /// Time until the next expected vblank, counting on from the last one seen.
@@ -441,6 +443,30 @@ fn set_connector_content_type(
         .context("error setting the content type")
 }
 
+const DPMS_ON: u64 = 0;
+const DPMS_OFF: u64 = 3;
+
+fn set_connector_dpms(
+    drm: &DrmDevice,
+    connector: connector::Handle,
+    on: bool,
+) -> anyhow::Result<()> {
+    let props = drm
+        .get_properties(connector)
+        .context("error reading the connector properties")?;
+    let (handles, _) = props.as_props_and_values();
+    let property = handles
+        .iter()
+        .copied()
+        .find(|&handle| {
+            drm.get_property(handle)
+                .is_ok_and(|info| info.name().to_bytes() == b"DPMS")
+        })
+        .context("this connector has no DPMS property")?;
+    drm.set_property(connector, property, if on { DPMS_ON } else { DPMS_OFF })
+        .context("error setting DPMS")
+}
+
 /// `create_property_blob` wants a fixed-size array, hence the list of known table sizes.
 fn create_lut_blob(
     drm: &DrmDevice,
@@ -645,6 +671,7 @@ impl Tty {
             gamma: None,
             gamma_pending: false,
             gamma_applied: false,
+            powered_off: false,
         })
     }
 
@@ -832,6 +859,59 @@ impl JffState {
         }
     }
 
+    pub fn output_powered(&self, output: &Output) -> bool {
+        match &self.backend {
+            Backend::Tty(tty) => tty
+                .outputs
+                .values()
+                .find(|lit| lit.output == *output)
+                .is_none_or(|lit| !lit.powered_off),
+            _ => true,
+        }
+    }
+
+    /// False when it can't be done (winit, another VT in front, no DPMS property).
+    pub fn set_output_power(&mut self, output: &Output, on: bool) -> bool {
+        let Backend::Tty(tty) = &mut self.backend else {
+            return false;
+        };
+        if !tty.drm.is_active() {
+            return false;
+        }
+        let Tty { outputs, drm, .. } = &mut *tty;
+        let Some((&crtc, lit)) = outputs.iter_mut().find(|(_, lit)| lit.output == *output) else {
+            return false;
+        };
+        if lit.powered_off == !on {
+            return true;
+        }
+        if let Err(err) = set_connector_dpms(drm, lit.connector, on) {
+            tracing::warn!(
+                "monitor {}: cannot switch it {}: {err:#}",
+                lit.output.name(),
+                if on { "on" } else { "off" }
+            );
+            return false;
+        }
+        tracing::info!(
+            "monitor {} switched {}",
+            lit.output.name(),
+            if on { "on" } else { "off" }
+        );
+        lit.powered_off = !on;
+        lit.waiting_for_vblank = false;
+        if on {
+            // same recovery as after a VT switch
+            if let Err(err) = lit.compositor.reset_state() {
+                tracing::warn!("error resetting the DRM compositor: {err:?}");
+            }
+            lit.compositor.reset_buffers();
+            lit.last_vblank = None;
+            self.render_crtc(crtc);
+        }
+        true
+    }
+
     /// Draw one frame to the monitor on `crtc` and queue it for the next vblank.
     fn render_crtc(&mut self, crtc: crtc::Handle) {
         self.refresh_window_outputs();
@@ -869,6 +949,9 @@ impl JffState {
         let Some(lit) = outputs.get_mut(&crtc) else {
             return;
         };
+        if lit.powered_off {
+            return;
+        }
         if lit.waiting_for_vblank {
             return; // the vblank handler will draw the next one
         }
@@ -1357,6 +1440,7 @@ impl JffState {
                     lit.compositor.reset_buffers();
                     lit.waiting_for_vblank = false;
                     lit.last_vblank = None;
+                    lit.powered_off = false;
                     // another VT may have left its own curves: set ours (or clear them)
                     // after the first frame
                     lit.gamma_pending = true;
