@@ -21,6 +21,7 @@ use smithay::wayland::compositor::{with_states, SurfaceData};
 
 use super::blur::BlurOptions;
 use super::framebuffer_effect::{FramebufferEffect, FramebufferEffectElement, WallpaperSnapshot};
+use super::rounded::{is_fullscreen, Rounding};
 use crate::config;
 use crate::primitives::region::TransformedRegion;
 use crate::protocol::background_effect::get_cached_blur_region;
@@ -32,6 +33,9 @@ pub struct RenderParams {
     pub geometry: Rectangle<f64, Logical>,
     /// Blurred parts of `geometry`, in the same coordinates with the region offset applied.
     pub subregion: TransformedRegion,
+    /// Rounded corners of the window this blur sits behind: the blur is painted through the
+    /// same mask as the window, so it doesn't show square around round corners.
+    pub mask: Option<Rounding>,
 }
 
 #[derive(Debug)]
@@ -97,14 +101,24 @@ pub fn render_for_surface(
     blur: config::Blur,
     push: &mut dyn FnMut(FramebufferEffectElement),
 ) {
-    render_for_surface_zoomed(surface, surface_loc, 1.0, fallback_geo, scale, blur, push);
+    render_for_surface_zoomed(
+        surface,
+        surface_loc,
+        1.0,
+        fallback_geo,
+        scale,
+        blur,
+        None,
+        push,
+    );
 }
 
 /// [`render_for_surface`] for a surface drawn shrunk (overview thumbnail).
 ///
 /// `zoom` scales the surface around its own origin (1.0 = real size), `surface_loc` is where
 /// that origin lands in the frame. Blur area and the client region are scaled by `zoom` too,
-/// so the blur covers the shrunk window.
+/// so the blur covers the shrunk window. `mask`: the window's rounded corners (made for the
+/// same zoom), the blur is shaped by it.
 pub fn render_for_surface_zoomed(
     surface: &WlSurface,
     surface_loc: Point<f64, Logical>,
@@ -112,6 +126,7 @@ pub fn render_for_surface_zoomed(
     fallback_geo: Option<Rectangle<i32, Logical>>,
     scale: f64,
     blur: config::Blur,
+    mask: Option<&Rounding>,
     push: &mut dyn FnMut(FramebufferEffectElement),
 ) {
     if blur.off {
@@ -167,6 +182,7 @@ pub fn render_for_surface_zoomed(
             RenderParams {
                 geometry,
                 subregion,
+                mask: mask.cloned(),
             },
             options,
         ));
@@ -220,32 +236,48 @@ pub fn popup_elements(
 /// behind it) by its blur.
 ///
 /// `surface_loc` is the window surface origin in the frame. `snapshot`: the window blurs a
-/// wallpaper copy instead of the live frame (see `WallpaperSnapshot`).
+/// wallpaper copy instead of the live frame (see `WallpaperSnapshot`). `radius` is the corner
+/// radius in pixels (0 = square), fullscreen windows are never rounded.
 pub fn window_elements(
     renderer: &mut GlesRenderer,
     window: &Window,
     surface_loc: Point<i32, Logical>,
     blur: Option<config::Blur>,
     snapshot: Option<&WallpaperSnapshot>,
+    radius: i32,
     out: &mut Vec<JffElement>,
 ) {
     let scale = Scale::from(1.0f64);
     let loc: Point<i32, Physical> = surface_loc.to_physical_precise_round(scale);
-    // Without blur (or for an X11 window) there's nothing to interleave.
-    let (Some(blur), Some(toplevel)) = (blur, window.toplevel()) else {
+    let geo = window.geometry();
+    let toplevel = window.toplevel();
+
+    // A fullscreen window covers the monitor with square corners, and stays eligible for
+    // direct scanout.
+    let rounding = if is_fullscreen(window) {
+        None
+    } else {
+        Rounding::new(
+            renderer,
+            Rectangle::new(surface_loc + geo.loc, geo.size),
+            radius,
+        )
+    };
+
+    // Without blur and rounding (or for an X11 window) there's nothing to interleave.
+    let (Some(toplevel), true) = (toplevel, blur.is_some() || rounding.is_some()) else {
         let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
             window.render_elements(&mut *renderer, loc, scale, 1.0);
         out.extend(surfaces.into_iter().map(JffElement::from));
         return;
     };
-    let geo = window.geometry();
     popup_elements(
         renderer,
         toplevel.wl_surface(),
         surface_loc,
         geo.loc,
-        Some(blur),
-        blur.all_windows,
+        blur,
+        blur.is_some_and(|b| b.all_windows),
         out,
     );
     let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
@@ -257,13 +289,21 @@ pub fn window_elements(
             1.0,
             Kind::Unspecified,
         );
-    out.extend(surfaces.into_iter().map(JffElement::from));
-    render_for_surface(
-        toplevel.wl_surface(),
-        surface_loc.to_f64(),
-        blur.all_windows.then_some(geo),
-        1.0,
-        blur,
-        &mut |element| out.push(JffElement::from(element.with_wallpaper_source(snapshot))),
-    );
+    // Popups above stay square: only the window's own surfaces go through the mask.
+    out.extend(surfaces.into_iter().map(|element| match &rounding {
+        Some(rounding) => rounding.wrap(element),
+        None => JffElement::from(element),
+    }));
+    if let Some(blur) = blur {
+        render_for_surface_zoomed(
+            toplevel.wl_surface(),
+            surface_loc.to_f64(),
+            1.0,
+            blur.all_windows.then_some(geo),
+            1.0,
+            blur,
+            rounding.as_ref(),
+            &mut |element| out.push(JffElement::from(element.with_wallpaper_source(snapshot))),
+        );
+    }
 }

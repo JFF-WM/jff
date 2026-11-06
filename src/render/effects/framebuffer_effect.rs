@@ -35,6 +35,7 @@ use smithay::utils::{Buffer, Logical, Physical, Rectangle, Scale, Size, Transfor
 
 use super::background_effect::RenderParams;
 use super::blur::{Blur, BlurOptions};
+use super::rounded::Rounding;
 use crate::primitives::region::TransformedRegion;
 
 /// The long-lived half: identity and change counter used for Smithay's damage tracking
@@ -101,6 +102,7 @@ impl WallpaperSnapshot {
             blur_options: BlurOptions::default(),
             captures: Some(self.clone()),
             source: None,
+            mask: None,
         }
     }
 }
@@ -118,6 +120,8 @@ pub struct FramebufferEffectElement {
     /// Only these parts of `geometry` are painted.
     subregion: TransformedRegion,
     blur_options: BlurOptions,
+    /// The window's rounded corners: the blurred picture is painted through this mask.
+    mask: Option<Rounding>,
 }
 
 /// What `capture_framebuffer` leaves for `draw`.
@@ -158,6 +162,7 @@ impl FramebufferEffect {
             blur_options,
             captures: None,
             source: None,
+            mask: params.mask,
         }
     }
 }
@@ -516,7 +521,12 @@ impl RenderElement<GlesRenderer> for FramebufferEffectElement {
         // flipping is its own inverse).
         let tex_src = Rectangle::from_size(texture.size().to_f64());
         let texture_transform = frame.transformation().invert();
-        Frame::render_texture_from_to(
+        // Rounded window: paint through the window's mask. It works on gl_FragCoord, so it
+        // doesn't care how this texture is oriented.
+        if let Some(mask) = &self.mask {
+            mask.apply(frame);
+        }
+        let result = Frame::render_texture_from_to(
             frame,
             texture,
             tex_src,
@@ -525,6 +535,10 @@ impl RenderElement<GlesRenderer> for FramebufferEffectElement {
             &[],
             texture_transform,
             1.,
-        )
+        );
+        if self.mask.is_some() {
+            Rounding::clear(frame);
+        }
+        result
     }
 }

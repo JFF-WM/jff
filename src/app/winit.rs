@@ -203,6 +203,7 @@ impl JffState {
                         snapshot.as_ref(),
                     ));
                 } else {
+                    let radius = self.config.radius();
                     for entry in self.desk.top_down() {
                         let geo = entry.window.geometry();
                         let pos: Point<i32, Logical> = Point::from(entry.pos) - geo.loc;
@@ -213,6 +214,7 @@ impl JffState {
                             pos,
                             blur,
                             snapshot.as_ref(),
+                            radius,
                             &mut elements,
                         );
                     }

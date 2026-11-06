@@ -6,9 +6,11 @@ use smithay::backend::renderer::element::render_elements;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::{RelocateRenderElement, RescaleRenderElement};
+use smithay::backend::renderer::gles::element::PixelShaderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 
 use crate::render::effects::framebuffer_effect::FramebufferEffectElement;
+use crate::render::effects::rounded::{RoundedSurfaceElement, RoundedThumbElement};
 
 render_elements! {
     /// Everything drawn (TTY and winit): the cursor, then windows.
@@ -21,4 +23,10 @@ render_elements! {
     Solid = SolidColorRenderElement,
     /// Blurred background behind a surface (GLES only, see `render/effects`).
     Effect = FramebufferEffectElement,
+    /// A window surface with rounded corners (the `radius` setting).
+    Rounded = RoundedSurfaceElement,
+    /// An overview thumbnail with rounded corners.
+    RoundedThumb = RoundedThumbElement,
+    /// The rounded outline around the selected overview thumbnail.
+    Ring = PixelShaderElement,
 }

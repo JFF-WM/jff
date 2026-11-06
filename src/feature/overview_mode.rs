@@ -46,6 +46,7 @@ use crate::primitives::overview_grid::{self as overview, Dir, Thumb};
 use crate::protocol::layer_shell::{ABOVE_WINDOWS, BELOW_WINDOWS};
 use crate::render::effects::background_effect::render_for_surface_zoomed;
 use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
+use crate::render::effects::rounded::{is_fullscreen, ring_element, Rounding};
 use crate::render::elements::JffElement;
 use crate::state::JffState;
 
@@ -57,7 +58,8 @@ const GAP: i32 = 24;
 const ANIMATION: Duration = Duration::from_millis(180);
 /// Border width around the selected thumbnail.
 const HIGHLIGHT_BORDER: i32 = 4;
-const HIGHLIGHT_COLOR: [f32; 4] = [0.35, 0.55, 0.95, 1.0];
+/// Colour of the outline, straight (not premultiplied) alpha: it is translucent.
+const HIGHLIGHT_COLOR: [f32; 4] = [0.35, 0.55, 0.95, 0.6];
 /// How far the pointer moves with the left button held before it's a drag, not a click.
 const DRAG_THRESHOLD: f64 = 8.0;
 
@@ -161,6 +163,8 @@ pub struct OverviewPlan {
     pub selected: Option<usize>,
     /// Index into `thumbs` of the dragged thumbnail (drawn on top).
     pub dragged: Option<usize>,
+    /// Corner radius of windows (the `radius` setting), thumbnails get it shrunk with them.
+    pub radius: i32,
     highlight: Id,
 }
 
@@ -171,6 +175,7 @@ fn thumb_elements(
     thumb: &Thumb,
     origin: Point<i32, Logical>,
     blur: Option<config::Blur>,
+    radius: i32,
     out: &mut Vec<JffElement>,
     snapshot: Option<&WallpaperSnapshot>,
 ) {
@@ -183,6 +188,20 @@ fn thumb_elements(
     let slot: Point<i32, Physical> =
         Point::<i32, Logical>::from((thumb.pos.0 - origin.x, thumb.pos.1 - origin.y))
             .to_physical_precise_round(scale);
+    // The thumbnail's corners shrink with it: its rectangle on screen and the radius times the
+    // scale. Fullscreen windows are square, as they are live.
+    let rounding = if is_fullscreen(window) {
+        None
+    } else {
+        Rounding::new(
+            renderer,
+            Rectangle::new(
+                (thumb.pos.0 - origin.x, thumb.pos.1 - origin.y).into(),
+                (thumb.size.0, thumb.size.1).into(),
+            ),
+            (f64::from(radius) * thumb.scale).round() as i32,
+        )
+    };
     let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
         window.render_elements(&mut *renderer, loc, scale, 1.0);
     for surface in surfaces {
@@ -191,11 +210,11 @@ fn thumb_elements(
             Point::<i32, Physical>::from((0, 0)),
             thumb.scale,
         );
-        out.push(JffElement::Thumb(RelocateRenderElement::from_element(
-            shrunk,
-            slot,
-            Relocate::Relative,
-        )));
+        let placed = RelocateRenderElement::from_element(shrunk, slot, Relocate::Relative);
+        out.push(match &rounding {
+            Some(rounding) => rounding.wrap_thumb(placed),
+            None => JffElement::Thumb(placed),
+        });
     }
     // The blur goes right behind the thumbnail: after its elements in the list. The window's
     // origin sits at the slot minus its geometry offset, both shrunk with the thumbnail.
@@ -211,6 +230,7 @@ fn thumb_elements(
             blur.all_windows.then_some(geo),
             1.0,
             blur,
+            rounding.as_ref(),
             &mut |element| {
                 // With a snapshot the blur is of the wallpaper alone, whatever is behind.
                 out.push(JffElement::from(element.with_wallpaper_source(snapshot)));
@@ -240,30 +260,56 @@ pub fn overview_elements(
         .chain((0..plan.thumbs.len()).filter(|i| Some(*i) != plan.dragged));
     for i in order {
         let (window, thumb) = &plan.thumbs[i];
-        thumb_elements(renderer, window, thumb, origin, blur, &mut out, snapshot);
+        thumb_elements(
+            renderer, window, thumb, origin, blur, plan.radius, &mut out, snapshot,
+        );
     }
 
-    // The highlight is pushed last so it's drawn behind: only its rim shows.
-    if let Some((_, thumb)) = plan.selected.and_then(|i| plan.thumbs.get(i)) {
-        let geometry = Rectangle::<i32, Physical>::new(
-            (
-                thumb.pos.0 - origin.x - HIGHLIGHT_BORDER,
-                thumb.pos.1 - origin.y - HIGHLIGHT_BORDER,
-            )
-                .into(),
-            (
-                thumb.size.0 + 2 * HIGHLIGHT_BORDER,
-                thumb.size.1 + 2 * HIGHLIGHT_BORDER,
-            )
-                .into(),
+    // The highlight is pushed last so it's drawn behind: only its rim shows. It is a rounded
+    // outline following the thumbnail's corners (`radius` shrunk with the thumbnail, fullscreen
+    // windows are square), hollow so a translucent window shows no tint behind it.
+    if let Some((window, thumb)) = plan.selected.and_then(|i| plan.thumbs.get(i)) {
+        let radius = if is_fullscreen(window) {
+            0
+        } else {
+            (f64::from(plan.radius) * thumb.scale).round() as i32
+        };
+        let thumb_rect = Rectangle::<i32, Logical>::new(
+            (thumb.pos.0 - origin.x, thumb.pos.1 - origin.y).into(),
+            (thumb.size.0, thumb.size.1).into(),
         );
-        out.push(JffElement::Solid(SolidColorRenderElement::new(
-            plan.highlight.clone(),
-            geometry,
-            CommitCounter::default(),
+        if let Some(ring) = ring_element(
+            renderer,
+            thumb_rect,
+            HIGHLIGHT_BORDER,
+            radius,
             HIGHLIGHT_COLOR,
-            Kind::Unspecified,
-        )));
+        ) {
+            out.push(JffElement::Ring(ring));
+        } else {
+            // The outline shader is unavailable: a plain rectangle behind the thumbnail.
+            let geometry = Rectangle::<i32, Physical>::new(
+                (
+                    thumb.pos.0 - origin.x - HIGHLIGHT_BORDER,
+                    thumb.pos.1 - origin.y - HIGHLIGHT_BORDER,
+                )
+                    .into(),
+                (
+                    thumb.size.0 + 2 * HIGHLIGHT_BORDER,
+                    thumb.size.1 + 2 * HIGHLIGHT_BORDER,
+                )
+                    .into(),
+            );
+            let [r, g, b, a] = HIGHLIGHT_COLOR;
+            out.push(JffElement::Solid(SolidColorRenderElement::new(
+                plan.highlight.clone(),
+                geometry,
+                CommitCounter::default(),
+                // Solid colours are premultiplied.
+                [r * a, g * a, b * a, a],
+                Kind::Unspecified,
+            )));
+        }
     }
     out
 }
@@ -281,7 +327,9 @@ pub fn overview_drag_elements(
     let mut out: Vec<JffElement> = Vec::new();
     if let Some((window, thumb)) = plan.dragged.and_then(|i| plan.thumbs.get(i)) {
         if layout::intersects(thumb.rect(), rect) {
-            thumb_elements(renderer, window, thumb, origin, blur, &mut out, snapshot);
+            thumb_elements(
+                renderer, window, thumb, origin, blur, plan.radius, &mut out, snapshot,
+            );
         }
     }
     out
@@ -929,6 +977,7 @@ impl JffState {
             thumbs,
             selected,
             dragged,
+            radius: self.config.radius(),
             highlight: ov.highlight.clone(),
         })
     }

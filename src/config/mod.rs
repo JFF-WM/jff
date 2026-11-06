@@ -4,8 +4,8 @@
 //! `~/.config/jff/config.kdl`. When none exists, the built-in [`DEFAULT_CONFIG`] is used.
 //!
 //! The format is one KDL document. Top-level nodes: `workspaces`, `maximize-new-windows`,
-//! `no-client-decorations`, `drag-modifier`, `gaps`, `screenshot { … }`, `keyboard { … }`,
-//! `blur { … }`, `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
+//! `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `screenshot { … }`,
+//! `keyboard { … }`, `blur { … }`, `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
 //! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -36,6 +36,11 @@ pub const MAX_WORKSPACES: usize = 64;
 pub const DEFAULT_GAPS: i32 = 0;
 /// Upper bound for `gaps`.
 pub const MAX_GAPS: i32 = 512;
+
+/// Default corner radius (px) of windows: square corners.
+pub const DEFAULT_RADIUS: i32 = 0;
+/// Upper bound for `radius`.
+pub const MAX_RADIUS: i32 = 256;
 
 /// Default key repeat delay (ms) and rate (per second).
 pub const DEFAULT_REPEAT_DELAY: i32 = 200;
@@ -360,6 +365,8 @@ pub struct Config {
     drag_modifier: DragModifier,
     /// Pixels kept free on each side of a maximized window.
     gaps: i32,
+    /// Corner radius in pixels of windows that aren't fullscreen. 0 = square.
+    radius: i32,
     screenshot: ScreenshotConfig,
     blur: Blur,
     autostart: Vec<Action>,
@@ -390,6 +397,7 @@ impl Default for Config {
                 no_client_decorations: false,
                 drag_modifier: DragModifier::Alt,
                 gaps: DEFAULT_GAPS,
+                radius: DEFAULT_RADIUS,
                 screenshot: ScreenshotConfig::default(),
                 blur: Blur::default(),
                 autostart: Vec::new(),
@@ -499,6 +507,10 @@ impl Config {
             None => DEFAULT_GAPS,
             Some(node) => int_arg(node, MAX_GAPS)?,
         };
+        let radius = match doc.get("radius") {
+            None => DEFAULT_RADIUS,
+            Some(node) => int_arg(node, MAX_RADIUS)?,
+        };
 
         let keyboard = match doc.get("keyboard") {
             None => KeyboardConfig::default(),
@@ -532,10 +544,16 @@ impl Config {
             no_client_decorations,
             drag_modifier,
             gaps,
+            radius,
             screenshot,
             blur,
             autostart,
         })
+    }
+
+    /// Corner radius in pixels of windows that aren't fullscreen (0 by default: square).
+    pub fn radius(&self) -> i32 {
+        self.radius
     }
 
     /// Pixels kept free on each side of a maximized window (0 by default). Fullscreen windows
@@ -1439,6 +1457,38 @@ sh-autostart "a && b""#,
         assert!(Config::parse("gaps 1.5").is_err());
         assert!(Config::parse("gaps \"big\"").is_err());
         assert!(Config::parse("gaps 4 6").is_err());
+    }
+
+    #[test]
+    fn radius_defaults_to_square_corners() {
+        assert_eq!(Config::default().radius(), 0);
+        assert_eq!(Config::parse("").unwrap().radius(), 0);
+        assert_eq!(Config::parse("gaps 10").unwrap().radius(), 0);
+    }
+
+    #[test]
+    fn radius_is_read() {
+        assert_eq!(Config::parse("radius 12").unwrap().radius(), 12);
+        assert_eq!(Config::parse("radius 0").unwrap().radius(), 0);
+        assert_eq!(
+            Config::parse(&format!("radius {MAX_RADIUS}"))
+                .unwrap()
+                .radius(),
+            MAX_RADIUS
+        );
+        // Independent of gaps.
+        let both = Config::parse("gaps 8\nradius 12").unwrap();
+        assert_eq!((both.gaps(), both.radius()), (8, 12));
+    }
+
+    #[test]
+    fn radius_rejects_bad_values() {
+        assert!(Config::parse("radius").is_err());
+        assert!(Config::parse("radius -1").is_err());
+        assert!(Config::parse(&format!("radius {}", MAX_RADIUS + 1)).is_err());
+        assert!(Config::parse("radius 2.5").is_err());
+        assert!(Config::parse("radius \"round\"").is_err());
+        assert!(Config::parse("radius 4 6").is_err());
     }
 
     #[test]

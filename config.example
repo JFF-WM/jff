@@ -23,6 +23,7 @@ screenshot {
 }
 
 gaps 10
+radius 12
 
 // Background blur. Blur is OFF unless this block exists, writing it turns it on.
 // It only shows on surfaces that are (partly) transparent, for example a terminal with
