@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use jff_wm::primitives::app_search::{
-    exec_argv, first_pick, launch_plan, parse_desktop_entry, search_apps, step_in_apps, step_pick,
-    terminal_exec_args, valid_pick, window_matches, DesktopEntry, Env, Pick, Query, MAX_QUERY,
+    entry_for_app_id, exec_argv, first_pick, launch_plan, parse_desktop_entry, search_apps,
+    step_in_apps, step_pick, terminal_exec_args, valid_pick, window_matches, DesktopEntry, Env,
+    Pick, Query, MAX_QUERY,
 };
 
 fn strings(items: &[&str]) -> Vec<String> {
@@ -548,4 +549,60 @@ fn grid_size_and_hit_test_agree() {
     // a narrow screen gets fewer columns
     let (narrow, _) = grid_size(6, TILE_W + 2 * LIST_PAD);
     assert_eq!(columns_for_width(narrow), 1);
+}
+
+// ---- windows to apps
+
+#[test]
+fn window_app_id_finds_its_entry() {
+    let with = |id: &str, wm: &str, icon: &str| DesktopEntry {
+        id: id.to_owned(),
+        name: id.to_owned(),
+        wm_class: wm.to_owned(),
+        icon: icon.to_owned(),
+        ..DesktopEntry::default()
+    };
+    let entries = [
+        with("org.gnome.Nautilus", "", "org.gnome.Nautilus"),
+        with("firefox", "", "firefox"),
+        with("code", "Code", "vscode"),
+        with("steam", "", "steam"),
+    ];
+    let find = |app_id: &str| entry_for_app_id(&entries, app_id);
+    assert_eq!(find("firefox"), Some(1));
+    assert_eq!(find("Firefox"), Some(1));
+    assert_eq!(find("org.mozilla.firefox"), Some(1));
+    assert_eq!(find("nautilus"), Some(0));
+    assert_eq!(find("org.gnome.Nautilus"), Some(0));
+    assert_eq!(find("Code"), Some(2));
+    assert_eq!(find("vscode"), Some(2));
+    assert_eq!(find("steam.desktop"), Some(3));
+    assert_eq!(find("unknown"), None);
+    assert_eq!(find(""), None);
+}
+
+#[test]
+fn browser_web_apps_are_found_by_their_long_id() {
+    let youtube = parse_desktop_entry(
+        "msedge-agimnkijcaahngcdmfeangaknmldooml-Default",
+        "/home/me/.local/share/applications/msedge-agimnkijcaahngcdmfeangaknmldooml-Default.desktop",
+        "[Desktop Entry]\nType=Application\nName=YouTube\n\
+         Exec=/opt/microsoft/msedge/microsoft-edge --profile-directory=Default --app-id=agimnkijcaahngcdmfeangaknmldooml\n\
+         Icon=msedge-agimnkijcaahngcdmfeangaknmldooml-Default\n\
+         StartupWMClass=crx__agimnkijcaahngcdmfeangaknmldooml\n",
+        &Env::default(),
+    )
+    .unwrap();
+    assert_eq!(youtube.wm_class, "crx__agimnkijcaahngcdmfeangaknmldooml");
+    let entries = [entry("microsoft-edge", "Microsoft Edge"), youtube];
+    for app_id in [
+        "msedge-agimnkijcaahngcdmfeangaknmldooml-Default",
+        "crx__agimnkijcaahngcdmfeangaknmldooml",
+        "crx_agimnkijcaahngcdmfeangaknmldooml",
+        "chrome-agimnkijcaahngcdmfeangaknmldooml-Default",
+    ] {
+        assert_eq!(entry_for_app_id(&entries, app_id), Some(1), "{app_id}");
+    }
+    assert_eq!(entry_for_app_id(&entries, "microsoft-edge"), Some(0));
+    assert_eq!(entry_for_app_id(&entries, "msedge"), None);
 }

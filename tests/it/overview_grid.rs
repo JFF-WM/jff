@@ -376,3 +376,25 @@ fn wall_hit_finds_the_square_under_the_point() {
     );
     assert_eq!(wall_hit(&cells, (5.0, 5.0)), None);
 }
+
+#[test]
+fn badge_sits_at_the_bottom_centre_of_a_thumbnail() {
+    use jff_wm::primitives::overview_grid::{badge_rect, BADGE_MAX, BADGE_MIN};
+    let (x, y, w, h) = (100, 50, 400, 300);
+    let (bx, by, bw, bh) = badge_rect((x, y, w, h)).unwrap();
+    assert_eq!(bw, bh);
+    assert!((BADGE_MIN..=BADGE_MAX).contains(&bw));
+    // centred, inside, near the bottom edge
+    assert_eq!(bx - x, x + w - (bx + bw));
+    assert!(by >= y && by + bh <= y + h);
+    assert!(y + h - (by + bh) < bh);
+    assert!(by > y + h / 2);
+}
+
+#[test]
+fn tiny_thumbnails_get_no_badge() {
+    use jff_wm::primitives::overview_grid::badge_rect;
+    assert_eq!(badge_rect((0, 0, 300, 40)), None);
+    assert_eq!(badge_rect((0, 0, 40, 300)), None);
+    assert!(badge_rect((0, 0, 3000, 2000)).is_some_and(|r| r.2 <= 80));
+}

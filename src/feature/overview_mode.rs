@@ -20,6 +20,7 @@
 //! picture lingers (`closing` is set), and the state is dropped when the animation is over.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -276,6 +277,12 @@ pub struct Overview {
     slide: Slide,
     /// Typed text and its results. Stays empty in the switcher.
     search: Search,
+    /// The painted app icon badge of each app id among `windows`, drawn at the bottom centre of
+    /// its thumbnails. Painted when a window first shows up.
+    badges: HashMap<String, MemoryRenderBuffer>,
+    /// What `badges` was painted for: the version of the app list (icons come from it) and
+    /// whether the font was there (the lettered fallback needs it). Another one empties it.
+    badges_for: (u64, bool),
 }
 
 impl Overview {
@@ -326,6 +333,10 @@ pub struct OverviewPlan {
     pub radius: i32,
     /// The search box and the app list. Not in the switcher.
     pub search: Option<SearchPlan>,
+    /// The app icon badge of each of `thumbs` (same order), `None` for an app that has no app id.
+    badges: Vec<Option<MemoryRenderBuffer>>,
+    /// Fades the badges with the open and close animation.
+    badge_alpha: f32,
     /// The workspace wall, while a thumbnail is dragged and `workspace-wall` is on.
     pub wall: Option<WallPlan>,
     highlight: Id,
@@ -361,6 +372,54 @@ pub struct SearchPlan {
     list: Option<(MemoryRenderBuffer, Point<i32, Logical>)>,
     /// Fades in and out with the overview.
     alpha: f32,
+}
+
+/// The app id of `window`, empty when it has none.
+fn app_id_of(window: &Window) -> String {
+    window
+        .toplevel()
+        .map(|toplevel| toplevel_names(toplevel.wl_surface()).0)
+        .unwrap_or_default()
+}
+
+/// Push the app icon badge of thumbnail `index`: at the bottom centre of it, scaled with it. Call
+/// before the thumbnail's own elements, which come after what is in front of them.
+fn badge_elements(
+    renderer: &mut GlesRenderer,
+    plan: &OverviewPlan,
+    index: usize,
+    origin: Point<i32, Logical>,
+    out: &mut Vec<JffElement>,
+) {
+    let (Some(Some(buffer)), Some((_, thumb))) = (plan.badges.get(index), plan.thumbs.get(index))
+    else {
+        return;
+    };
+    let Some((x, y, side, _)) = overview::badge_rect(thumb.rect()) else {
+        return;
+    };
+    // The picture has a shadow margin around the badge, scaled by the same factor.
+    let margin = (f64::from(search_ui::BADGE_MARGIN) * f64::from(side)
+        / f64::from(search_ui::BADGE_BODY))
+    .round() as i32;
+    let loc: Point<f64, Physical> = (
+        f64::from(x - margin - origin.x),
+        f64::from(y - margin - origin.y),
+    )
+        .into();
+    let size = smithay::utils::Size::<i32, Logical>::from((side + 2 * margin, side + 2 * margin));
+    match MemoryRenderBufferRenderElement::from_buffer(
+        &mut *renderer,
+        loc,
+        buffer,
+        Some(plan.badge_alpha),
+        None,
+        Some(size),
+        Kind::Unspecified,
+    ) {
+        Ok(element) => out.push(JffElement::Memory(element)),
+        Err(err) => tracing::warn!("error drawing an app icon in the overview: {err:?}"),
+    }
 }
 
 /// Push the render elements for one thumbnail, placed relative to `origin`.
@@ -481,6 +540,7 @@ pub fn overview_elements(
             wall_elements(renderer, plan, origin, &mut out);
         }
         let (window, thumb) = &plan.thumbs[i];
+        badge_elements(renderer, plan, i, origin, &mut out);
         thumb_elements(
             renderer,
             window,
@@ -623,6 +683,9 @@ pub fn overview_drag_elements(
     let mut out: Vec<JffElement> = Vec::new();
     if let Some((window, thumb)) = plan.dragged.and_then(|i| plan.thumbs.get(i)) {
         if layout::intersects(thumb.rect(), rect) {
+            if let Some(i) = plan.dragged {
+                badge_elements(renderer, plan, i, origin, &mut out);
+            }
             thumb_elements(
                 renderer,
                 window,
@@ -915,6 +978,8 @@ impl JffState {
             wall_labels: Vec::new(),
             switcher: None,
             slide: Slide::still(0),
+            badges: HashMap::new(),
+            badges_for: (version, self.osd.fonts().is_some()),
             search: Search::new(entries, version),
         });
 
@@ -1594,6 +1659,7 @@ impl JffState {
         } else {
             self.wall_labels(&wall_cells)
         };
+        self.refresh_badges();
         let ov = self.overview.as_ref()?;
         let t = ov.progress();
         let at = self
@@ -1703,6 +1769,10 @@ impl JffState {
             .filter(|_| ov.search.app_selected.is_none())
             .and_then(|s| thumbs.iter().position(|(w, _)| w == s));
 
+        let badges = thumbs
+            .iter()
+            .map(|(window, _)| ov.badges.get(&app_id_of(window)).cloned())
+            .collect();
         let output = ov.output.clone();
         let highlight = ov.highlight.clone();
         let radius = self.config.radius();
@@ -1720,9 +1790,40 @@ impl JffState {
             dragged,
             radius,
             search: self.search_plan(),
+            badges,
+            badge_alpha: t as f32,
             wall,
             highlight,
         })
+    }
+
+    /// Paint the app icon badge of every app with a window in the overview that has none yet.
+    /// The icon is the one of the installed app the window's app id belongs to, or one named
+    /// like the app id, or else a lettered badge.
+    fn refresh_badges(&mut self) {
+        let fonts = self.osd.fonts();
+        let Some(ov) = self.overview.as_mut() else {
+            return;
+        };
+        let stamp = (ov.search.version, fonts.is_some());
+        if ov.badges_for != stamp {
+            ov.badges.clear();
+            ov.badges_for = stamp;
+        }
+        for window in &ov.windows {
+            let app_id = app_id_of(window);
+            if app_id.is_empty() || ov.badges.contains_key(&app_id) {
+                continue;
+            }
+            let entry = apps::entry_for_app_id(&ov.search.entries, &app_id)
+                .and_then(|i| ov.search.entries.get(i));
+            let icon = entry
+                .and_then(|entry| crate::feature::app_icons::icon_for(&entry.icon))
+                .or_else(|| crate::feature::app_icons::icon_for(&app_id));
+            let name = entry.map_or(app_id.as_str(), |entry| entry.name.as_str());
+            let picture = search_ui::paint_badge(fonts, icon.as_deref(), name);
+            ov.badges.insert(app_id, buffer_of(&picture));
+        }
     }
 
     /// The search box and the app list, painted again only when what they show changed.

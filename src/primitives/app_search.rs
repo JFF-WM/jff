@@ -29,6 +29,8 @@ pub struct DesktopEntry {
     pub exec: String,
     /// `Icon=`, a theme name or an absolute path.
     pub icon: String,
+    /// `StartupWMClass=`: the app id its windows are known by, when that isn't the file's ID.
+    pub wm_class: String,
     /// `Path=`: the working directory.
     pub path: String,
     pub terminal: bool,
@@ -194,12 +196,64 @@ pub fn parse_desktop_entry(id: &str, source: &str, text: &str, env: &Env) -> Opt
         keywords,
         exec: exec.to_owned(),
         icon: plain("Icon").map(unescape).unwrap_or_default(),
+        wm_class: plain("StartupWMClass").map(unescape).unwrap_or_default(),
         path: plain("Path").map(unescape).unwrap_or_default(),
         terminal: plain("Terminal").is_some_and(is_true),
         try_exec: plain("TryExec").map(unescape).unwrap_or_default(),
         source: source.to_owned(),
     })
 }
+
+/// The entry a window with `app_id` belongs to, as an index into `entries`.
+///
+/// Windows only say an app id, so this guesses from the strongest evidence down: the desktop
+/// file's ID, its `StartupWMClass=`, its icon name, the last part of a reverse-DNS ID
+/// (`org.gnome.Nautilus` for `nautilus`) or the app id's own last part (`org.mozilla.firefox`
+/// for `firefox`), then its name, and last any long opaque token of the app id (a browser's
+/// web app id, as in `crx__<id>`, `chrome-<id>-Default`) found in the entry's ID, class or
+/// command (`--app-id=<id>`). Case is ignored. `None` when nothing fits.
+pub fn entry_for_app_id(entries: &[DesktopEntry], app_id: &str) -> Option<usize> {
+    let wanted = app_id.trim();
+    let wanted = wanted
+        .strip_suffix(".desktop")
+        .unwrap_or(wanted)
+        .to_lowercase();
+    if wanted.is_empty() {
+        return None;
+    }
+    let tail = |text: &str| text.rsplit('.').next().unwrap_or(text).to_lowercase();
+    let wanted_tail = tail(&wanted);
+    let tiers: [&dyn Fn(&DesktopEntry) -> bool; 6] = [
+        &|e| e.id.to_lowercase() == wanted,
+        &|e| !e.wm_class.is_empty() && e.wm_class.to_lowercase() == wanted,
+        &|e| !e.icon.is_empty() && e.icon.to_lowercase() == wanted,
+        &|e| tail(&e.id) == wanted,
+        &|e| e.id.to_lowercase() == wanted_tail,
+        &|e| e.name.to_lowercase() == wanted,
+    ];
+    if let Some(found) = tiers
+        .iter()
+        .find_map(|matches| entries.iter().position(|e| matches(e)))
+    {
+        return Some(found);
+    }
+    // Web apps made by browsers are named after a long random id, written a little differently
+    // by each of the file name, `StartupWMClass=`, `Exec=` and the window.
+    let tokens: Vec<&str> = wanted
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= OPAQUE_ID_MIN)
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    entries.iter().position(|e| {
+        let haystack = format!("{} {} {}", e.id, e.wm_class, e.exec).to_lowercase();
+        tokens.iter().any(|token| haystack.contains(token))
+    })
+}
+
+/// Shortest word of an app id taken as a unique id (browsers use 32 letters).
+const OPAQUE_ID_MIN: usize = 16;
 
 /// Split an `Exec` line into arguments: whitespace separates them, double quotes group, and
 /// inside quotes a backslash escapes `"`, `` ` ``, `$` and `\`.

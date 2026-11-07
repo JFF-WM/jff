@@ -437,3 +437,70 @@ pub fn paint_list(
     }
     into_picture(canvas, cw, ch)
 }
+
+/// Room around an app icon badge for its shadow.
+pub const BADGE_MARGIN: i32 = 10;
+/// Space between the icon and the edge of the badge.
+const BADGE_PAD: i32 = 8;
+/// Side of the badge itself, at the size it is painted.
+pub const BADGE_BODY: i32 = ICON_PX + 2 * BADGE_PAD;
+/// Side of the whole picture, shadow margin included. The caller scales it to fit a thumbnail.
+pub const BADGE_PICTURE: i32 = BADGE_BODY + 2 * BADGE_MARGIN;
+const BADGE_RADIUS: f32 = 22.0;
+
+/// The badge of an app that goes on its window's thumbnail: its icon on a dark rounded square
+/// with a soft shadow. Without an icon, the lettered round badge of the search grid, with
+/// `name`'s first letter (the letter is skipped while there's no font).
+pub fn paint_badge(fonts: Option<&Fonts>, icon: Option<&Icon>, name: &str) -> Picture {
+    let side = BADGE_PICTURE;
+    let mut canvas: Vec<Pixel> = vec![[0.0; 4]; (side * side) as usize];
+    let center = side as f32 / 2.0;
+    let half = BADGE_BODY as f32 / 2.0;
+    for py in 0..side {
+        for px in 0..side {
+            let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
+            let pixel = &mut canvas[(py * side + px) as usize];
+            let shadow = sd_round_box(fx, fy - 2.0, center, center, half, half, BADGE_RADIUS);
+            over(pixel, [0.0; 3], 0.5 * (1.0 - smoothstep(-2.0, 9.0, shadow)));
+            let d = sd_round_box(fx, fy, center, center, half, half, BADGE_RADIUS);
+            let cover = (0.5 - d).clamp(0.0, 1.0);
+            if cover > 0.0 {
+                over(pixel, FILL, cover * 0.92);
+                let inner = (0.5 - (d + 1.0)).clamp(0.0, 1.0);
+                over(pixel, [1.0; 3], (cover - inner).max(0.0) * 0.10);
+            }
+        }
+    }
+    let icon_left = BADGE_MARGIN + BADGE_PAD;
+    match icon {
+        Some(icon) => blit_icon(&mut canvas, side, side, icon_left, icon_left, icon),
+        None => {
+            let color = BADGES[name.chars().map(|c| c as usize).sum::<usize>() % BADGES.len()];
+            disc(
+                &mut canvas,
+                side,
+                side,
+                center,
+                center,
+                ICON_PX as f32 / 2.0 - 2.0,
+                color,
+            );
+            if let (Some(f), Some(initial)) = (fonts, name.chars().find(|c| c.is_alphanumeric())) {
+                let initial = initial.to_uppercase().to_string();
+                let w = text_width(&f.medium, &initial, INITIAL_PX);
+                draw_text(
+                    &mut canvas,
+                    side,
+                    side,
+                    &f.medium,
+                    &initial,
+                    INITIAL_PX,
+                    center - w / 2.0,
+                    center + half_line(&f.medium, INITIAL_PX),
+                    [1.0; 3],
+                );
+            }
+        }
+    }
+    into_picture(canvas, side, side)
+}

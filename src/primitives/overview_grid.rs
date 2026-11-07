@@ -336,3 +336,26 @@ pub fn lerp_thumb(from: Thumb, to: Thumb, t: f64) -> Thumb {
         scale: lerp(from.scale, to.scale, t),
     }
 }
+
+/// Thumbnails whose short side is under this get no app icon: it would cover them.
+pub const BADGE_MIN_THUMB: i32 = 72;
+/// Smallest and biggest side of an app icon badge, in pixels.
+pub const BADGE_MIN: i32 = 32;
+pub const BADGE_MAX: i32 = 80;
+
+/// The square an app icon badge covers on a thumbnail at `thumb`: centred along the bottom
+/// edge, a little above it. `None` when the thumbnail is too small to carry one.
+pub fn badge_rect(thumb: Rect) -> Option<Rect> {
+    let short = thumb.2.min(thumb.3);
+    if short < BADGE_MIN_THUMB {
+        return None;
+    }
+    let side = ((f64::from(short) * 0.28).round() as i32).clamp(BADGE_MIN, BADGE_MAX);
+    let inset = (side / 4).max(6);
+    Some((
+        thumb.0 + (thumb.2 - side) / 2,
+        thumb.1 + thumb.3 - side - inset,
+        side,
+        side,
+    ))
+}

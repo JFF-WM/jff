@@ -159,17 +159,21 @@ fn find_file(name: &str) -> Option<PathBuf> {
             }
         }
     }
-    for size in SIZES {
-        for theme in THEMES {
-            for base in &bases {
-                let root = base.join(theme);
-                // `64x64/apps/` (hicolor, Adwaita, Papirus) and `apps/64/` (breeze).
-                for path in [
-                    root.join(format!("{size}x{size}/apps/{name}.png")),
-                    root.join(format!("apps/{size}/{name}.png")),
-                ] {
-                    if path.is_file() {
-                        return Some(path);
+    // Some themes keep SVGs in sized directories too (Papirus `64x64/apps/`, breeze
+    // `apps/48/`). They are still sharper than any PNG, so try them before the PNGs.
+    for extension in ["svg", "png"] {
+        for size in SIZES {
+            for theme in THEMES {
+                for base in &bases {
+                    let root = base.join(theme);
+                    // `64x64/apps/` (hicolor, Adwaita, Papirus) and `apps/64/` (breeze).
+                    for path in [
+                        root.join(format!("{size}x{size}/apps/{name}.{extension}")),
+                        root.join(format!("apps/{size}/{name}.{extension}")),
+                    ] {
+                        if path.is_file() {
+                            return Some(path);
+                        }
                     }
                 }
             }
