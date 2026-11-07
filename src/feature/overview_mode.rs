@@ -761,6 +761,7 @@ impl JffState {
     ///
     /// Must not be called from inside a method of [`OverviewGrab`] - the pointer is locked there.
     pub fn end_overview(&mut self, select: Option<Window>) {
+        self.cancel_hot_corner_timer();
         // Menus raised from a panel while the overview was open go with it: a click on empty
         // space or a key ends the overview without the menu ever seeing it. Do this before
         // letting go of the pointer, so the menu's own grab isn't left behind.
@@ -813,6 +814,7 @@ impl JffState {
 
     /// Drop the overview at once, no animation (monitor unplugged, VT switch).
     pub fn abort_overview(&mut self) {
+        self.cancel_hot_corner_timer();
         if self.overview.is_none() {
             return;
         }

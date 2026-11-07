@@ -18,7 +18,7 @@ use smithay::backend::input::{Keycode, TabletToolDescriptor};
 use smithay::input::tablet::TabletSeatHandler;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::Output;
-use smithay::reexports::calloop::{LoopHandle, LoopSignal};
+use smithay::reexports::calloop::{LoopHandle, LoopSignal, RegistrationToken};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::{
     self, WmCapabilities,
 };
@@ -252,6 +252,11 @@ pub struct JffState {
     pub resize: Option<crate::input::grabs::resize::ActiveResize>,
     /// The window overview, while open (or animating closed).
     pub overview: Option<crate::feature::overview_mode::Overview>,
+    /// Whether the pointer may start a hot corner dwell on its next entry into a corner. Cleared
+    /// when the dwell fires (or the entry was blocked), set again once the pointer leaves.
+    pub hot_corner_armed: bool,
+    /// The dwell timer of the hot corner the pointer is resting in, if one is running.
+    pub hot_corner_timer: Option<RegistrationToken>,
     /// Pictures of windows that were just closed, fading out (`window-animations`).
     pub closing: Vec<crate::feature::window_anim::Ghost>,
     /// The area screenshot selection, while open (see `screenshot.rs`).
@@ -503,6 +508,8 @@ impl JffState {
             popups: PopupManager::default(),
             resize: None,
             overview: None,
+            hot_corner_armed: true,
+            hot_corner_timer: None,
             closing: Vec::new(),
             screenshot: None,
             swallowed_buttons: Default::default(),

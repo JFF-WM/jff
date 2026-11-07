@@ -12,13 +12,15 @@ use smithay::input::keyboard::KeyboardSource;
 use smithay::input::pointer::{
     AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent, RelativeMotionEvent,
 };
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Size, SERIAL_COUNTER};
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
 
-use crate::config::{Action, Config};
+use crate::config::{Action, Config, HotCorner};
 use crate::desk::WindowMode;
+use crate::feature::outputs::output_rect;
 use crate::feature::overview_mode::{overview_key, typed_char, OverviewKey};
 use crate::feature::screenshot::{report_failure, screenshot_key, ScreenshotKey};
 use crate::input::grabs::r#move::{shrunk_geometry, MoveGrab};
@@ -225,6 +227,7 @@ impl JffState {
                 let pos = event.position_transformed(size) + Point::from((x as f64, y as f64));
                 let pos: Point<f64, Logical> =
                     layout::clamp_to_rects((pos.x, pos.y), &self.pointer_bounds()).into();
+                self.check_hot_corner(pos);
 
                 let under = self.pointer_focus_under(pos);
                 let pointer = self.seat.get_pointer().unwrap();
@@ -292,6 +295,7 @@ impl JffState {
                 let pos = cur + event.delta();
                 let pos: Point<f64, Logical> =
                     layout::clamp_to_rects((pos.x, pos.y), &rects).into();
+                let pos = self.hot_corner_barrier(cur, pos);
                 let new_under = self.pointer_focus_under(pos);
 
                 // Confined: never leave the surface (or the confine region).
@@ -308,6 +312,7 @@ impl JffState {
                     }
                 }
 
+                self.check_hot_corner(pos);
                 pointer.motion(
                     self,
                     new_under.clone(),
@@ -695,6 +700,126 @@ impl JffState {
                 tracing::warn!("config not reloaded: {err:#}");
                 self.show_error("Config error", &format!("{err:#}"));
             }
+        }
+    }
+}
+
+impl JffState {
+    /// The hot corner settings and the monitor whose corner `p` is in, if it is in one the
+    /// config turns on.
+    fn hot_corner_at(&self, p: (f64, f64)) -> Option<(HotCorner, layout::Rect)> {
+        let hot = self.config.hot_corner()?;
+        let rects: Vec<layout::Rect> = self
+            .outputs
+            .iter()
+            .filter(|output| hot.monitors.is_empty() || hot.monitors.contains(&output.name()))
+            .map(output_rect)
+            .collect();
+        if !layout::inside_any_corner(p, &rects, hot.size) {
+            return None;
+        }
+        let rect = rects
+            .into_iter()
+            .find(|rect| layout::contains(layout::hot_corner_rect(*rect, hot.size), p))?;
+        Some((hot, rect))
+    }
+
+    /// Where the hot corner must not act: not on the TTY backend, while the session is locked,
+    /// or on a monitor a fullscreen window covers. It does act while the overview is open: the
+    /// corner toggles it, like the `overview` action.
+    fn hot_corner_blocked(&self, monitor: layout::Rect) -> bool {
+        !self.backend.is_tty()
+            || self.session_locked()
+            || self.fullscreen_rects().contains(&monitor)
+    }
+
+    /// Move the pointer from `from` to `to`, but not to another monitor through the edges of a
+    /// hot corner: the corner can be reached by sliding along the edge without overshooting
+    /// onto the neighbouring monitor. Only where the hot corner itself is active (see
+    /// [`JffState::hot_corner_blocked`]), returns `to` untouched everywhere else.
+    fn hot_corner_barrier(
+        &self,
+        from: Point<f64, Logical>,
+        to: Point<f64, Logical>,
+    ) -> Point<f64, Logical> {
+        let (from_p, to_p) = ((from.x, from.y), (to.x, to.y));
+        let all = self.output_rects();
+        // Most moves stay on one monitor: nothing to do.
+        if all
+            .iter()
+            .any(|rect| layout::contains(*rect, from_p) && layout::contains(*rect, to_p))
+        {
+            return to;
+        }
+        let Some(hot) = self.config.hot_corner() else {
+            return to;
+        };
+        if !self.backend.is_tty() || self.session_locked() {
+            return to;
+        }
+        let fullscreen = self.fullscreen_rects();
+        let enabled: Vec<layout::Rect> = self
+            .outputs
+            .iter()
+            .filter(|output| hot.monitors.is_empty() || hot.monitors.contains(&output.name()))
+            .map(output_rect)
+            .filter(|rect| !fullscreen.contains(rect))
+            .collect();
+        layout::hot_corner_barrier(from_p, to_p, &all, &enabled, hot.size).into()
+    }
+
+    /// Stop a running hot corner dwell, if there is one.
+    pub(crate) fn cancel_hot_corner_timer(&mut self) {
+        if let Some(token) = self.hot_corner_timer.take() {
+            self.loop_handle.remove(token);
+        }
+    }
+
+    /// The pointer is now at `pos`: start or cancel the hot corner dwell. Entering a corner
+    /// starts it, leaving stops it and lets the corner fire again. Once it has fired, or an
+    /// entry was blocked, the pointer has to leave the corner before it can fire again - so the
+    /// overview doesn't reopen right after closing with the pointer still in the corner, and
+    /// closing it takes a second visit.
+    pub(crate) fn check_hot_corner(&mut self, pos: Point<f64, Logical>) {
+        let Some((hot, monitor)) = self.hot_corner_at((pos.x, pos.y)) else {
+            self.hot_corner_armed = true;
+            self.cancel_hot_corner_timer();
+            return;
+        };
+        // Resting in the corner already: waiting for the dwell, or it has had its turn.
+        if self.hot_corner_timer.is_some() || !self.hot_corner_armed {
+            return;
+        }
+        if self.hot_corner_blocked(monitor) {
+            self.hot_corner_armed = false;
+            return;
+        }
+
+        let timer = Timer::from_duration(hot.dwell);
+        let inserted = self.loop_handle.insert_source(timer, |_, _, state| {
+            state.hot_corner_timer = None;
+            state.hot_corner_armed = false;
+            // Warps don't come through the motion path: look again before acting.
+            let at = state
+                .seat
+                .get_pointer()
+                .map(|pointer| pointer.current_location())
+                .unwrap_or_default();
+            if let Some((_, monitor)) = state.hot_corner_at((at.x, at.y)) {
+                if !state.hot_corner_blocked(monitor) {
+                    if state.overview_active() {
+                        tracing::debug!("hot corner: closing the overview");
+                    } else {
+                        tracing::debug!("hot corner: opening the overview");
+                    }
+                    state.toggle_overview();
+                }
+            }
+            TimeoutAction::Drop
+        });
+        match inserted {
+            Ok(token) => self.hot_corner_timer = Some(token),
+            Err(_) => tracing::warn!("could not start the hot corner timer"),
         }
     }
 }

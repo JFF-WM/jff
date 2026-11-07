@@ -5,7 +5,7 @@
 //!
 //! The format is one KDL document. Top-level nodes: `workspaces`, `maximize-new-windows`,
 //! `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
-//! `keyboard { … }`, `blur { … }`, `osd { … }`, `switcher { … }`, `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
+//! `keyboard { … }`, `blur { … }`, `osd { … }`, `switcher { … }`, `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
 //! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -123,6 +123,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "blur",
     "osd",
     "switcher",
+    "hot-corner",
     "autostart",
     "sh-autostart",
     "outputs",
@@ -443,6 +444,23 @@ impl Default for SwitcherConfig {
     }
 }
 
+/// Default size (px) of a hot corner whose block gives none, and its upper bound.
+pub const DEFAULT_HOT_CORNER_SIZE: i32 = 4;
+pub const MAX_HOT_CORNER_SIZE: i32 = 64;
+/// Default time (ms) the pointer must rest in a hot corner, and its upper bound.
+pub const DEFAULT_HOT_CORNER_DWELL_MS: i32 = 250;
+pub const MAX_HOT_CORNER_DWELL_MS: i32 = 5000;
+
+/// The `hot-corner { … }` block: resting the pointer in a `size` px square at the top-left of a
+/// monitor for `dwell` opens the overview. `monitors` are the output names it is limited to,
+/// empty for every monitor. Only built for a `size` above 0, see [`Config::hot_corner`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HotCorner {
+    pub size: i32,
+    pub dwell: Duration,
+    pub monitors: Vec<String>,
+}
+
 /// How a new window appears.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OpenStyle {
@@ -623,6 +641,7 @@ pub struct Config {
     blur_ignore_layers: Vec<String>,
     osd: OsdConfig,
     switcher: SwitcherConfig,
+    hot_corner: Option<HotCorner>,
     autostart: Vec<Action>,
 }
 
@@ -660,6 +679,7 @@ impl Default for Config {
                 blur_ignore_layers: Vec::new(),
                 osd: OsdConfig::default(),
                 switcher: SwitcherConfig::default(),
+                hot_corner: None,
                 autostart: Vec::new(),
             }
         })
@@ -852,6 +872,11 @@ impl Config {
             Some(node) => parse_switcher(node).context("in switcher")?,
         };
 
+        let hot_corner = match doc.get("hot-corner") {
+            None => None,
+            Some(node) => parse_hot_corner(node).context("in hot-corner")?,
+        };
+
         let mut autostart = Vec::new();
         for node in doc.nodes() {
             let name = node.name().value();
@@ -878,6 +903,7 @@ impl Config {
             blur_ignore_layers,
             osd,
             switcher,
+            hot_corner,
             autostart,
         })
     }
@@ -940,6 +966,11 @@ impl Config {
 
     pub fn switcher(&self) -> &SwitcherConfig {
         &self.switcher
+    }
+
+    /// The hot corner, `None` when it is off (no block, `hot-corner 0`, or `size 0`).
+    pub fn hot_corner(&self) -> Option<HotCorner> {
+        self.hot_corner.clone()
     }
 
     /// The screenshot block.
@@ -1329,6 +1360,33 @@ fn parse_switcher(node: &KdlNode) -> anyhow::Result<SwitcherConfig> {
         }
     }
     Ok(config)
+}
+
+/// The `hot-corner { … }` block, or `hot-corner N` for just the size. `None` when `size` is 0.
+/// A block that doesn't say otherwise is on, with [`DEFAULT_HOT_CORNER_SIZE`].
+fn parse_hot_corner(node: &KdlNode) -> anyhow::Result<Option<HotCorner>> {
+    let mut size = DEFAULT_HOT_CORNER_SIZE;
+    let mut dwell_ms = DEFAULT_HOT_CORNER_DWELL_MS;
+    let mut monitors: Vec<String> = Vec::new();
+    if !positional(node).is_empty() {
+        size = int_arg(node, MAX_HOT_CORNER_SIZE)?;
+    }
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "size" => size = int_arg(child, MAX_HOT_CORNER_SIZE)?,
+            "dwell-ms" => dwell_ms = int_arg(child, MAX_HOT_CORNER_DWELL_MS)?,
+            "monitor" => monitors.push(string_arg(child)?),
+            other => bail!("unknown hot-corner setting {other:?}"),
+        }
+    }
+    if size == 0 {
+        return Ok(None);
+    }
+    Ok(Some(HotCorner {
+        size,
+        dwell: Duration::from_millis(u64::try_from(dwell_ms)?),
+        monitors,
+    }))
 }
 
 /// The `screenshot { … }` block.

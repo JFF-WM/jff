@@ -9,7 +9,7 @@ use smithay::input::keyboard::ModifiersState;
 
 use jff_wm::config::{
     closest, edit_distance, parse_color, Action, BorderAnimation, Config, ConfigWatch, FileStamp,
-    KeyboardConfig, ModeRequest, ScreenshotConfig, Vrr, DEFAULT_BORDER_FADE_MS,
+    HotCorner, KeyboardConfig, ModeRequest, ScreenshotConfig, Vrr, DEFAULT_BORDER_FADE_MS,
     DEFAULT_BORDER_PERIOD_MS, DEFAULT_BORDER_WIDTH, DEFAULT_CONFIG, DEFAULT_REPEAT_DELAY,
     DEFAULT_REPEAT_RATE, DEFAULT_SWITCHER_SLIDE_MS, DEFAULT_WORKSPACES, MAX_BORDER_PERIOD_MS,
     MAX_BORDER_WIDTH, MAX_GAPS, MAX_RADIUS, TOP_LEVEL_NODES,
@@ -879,4 +879,63 @@ fn switcher_rejects_bad_values() {
     assert!(Config::parse("switcher { slide-ms 5000; }").is_err());
     assert!(Config::parse("switcher { slide-ms -1; }").is_err());
     assert!(Config::parse("switcher { nonsense 1; }").is_err());
+}
+
+#[test]
+fn hot_corner_is_off_unless_configured() {
+    assert_eq!(Config::default().hot_corner(), None);
+    assert_eq!(Config::parse("hot-corner 0").unwrap().hot_corner(), None);
+    assert_eq!(
+        Config::parse("hot-corner { size 0; dwell-ms 100; }")
+            .unwrap()
+            .hot_corner(),
+        None
+    );
+}
+
+#[test]
+fn hot_corner_settings_are_parsed() {
+    let config = Config::parse(
+        "hot-corner { size 4; dwell-ms 250; monitor \"DP-1\"; monitor \"HDMI-A-1\"; }",
+    )
+    .unwrap();
+    assert_eq!(
+        config.hot_corner(),
+        Some(HotCorner {
+            size: 4,
+            dwell: Duration::from_millis(250),
+            monitors: vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()],
+        })
+    );
+}
+
+#[test]
+fn hot_corner_block_defaults_to_on_for_every_monitor() {
+    let hot = Config::parse("hot-corner { dwell-ms 100; }")
+        .unwrap()
+        .hot_corner()
+        .unwrap();
+    assert_eq!(hot.size, 4);
+    assert_eq!(hot.dwell, Duration::from_millis(100));
+    assert!(hot.monitors.is_empty());
+    let hot = Config::parse("hot-corner 8").unwrap().hot_corner().unwrap();
+    assert_eq!(hot.size, 8);
+    assert_eq!(hot.dwell, Duration::from_millis(250));
+}
+
+#[test]
+fn hot_corner_rejects_bad_values() {
+    assert!(Config::parse("hot-corner { size 65; }").is_err());
+    assert!(Config::parse("hot-corner { size -1; }").is_err());
+    assert!(Config::parse("hot-corner { dwell-ms 5001; }").is_err());
+    assert!(Config::parse("hot-corner { monitor 3; }").is_err());
+    assert!(Config::parse("hot-corner { nonsense 1; }").is_err());
+    assert!(Config::parse("hot-corner 65").is_err());
+    // The limits themselves are fine.
+    assert!(Config::parse("hot-corner { size 64; dwell-ms 5000; }").is_ok());
+}
+
+#[test]
+fn hot_corner_is_a_known_top_level_node() {
+    assert!(TOP_LEVEL_NODES.contains(&"hot-corner"));
 }

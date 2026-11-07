@@ -128,3 +128,67 @@ pub fn fit_into(pos: Pos, size: Size, rect: Rect) -> Pos {
         pos.1.clamp(rect.1, (rect.1 + rect.3 - size.1).max(rect.1)),
     )
 }
+
+/// The hot corner of the monitor at `rect`: a `size` px square at its top-left.
+pub fn hot_corner_rect(rect: Rect, size: i32) -> Rect {
+    (rect.0, rect.1, size, size)
+}
+
+/// Whether `p` is in the top-left `size` px square of any of `rects`. Always false for a
+/// `size` of 0 or less.
+pub fn inside_any_corner(p: (f64, f64), rects: &[Rect], size: i32) -> bool {
+    size > 0
+        && rects
+            .iter()
+            .any(|rect| contains(hot_corner_rect(*rect, size), p))
+}
+
+/// Whether the straight move `from` -> `to` crosses the left edge of `rect` within its top
+/// `size` px, or the top edge within its left `size` px: the two edges of a hot corner.
+fn crosses_corner_edges(rect: Rect, from: (f64, f64), to: (f64, f64), size: i32) -> bool {
+    let (x0, y0) = (rect.0 as f64, rect.1 as f64);
+    let size = size as f64;
+    // Left edge: where the move crosses the line x = x0.
+    let left = (from.0 - x0) * (to.0 - x0) <= 0.0 && from.0 != to.0 && {
+        let y = from.1 + (x0 - from.0) / (to.0 - from.0) * (to.1 - from.1);
+        y >= y0 && y < y0 + size
+    };
+    // Top edge: where it crosses the line y = y0.
+    let top = (from.1 - y0) * (to.1 - y0) <= 0.0 && from.1 != to.1 && {
+        let x = from.0 + (y0 - from.1) / (to.1 - from.1) * (to.0 - from.0);
+        x >= x0 && x < x0 + size
+    };
+    left || top
+}
+
+/// A barrier around hot corners: the pointer moving `from` -> `to` (already clamped to `all`,
+/// the monitors) may not change monitor through the `size` px of a hot corner's two edges, in
+/// either direction. Only the monitors in `enabled` have a corner. A blocked move ends where
+/// the pointer is held on the monitor it was on, so it can slide into the corner without
+/// overshooting onto the neighbour. Moves within one monitor are never touched.
+pub fn hot_corner_barrier(
+    from: (f64, f64),
+    to: (f64, f64),
+    all: &[Rect],
+    enabled: &[Rect],
+    size: i32,
+) -> (f64, f64) {
+    if size <= 0 {
+        return to;
+    }
+    let blocked = enabled.iter().any(|rect| {
+        contains(*rect, from) != contains(*rect, to) && crosses_corner_edges(*rect, from, to, size)
+    });
+    if !blocked {
+        return to;
+    }
+    let home = all
+        .iter()
+        .copied()
+        .find(|rect| contains(*rect, from))
+        .or_else(|| nearest(from, all).map(|i| all[i]));
+    match home {
+        Some(home) => clamp_to_rects(to, &[home]),
+        None => to,
+    }
+}
