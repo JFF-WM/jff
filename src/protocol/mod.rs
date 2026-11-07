@@ -15,4 +15,5 @@ pub mod session_lock;
 pub mod shortcuts_inhibit;
 pub mod tearing_control;
 pub mod text_input;
+pub mod toplevel_icon;
 pub mod workspace;

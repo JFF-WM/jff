@@ -66,6 +66,7 @@ use crate::primitives::geom::Size;
 use crate::primitives::layout::{self, Rect};
 use crate::primitives::overview_grid::{self as overview, Dir, Held, Thumb};
 use crate::protocol::layer_shell::{ABOVE_WINDOWS, BELOW_WINDOWS};
+use crate::protocol::toplevel_icon;
 use crate::render::effects::background_effect::render_for_surface_zoomed;
 use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
 use crate::render::effects::rounded::{is_fullscreen, ring_element, Rounding};
@@ -279,7 +280,7 @@ pub struct Overview {
     search: Search,
     /// The painted app icon badge of each app id among `windows`, drawn at the bottom centre of
     /// its thumbnails. Painted when a window first shows up.
-    badges: HashMap<String, MemoryRenderBuffer>,
+    badges: HashMap<(String, u64), MemoryRenderBuffer>,
     /// What `badges` was painted for: the version of the app list (icons come from it) and
     /// whether the font was there (the lettered fallback needs it). Another one empties it.
     badges_for: (u64, bool),
@@ -380,6 +381,15 @@ fn app_id_of(window: &Window) -> String {
         .toplevel()
         .map(|toplevel| toplevel_names(toplevel.wl_surface()).0)
         .unwrap_or_default()
+}
+
+/// What a window's badge is looked up by: its app id and what icon it set itself (`0` for none,
+/// see `protocol::toplevel_icon`). Windows of one app share a badge until one sets its own.
+fn badge_key(window: &Window) -> (String, u64) {
+    let icon = window.toplevel().map_or(0, |toplevel| {
+        toplevel_icon::fingerprint(toplevel.wl_surface())
+    });
+    (app_id_of(window), icon)
 }
 
 /// Push the app icon badge of thumbnail `index`: at the bottom centre of it, scaled with it. Call
@@ -1771,7 +1781,7 @@ impl JffState {
 
         let badges = thumbs
             .iter()
-            .map(|(window, _)| ov.badges.get(&app_id_of(window)).cloned())
+            .map(|(window, _)| ov.badges.get(&badge_key(window)).cloned())
             .collect();
         let output = ov.output.clone();
         let highlight = ov.highlight.clone();
@@ -1811,18 +1821,25 @@ impl JffState {
             ov.badges_for = stamp;
         }
         for window in &ov.windows {
-            let app_id = app_id_of(window);
-            if app_id.is_empty() || ov.badges.contains_key(&app_id) {
+            let key = badge_key(window);
+            let (app_id, own_icon) = (key.0.as_str(), key.1 != 0);
+            if (app_id.is_empty() && !own_icon) || ov.badges.contains_key(&key) {
                 continue;
             }
-            let entry = apps::entry_for_app_id(&ov.search.entries, &app_id)
+            let entry = apps::entry_for_app_id(&ov.search.entries, app_id)
                 .and_then(|i| ov.search.entries.get(i));
-            let icon = entry
-                .and_then(|entry| crate::feature::app_icons::icon_for(&entry.icon))
-                .or_else(|| crate::feature::app_icons::icon_for(&app_id));
-            let name = entry.map_or(app_id.as_str(), |entry| entry.name.as_str());
+            // What the window says itself comes first, the app's desktop file is the guess.
+            let icon = window
+                .toplevel()
+                .filter(|_| own_icon)
+                .and_then(|toplevel| toplevel_icon::client_icon(toplevel.wl_surface()))
+                .or_else(|| {
+                    entry.and_then(|entry| crate::feature::app_icons::icon_for(&entry.icon))
+                })
+                .or_else(|| crate::feature::app_icons::icon_for(app_id));
+            let name = entry.map_or(app_id, |entry| entry.name.as_str());
             let picture = search_ui::paint_badge(fonts, icon.as_deref(), name);
-            ov.badges.insert(app_id, buffer_of(&picture));
+            ov.badges.insert(key, buffer_of(&picture));
         }
     }
 
@@ -1928,7 +1945,7 @@ fn overview_layout(ov: &Overview, thumbnail_height: Option<i32>) -> Vec<Thumb> {
     let rect = output_rect(&ov.output);
     let mut area = layout::grow(rect, -MARGIN);
     if ov.switcher.is_none() && ov.search.active() {
-        // Room for the search box above the thumbnails and the app list below them.
+        // Room above the thumbnails for the search box and, under it, the app list.
         let wanted = search_layout(ov);
         let push_down = (rect.1 + wanted.top) - area.1;
         if push_down > 0 {
@@ -1987,7 +2004,8 @@ struct SearchLayout {
     list_rect: Option<Rect>,
     /// How far down from the top of the monitor the thumbnails may start.
     top: i32,
-    /// How much of the thumbnails' area the app list takes from the bottom.
+    /// How much of the thumbnails' area is taken from the bottom. Nothing now that the app list
+    /// is above them.
     bottom: i32,
 }
 
@@ -2009,20 +2027,24 @@ fn search_layout(ov: &Overview) -> SearchLayout {
     let (list_width, list_height) = search_ui::grid_size(count, zone_w - 80);
     let rows = count;
     let list_rect = (rows > 0).then(|| {
-        // Under the box when there are no thumbnails, else under the thumbnails.
-        let top = if ov.visible.is_empty() {
-            y + search_ui::BOX_HEIGHT + search_ui::GAP
-        } else {
-            rect.1 + rect.3 - MARGIN - list_height
-        };
+        // Always right under the box, with the thumbnails below it.
+        let top = y + search_ui::BOX_HEIGHT + search_ui::GAP;
         let list_x = rect.0 + zone_x + (zone_w - list_width) / 2;
         (list_x, top, list_width, list_height)
     });
     SearchLayout {
         box_rect,
         list_rect,
-        top: zone_y + search_ui::TOP_OFFSET + search_ui::BOX_HEIGHT + 16,
-        bottom: if rows > 0 { list_height + 16 } else { 0 },
+        top: zone_y
+            + search_ui::TOP_OFFSET
+            + search_ui::BOX_HEIGHT
+            + if rows > 0 {
+                search_ui::GAP + list_height
+            } else {
+                0
+            }
+            + 16,
+        bottom: 0,
     }
 }
 

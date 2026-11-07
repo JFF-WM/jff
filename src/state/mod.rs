@@ -81,6 +81,7 @@ use smithay::wayland::shell::xdg::{
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xdg_system_bell::{XdgSystemBellHandler, XdgSystemBellState};
+use smithay::wayland::xdg_toplevel_icon::{XdgToplevelIconHandler, XdgToplevelIconManager};
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
@@ -151,6 +152,10 @@ pub struct JffState {
     pub xdg_activation_state: XdgActivationState,
     #[allow(dead_code)]
     pub xdg_system_bell_state: XdgSystemBellState,
+    /// xdg-toplevel-icon: windows say their own icon. Read when the overview paints one (see
+    /// `protocol/toplevel_icon.rs`), so the global needs no handler.
+    #[allow(dead_code)]
+    pub xdg_toplevel_icon_manager: XdgToplevelIconManager,
     #[allow(dead_code)]
     pub viewporter_state: ViewporterState,
     // Pointer lock/confine and raw relative motion: what games need for mouse look.
@@ -319,6 +324,10 @@ impl JffState {
         let xdg_foreign_state = XdgForeignState::new::<Self>(&display_handle);
         let xdg_activation_state = XdgActivationState::new::<Self>(&display_handle);
         let xdg_system_bell_state = XdgSystemBellState::new::<Self>(&display_handle);
+        let mut xdg_toplevel_icon_manager = XdgToplevelIconManager::new::<Self>(&display_handle);
+        for size in crate::protocol::toplevel_icon::ICON_SIZES {
+            xdg_toplevel_icon_manager.add_icon_size(size);
+        }
 
         // wp_viewporter: xwayland-satellite needs it to scale X11 windows.
         let viewporter_state = ViewporterState::new::<Self>(&display_handle);
@@ -467,6 +476,7 @@ impl JffState {
             xdg_foreign_state,
             xdg_activation_state,
             xdg_system_bell_state,
+            xdg_toplevel_icon_manager,
             viewporter_state,
             pointer_constraints_state,
             cursor_shape_manager_state,
@@ -821,6 +831,9 @@ impl XdgActivationHandler for JffState {
         self.xdg_activation_state.remove_token(&token);
     }
 }
+
+// xdg-toplevel-icon: nothing to do when an icon is set, the overview reads it when it paints.
+impl XdgToplevelIconHandler for JffState {}
 
 // xdg-system-bell: no sound, so it's logged and shown as a toast.
 impl XdgSystemBellHandler for JffState {
