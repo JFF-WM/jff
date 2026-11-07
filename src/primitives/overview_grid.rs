@@ -108,6 +108,79 @@ fn grid(sizes: &[Size], area: Rect, gap: i32, cols: usize) -> Vec<Thumb> {
         .collect()
 }
 
+/// Windows in one row, centered in `area`, `gap` px apart: the layout of the window switcher.
+/// Every thumbnail is as tall as the row allows (or its real height, if that is less), no taller
+/// than `max_height`, and the row fits in `area`. One entry per size, in order.
+pub fn strip(sizes: &[Size], area: Rect, gap: i32, max_height: i32) -> Vec<Thumb> {
+    let n = sizes.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let area = (area.0, area.1, area.2.max(1), area.3.max(1));
+    let sizes: Vec<Size> = sizes.iter().map(|s| (s.0.max(1), s.1.max(1))).collect();
+    // Rounding can add up to a pixel per window, keep that much room.
+    let slack = n as i32;
+    let gap = if n > 1 {
+        gap.clamp(0, (area.2 - 2 * slack).max(0) / (n as i32 - 1))
+    } else {
+        0
+    };
+    let scale_at = |height: f64, size: Size| (height / size.1 as f64).min(1.0);
+    let row_w = |height: f64| {
+        let windows: f64 = sizes
+            .iter()
+            .map(|s| s.0 as f64 * scale_at(height, *s))
+            .sum();
+        windows + (gap * (n as i32 - 1)) as f64
+    };
+    let budget = (area.2 - slack) as f64;
+    let mut height = max_height.clamp(1, area.3) as f64;
+    if row_w(height) > budget {
+        let (mut lo, mut hi) = (0.0, height);
+        for _ in 0..40 {
+            let mid = (lo + hi) / 2.0;
+            if row_w(mid) <= budget {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        height = lo;
+    }
+
+    let sizes_out: Vec<(Size, f64)> = sizes
+        .iter()
+        .map(|&s| {
+            let scale = scale_at(height, s);
+            let tw = (s.0 as f64 * scale).round().max(1.0) as i32;
+            let th = (s.1 as f64 * scale).round().max(1.0) as i32;
+            ((tw, th), scale)
+        })
+        .collect();
+    let total: i32 = sizes_out.iter().map(|(s, _)| s.0).sum::<i32>() + gap * (n as i32 - 1);
+    let mut x = area.0 + (area.2 - total) / 2;
+    sizes_out
+        .into_iter()
+        .map(|(size, scale)| {
+            let thumb = Thumb {
+                pos: (x, area.1 + (area.3 - size.1) / 2),
+                size,
+                scale,
+            };
+            x += size.0 + gap;
+            thumb
+        })
+        .collect()
+}
+
+/// Which of alt, ctrl and logo are held (in that order).
+pub type Held = (bool, bool, bool);
+
+/// Whether a modifier that was in `held` is no longer in `now`.
+pub fn modifier_released(held: Held, now: Held) -> bool {
+    (held.0 && !now.0) || (held.1 && !now.1) || (held.2 && !now.2)
+}
+
 /// The thumbnail under `p`. Later entries are drawn on top, so they're checked first.
 pub fn hit_test(thumbs: &[Thumb], p: (f64, f64)) -> Option<usize> {
     thumbs.iter().rposition(|t| layout::contains(t.rect(), p))

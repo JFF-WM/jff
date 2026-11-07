@@ -26,7 +26,7 @@ use anyhow::{bail, Context};
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use smithay::input::keyboard::{xkb, Keysym, ModifiersState, XkbConfig};
 
-use crate::desk::Goto;
+use crate::desk::{Goto, Side};
 
 /// Default number of workspaces.
 pub const DEFAULT_WORKSPACES: usize = 9;
@@ -75,6 +75,8 @@ binds {
     Alt+F { fullscreen; }
     Alt+Q { close; }
     Alt+O { overview; }
+    Alt+Tab { switch-window; }
+    Alt+Shift+Tab { switch-window-back; }
     Alt+Shift+R { reload-config; }
     Ctrl+Alt+BackSpace { quit; }
     Super+Escape { toggle-shortcuts-inhibit; }
@@ -139,10 +141,15 @@ pub enum Action {
     Maximize,
     /// Toggle fullscreen on the focused window.
     Fullscreen,
+    /// Fill one half of the monitor with the focused window.
+    Snap(Side),
     /// Ask the focused window to close.
     Close,
     /// Show every window of the current monitor as a thumbnail.
     Overview,
+    /// Window switcher: a row of thumbnails, most recently used first. Pressing the key again
+    /// moves on, letting go of the modifier picks the window.
+    SwitchWindow { backwards: bool },
     /// Switch to a workspace.
     Workspace(Goto),
     /// Send the focused window to workspace `n` (0-based).
@@ -855,6 +862,12 @@ impl Config {
         self.gaps.max(self.border.width)
     }
 
+    /// Pixels between two snapped windows: `gaps`, but at least twice the border width, since
+    /// each window's border is drawn outside it and the two rings must not touch.
+    pub fn snap_gap(&self) -> i32 {
+        self.gaps.max(2 * self.border.width)
+    }
+
     /// Corner radius in pixels the blur behind popups (menus, popovers) is shaped with: the
     /// `popup-radius` setting, `radius` when it isn't set. GTK popovers are rounded by the
     /// client, which the compositor can't see, so this says how much.
@@ -1472,8 +1485,14 @@ fn parse_action(node: &KdlNode) -> anyhow::Result<Action> {
         "terminal" => no_args(Action::Terminal),
         "maximize" => no_args(Action::Maximize),
         "fullscreen" => no_args(Action::Fullscreen),
+        "snap-left" => no_args(Action::Snap(Side::Left)),
+        "snap-right" => no_args(Action::Snap(Side::Right)),
+        "snap-top" => no_args(Action::Snap(Side::Top)),
+        "snap-bottom" => no_args(Action::Snap(Side::Bottom)),
         "close" => no_args(Action::Close),
         "overview" => no_args(Action::Overview),
+        "switch-window" => no_args(Action::SwitchWindow { backwards: false }),
+        "switch-window-back" => no_args(Action::SwitchWindow { backwards: true }),
         "workspace-next" => no_args(Action::Workspace(Goto::Next)),
         "workspace-prev" => no_args(Action::Workspace(Goto::Prev)),
         "reload-config" => no_args(Action::ReloadConfig),

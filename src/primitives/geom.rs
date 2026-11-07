@@ -1,5 +1,7 @@
 //! Pure resize geometry, no Smithay/Wayland types, so it can be unit-tested on its own.
 
+use crate::desk::Side;
+
 pub type Pos = (i32, i32);
 pub type Size = (i32, i32);
 
@@ -10,6 +12,71 @@ pub struct Edges {
     pub right: bool,
     pub top: bool,
     pub bottom: bool,
+}
+
+/// Where a window snapped to `side` of `area` goes. The outer edges keep `inset` px free, the
+/// edge shared with the window on the other side leaves `gap` px between the two, half of it
+/// on each. Like `inset_rect`, it never returns less than 1px per window.
+pub fn snapped_rect(
+    area: (i32, i32, i32, i32),
+    inset: i32,
+    gap: i32,
+    side: Side,
+) -> (i32, i32, i32, i32) {
+    let (x, y, w, h) = inset_rect(area, inset);
+    // Offset and length of one half along an axis of length `len`.
+    let half = |len: i32, second: bool| {
+        if len <= 1 {
+            return (0, len);
+        }
+        let gap = gap.clamp(0, len - 2);
+        let mid = len / 2;
+        if second {
+            let start = mid + (gap - gap / 2);
+            (start, len - start)
+        } else {
+            (0, mid - gap / 2)
+        }
+    };
+    match side {
+        Side::Left | Side::Right => {
+            let (dx, w) = half(w, side == Side::Right);
+            (x + dx, y, w, h)
+        }
+        Side::Top | Side::Bottom => {
+            let (dy, h) = half(h, side == Side::Bottom);
+            (x, y + dy, w, h)
+        }
+    }
+}
+
+/// Left and right win in the corners, the bottom edge doesn't count.
+pub fn edge_at(rect: (i32, i32, i32, i32), p: (f64, f64), margin: f64) -> Option<Side> {
+    let (x, y, w, _) = rect;
+    if p.0 <= x as f64 + margin {
+        Some(Side::Left)
+    } else if p.0 >= (x + w) as f64 - margin {
+        Some(Side::Right)
+    } else if p.1 <= y as f64 + margin {
+        Some(Side::Top)
+    } else {
+        None
+    }
+}
+
+pub fn pointer_anchored_pos(from: (i32, i32, i32, i32), size: Size, p: (f64, f64)) -> Pos {
+    let (x, y, w, h) = from;
+    let ratio = |at: f64, start: i32, len: i32| {
+        if len > 0 {
+            ((at - start as f64) / len as f64).clamp(0.0, 1.0)
+        } else {
+            0.5
+        }
+    };
+    (
+        (p.0 - ratio(p.0, x, w) * size.0 as f64).round() as i32,
+        (p.1 - ratio(p.1, y, h) * size.1 as f64).round() as i32,
+    )
 }
 
 /// Whether the window is bigger than `area` on either axis.

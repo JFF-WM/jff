@@ -25,14 +25,32 @@ pub fn resolve(goto: Goto, current: usize, count: usize) -> usize {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowMode {
+    #[default]
+    Floating,
+    Maximized,
+    Fullscreen,
+    Snapped(Side),
+}
+
 pub struct Entry<W> {
     pub window: W,
     pub pos: Pos,
     /// The workspace the window lives on (0-based). Windows on other workspaces aren't shown,
     /// drawn, or reachable with the pointer.
     pub workspace: usize,
-    /// Where to put the window back when it's un-maximized, and the size it had. `Some` means
-    /// it's maximized right now.
+    pub mode: WindowMode,
+    pub before_fullscreen: WindowMode,
+    /// Where the window floats back to. `Some` unless it's floating.
     pub restore: Option<(Pos, (i32, i32))>,
     /// Whether the window's first real size has already been checked against the output. Set
     /// once, see `mark_fitted_where`.
@@ -70,6 +88,8 @@ impl<W> Desk<W> {
             window,
             pos,
             workspace: self.current,
+            mode: WindowMode::Floating,
+            before_fullscreen: WindowMode::Floating,
             restore: None,
             fitted: false,
             shown: None,
@@ -172,66 +192,75 @@ impl<W> Desk<W> {
         }
     }
 
-    pub fn is_maximized(&self, pred: impl Fn(&W) -> bool) -> bool {
-        self.entries
-            .iter()
-            .find(|e| pred(&e.window))
-            .map(|e| e.restore.is_some())
-            .unwrap_or(false)
+    pub fn mode_of(&self, pred: impl Fn(&W) -> bool) -> WindowMode {
+        self.find_by(pred).map(|e| e.mode).unwrap_or_default()
     }
 
-    /// Mark the window maximized, remembering where it was. Returns false if it's already
-    /// maximized or not found - the remembered geometry is never overwritten.
-    pub fn maximize_where(
-        &mut self,
-        pred: impl Fn(&W) -> bool,
-        area_pos: Pos,
-        size: (i32, i32),
-    ) -> bool {
-        match self.entries.iter_mut().find(|e| pred(&e.window)) {
-            Some(e) if e.restore.is_none() => {
-                e.restore = Some((e.pos, size));
-                e.pos = area_pos;
-                true
-            }
-            _ => false,
+    pub fn is_floating(&self, pred: impl Fn(&W) -> bool) -> bool {
+        self.mode_of(pred) == WindowMode::Floating
+    }
+
+    pub fn is_maximized(&self, pred: impl Fn(&W) -> bool) -> bool {
+        self.mode_of(pred) == WindowMode::Maximized
+    }
+
+    pub fn mode_after_fullscreen(&self, pred: impl Fn(&W) -> bool) -> WindowMode {
+        match self.find_by(pred) {
+            Some(e) if e.mode == WindowMode::Fullscreen => e.before_fullscreen,
+            Some(e) => e.mode,
+            None => WindowMode::Floating,
         }
     }
 
-    /// Undo `maximize_where`: put the window back and return the size it should have.
-    pub fn unmaximize_where(&mut self, pred: impl Fn(&W) -> bool) -> Option<(i32, i32)> {
+    /// What floats back is only taken while the window floats, so mode to mode keeps it.
+    pub fn set_mode_where(
+        &mut self,
+        pred: impl Fn(&W) -> bool,
+        mode: WindowMode,
+        area_pos: Pos,
+        size: (i32, i32),
+    ) -> bool {
+        if mode == WindowMode::Floating {
+            return false;
+        }
+        let Some(e) = self.entries.iter_mut().find(|e| pred(&e.window)) else {
+            return false;
+        };
+        if e.mode == WindowMode::Floating {
+            e.restore = Some((e.pos, size));
+        }
+        if mode == WindowMode::Fullscreen && e.mode != WindowMode::Fullscreen {
+            e.before_fullscreen = e.mode;
+        }
+        e.mode = mode;
+        e.pos = area_pos;
+        true
+    }
+
+    pub fn float_where(&mut self, pred: impl Fn(&W) -> bool) -> Option<(i32, i32)> {
         let e = self.entries.iter_mut().find(|e| pred(&e.window))?;
         let (pos, size) = e.restore.take()?;
         e.pos = pos;
+        e.mode = WindowMode::Floating;
+        e.before_fullscreen = WindowMode::Floating;
         Some(size)
     }
 
-    /// Take the remembered geometry out of a maximized window, leaving it where it is and no
-    /// longer maximized as far as the desk is concerned. Pair with `remaximize_where`.
-    pub fn take_restore_where(&mut self, pred: impl Fn(&W) -> bool) -> Option<(Pos, (i32, i32))> {
-        self.entries
-            .iter_mut()
-            .find(|e| pred(&e.window))?
-            .restore
-            .take()
-    }
-
-    /// Maximize a window that isn't maximized, going back to the geometry `restore` that
-    /// `take_restore_where` returned instead of the current one. Returns false (and changes
-    /// nothing) if the window is gone or became maximized meanwhile.
-    pub fn remaximize_where(
+    pub fn float_in_place_where(
         &mut self,
         pred: impl Fn(&W) -> bool,
-        area_pos: Pos,
-        restore: (Pos, (i32, i32)),
-    ) -> bool {
-        match self.entries.iter_mut().find(|e| pred(&e.window)) {
-            Some(e) if e.restore.is_none() => {
+    ) -> Option<(Pos, (i32, i32))> {
+        let e = self.entries.iter_mut().find(|e| pred(&e.window))?;
+        e.mode = WindowMode::Floating;
+        e.before_fullscreen = WindowMode::Floating;
+        e.restore.take()
+    }
+
+    pub fn set_restore_where(&mut self, pred: impl Fn(&W) -> bool, restore: (Pos, (i32, i32))) {
+        if let Some(e) = self.entries.iter_mut().find(|e| pred(&e.window)) {
+            if e.restore.is_some() {
                 e.restore = Some(restore);
-                e.pos = area_pos;
-                true
             }
-            _ => false,
         }
     }
 
@@ -242,8 +271,6 @@ impl<W> Desk<W> {
         }
     }
 
-    /// Change where the first maximized window matching `pred` goes back to. No-op if the
-    /// window isn't maximized.
     pub fn set_restore_pos_where(&mut self, pred: impl Fn(&W) -> bool, pos: Pos) {
         if let Some(restore) = self
             .entries

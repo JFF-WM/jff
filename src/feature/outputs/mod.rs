@@ -7,16 +7,19 @@ use smithay::backend::input::InputTime;
 use smithay::desktop::space::SpaceElement;
 use smithay::input::pointer::MotionEvent;
 use smithay::output::Output;
-use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::utils::{Logical, Point, Rectangle, Size, SERIAL_COUNTER};
 use smithay::wayland::fractional_scale::with_fractional_scale;
 
 use crate::config::ModeRequest;
+use crate::desk::{Side, WindowMode};
+use crate::primitives::geom;
 use crate::primitives::layout::{self, Rect};
 use crate::state::JffState;
 
 /// Area used when there is no monitor at all.
 const NO_OUTPUT: Rect = (0, 0, 800, 600);
+
+const EDGE_MARGIN: f64 = 2.0;
 
 /// How long an unplugged monitor's global stays around for clients to react first.
 const GLOBAL_GRACE: Duration = Duration::from_secs(10);
@@ -85,6 +88,15 @@ impl JffState {
         layout::nearest((p.x, p.y), &rects)
             .map(|i| rects[i])
             .unwrap_or(NO_OUTPUT)
+    }
+
+    pub fn edge_drop_mode(&self, at: Point<f64, Logical>) -> Option<WindowMode> {
+        let rects = self.output_rects();
+        let i = layout::nearest((at.x, at.y), &rects)?;
+        match geom::edge_at(rects[i], (at.x, at.y), EDGE_MARGIN)? {
+            side @ (Side::Left | Side::Right) => Some(WindowMode::Snapped(side)),
+            _ => Some(WindowMode::Maximized),
+        }
     }
 
     /// Monitor a window of `size` at `pos` belongs to: the one under its center.
@@ -171,19 +183,23 @@ impl JffState {
 
         let rects = self.output_rects();
         let usable: Vec<Rect> = rects.iter().map(|r| self.usable_rect(*r)).collect();
+        let free: Vec<Rect> = rects.iter().map(|r| self.panel_free_rect(*r)).collect();
+        let (inset, snap_gap) = (self.config.maximize_inset(), self.config.snap_gap());
         if !rects.is_empty() {
             for entry in self.desk.iter_mut() {
                 let size = entry.window.geometry().size;
                 let size = (size.w, size.h);
-                if entry.restore.is_some() {
+                if entry.mode != WindowMode::Floating {
                     let Some(i) = layout::nearest(layout::center(entry.pos, size), &rects) else {
                         continue;
                     };
-                    // Maximized windows stop at panels, fullscreen ones fill the monitor.
-                    let fullscreen = entry.window.toplevel().is_some_and(|t| {
-                        t.with_pending_state(|s| s.states.contains(xdg_toplevel::State::Fullscreen))
-                    });
-                    let rect = if fullscreen { rects[i] } else { usable[i] };
+                    let rect = match entry.mode {
+                        WindowMode::Fullscreen => rects[i],
+                        WindowMode::Snapped(side) => {
+                            geom::snapped_rect(free[i], inset, snap_gap, side)
+                        }
+                        _ => usable[i],
+                    };
                     entry.pos = (rect.0, rect.1);
                     if let Some(toplevel) = entry.window.toplevel() {
                         toplevel.with_pending_state(|s| s.size = Some((rect.2, rect.3).into()));

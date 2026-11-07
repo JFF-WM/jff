@@ -12,10 +12,10 @@ use smithay::input::pointer::{
     RelativeMotionEvent,
 };
 use smithay::input::SeatHandler;
-use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::utils::{Logical, Point};
 
-use crate::desk::Pos;
+use crate::desk::{Pos, WindowMode};
+use crate::primitives::geom;
 use crate::state::JffState;
 
 pub struct MoveGrab {
@@ -23,63 +23,40 @@ pub struct MoveGrab {
     window: Window,
     /// Where the window was when the drag began.
     initial_pos: Pos,
-    /// Set when the window was maximized as the drag began and was shrunk for it: the geometry
-    /// it goes back to when un-maximized. The window is maximized again when the drag ends,
-    /// but only if it's still a plain floating window by then.
+    /// Mode the window was taken out of for the drag. Maximized ones go back on release,
+    /// snapped ones only if they weren't moved.
+    back_to: Option<WindowMode>,
     saved_restore: Option<(Pos, (i32, i32))>,
+    last: Point<f64, Logical>,
+    moved: bool,
 }
 
 impl MoveGrab {
     pub fn new(start_data: GrabStartData<JffState>, window: Window, initial_pos: Pos) -> Self {
         Self {
+            last: start_data.location,
             start_data,
             window,
             initial_pos,
+            back_to: None,
             saved_restore: None,
+            moved: false,
         }
     }
 
-    /// Drag a window that was maximized (and has been shrunk to a half-output size).
-    /// `restore` is what `Desk::take_restore_where` returned for it.
-    pub fn new_shrunk(
+    pub fn new_unfilled(
         start_data: GrabStartData<JffState>,
         window: Window,
         initial_pos: Pos,
-        restore: (Pos, (i32, i32)),
+        mode: WindowMode,
+        restore: Option<(Pos, (i32, i32))>,
     ) -> Self {
         Self {
-            saved_restore: Some(restore),
+            back_to: Some(mode),
+            saved_restore: restore,
             ..Self::new(start_data, window, initial_pos)
         }
     }
-}
-
-/// Size and position of a maximized window while it is dragged: half the output's width and
-/// height, placed so the pointer keeps the same relative spot on the window as it had on the
-/// output (grab the right edge of the screen, hold the right edge of the smaller window).
-pub fn shrunk_geometry(
-    output: (i32, i32, i32, i32),
-    pointer: Point<f64, Logical>,
-) -> (Pos, (i32, i32)) {
-    let (ox, oy, ow, oh) = output;
-    let size = ((ow / 2).max(1), (oh / 2).max(1));
-    let rx = if ow > 0 {
-        ((pointer.x - ox as f64) / ow as f64).clamp(0.0, 1.0)
-    } else {
-        0.5
-    };
-    let ry = if oh > 0 {
-        ((pointer.y - oy as f64) / oh as f64).clamp(0.0, 1.0)
-    } else {
-        0.5
-    };
-    (
-        (
-            (pointer.x - rx * size.0 as f64).round() as i32,
-            (pointer.y - ry * size.1 as f64).round() as i32,
-        ),
-        size,
-    )
 }
 
 /// Window position after the pointer travels from `start` to `now`.
@@ -87,6 +64,17 @@ pub fn dragged_pos(initial: Pos, start: Point<f64, Logical>, now: Point<f64, Log
     (
         initial.0 + (now.x - start.x).round() as i32,
         initial.1 + (now.y - start.y).round() as i32,
+    )
+}
+
+pub fn shrunk_geometry(
+    monitor: (i32, i32, i32, i32),
+    pointer: Point<f64, Logical>,
+) -> (Pos, (i32, i32)) {
+    let size = ((monitor.2 / 2).max(1), (monitor.3 / 2).max(1));
+    (
+        geom::pointer_anchored_pos(monitor, size, (pointer.x, pointer.y)),
+        size,
     )
 }
 
@@ -101,6 +89,8 @@ impl PointerGrab<JffState> for MoveGrab {
         // The dragged client must not see the pointer move while we own it.
         handle.motion(data, None, event);
 
+        self.last = event.location;
+        self.moved |= event.location != self.start_data.location;
         let pos = dragged_pos(self.initial_pos, self.start_data.location, event.location);
         let window = self.window.clone();
         data.desk.set_pos_where(|w| *w == window, pos);
@@ -212,43 +202,32 @@ impl PointerGrab<JffState> for MoveGrab {
     }
 
     fn unset(&mut self, data: &mut JffState) {
-        let Some(restore) = self.saved_restore.take() else {
-            return; // a floating window: nothing to put back, it keeps its size
-        };
         let window = self.window.clone();
         let Some(toplevel) = window.toplevel().cloned() else {
             return;
         };
-        // Something else changed the window's mode during the drag (a maximize or fullscreen
-        // request, say): that's the newer decision, leave it alone.
-        let changed = data.desk.is_maximized(|w| *w == window)
-            || toplevel.with_pending_state(|s| {
-                s.states.contains(xdg_toplevel::State::Fullscreen)
-                    || s.states.contains(xdg_toplevel::State::Maximized)
-            });
-        let Some((pos, size)) = data
-            .desk
-            .find_by(|w| *w == window)
-            .map(|e| (e.pos, e.window.geometry().size))
-        else {
-            return; // closed during the drag
+        let at_edge = if self.moved {
+            data.edge_drop_mode(self.last)
+        } else {
+            None
         };
-        if changed {
+        let back = match self.back_to {
+            Some(WindowMode::Maximized) => Some(WindowMode::Maximized),
+            Some(mode) if !self.moved => Some(mode),
+            _ => None,
+        };
+        let Some(target) = at_edge.or(back) else {
+            return;
+        };
+        // Gone, or somebody else changed its mode while it was dragged.
+        let untouched = data.desk.find_by(|w| *w == window).is_some()
+            && data.desk.is_floating(|w| *w == window);
+        if !untouched {
             return;
         }
-        // Maximize on the monitor it was dropped on, keeping the geometry from before the
-        // first maximize as the one to go back to.
-        let monitor = data.rect_for_window(pos, (size.w, size.h));
-        let (x, y, w, h) = data.usable_rect(monitor);
-        if data
-            .desk
-            .remaximize_where(|e| *e == window, (x, y), restore)
-        {
-            toplevel.with_pending_state(|s| {
-                s.states.set(xdg_toplevel::State::Maximized);
-                s.size = Some((w, h).into());
-            });
-            toplevel.send_pending_configure();
+        data.set_mode(&toplevel, target);
+        if let Some(restore) = self.saved_restore.take() {
+            data.desk.set_restore_where(|w| *w == window, restore);
         }
     }
 }

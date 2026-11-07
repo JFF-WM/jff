@@ -361,7 +361,7 @@ impl JffState {
     }
 
     /// The part of the monitor at `rect` that panels haven't reserved, before any gap.
-    fn panel_free_rect(&self, rect: Rect) -> Rect {
+    pub fn panel_free_rect(&self, rect: Rect) -> Rect {
         let Some(output) = self.output_for_rect(rect) else {
             return rect;
         };

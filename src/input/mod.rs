@@ -12,7 +12,6 @@ use smithay::input::keyboard::KeyboardSource;
 use smithay::input::pointer::{
     AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent, RelativeMotionEvent,
 };
-use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Size, SERIAL_COUNTER};
@@ -21,12 +20,13 @@ use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerCons
 use crate::config::{Action, Config};
 use crate::feature::overview_mode::{overview_key, OverviewKey};
 use crate::feature::screenshot::{report_failure, screenshot_key, ScreenshotKey};
+use crate::desk::WindowMode;
 use crate::input::grabs::r#move::{shrunk_geometry, MoveGrab};
 use crate::input::grabs::resize::ResizeGrab;
 use crate::primitives::geom;
 use crate::primitives::layout;
 use crate::protocol::layer_shell::Under;
-use crate::state::JffState;
+use crate::state::{configure_mode, JffState};
 
 /// What a compositor key combination asks for.
 enum Bind {
@@ -95,6 +95,10 @@ impl JffState {
                             // A key whose press no client saw keeps its release hidden too, or
                             // they'd get a release with no press.
                             let suppressed = state.suppressed_keys.remove(&key_code);
+                            // Letting go of Alt picks the window the switcher is on.
+                            if state.switcher_released((mods.alt, mods.ctrl, mods.logo)) {
+                                return Bind::Overview(OverviewKey::Select);
+                            }
                             return if overview || screenshot || suppressed {
                                 Bind::Swallow
                             } else {
@@ -483,8 +487,10 @@ impl JffState {
             Action::Terminal => spawn_terminal(),
             Action::Maximize => self.toggle_maximize_focused(),
             Action::Fullscreen => self.toggle_fullscreen_focused(),
+            Action::Snap(side) => self.snap_focused(side),
             Action::Close => self.close_focused(),
             Action::Overview => self.toggle_overview(),
+            Action::SwitchWindow { backwards } => self.open_switcher(backwards),
             Action::Workspace(goto) => self.goto_workspace(goto),
             Action::MoveToWorkspace(workspace) => self.move_focused_to_workspace(workspace),
             Action::ReloadConfig => self.reload_config(),
@@ -535,64 +541,15 @@ impl JffState {
         };
 
         if button == BTN_LEFT {
-            // A maximized window shrinks to half the output while it's dragged, and is
-            // maximized again when it's let go.
-            // Only a window in the xdg Maximized state (not floating, not fullscreen: the desk
-            // counts both fullscreen and maximized windows as "filled").
-            let maximized = self.desk.is_maximized(|w| w == window)
-                && window.toplevel().is_some_and(|t| {
-                    t.with_pending_state(|s| {
-                        s.states.contains(xdg_toplevel::State::Maximized)
-                            && !s.states.contains(xdg_toplevel::State::Fullscreen)
-                    })
-                });
-            if maximized {
-                if let Some(toplevel) = window.toplevel().cloned() {
-                    let output = self.rect_for_window(initial_pos, (size.w, size.h));
-                    let (pos, new_size) = shrunk_geometry(output, location);
-                    // The window is a floating one for the duration of the drag (desk and
-                    // xdg state agree), the geometry it returns to is kept in the grab.
-                    let Some(restore) = self.desk.take_restore_where(|w| w == window) else {
-                        return false;
-                    };
-                    self.desk.set_pos_where(|w| w == window, pos);
-                    toplevel.with_pending_state(|s| {
-                        s.states.unset(xdg_toplevel::State::Maximized);
-                        s.size = Some(new_size.into());
-                    });
-                    toplevel.send_pending_configure();
-                    pointer.set_grab(
-                        self,
-                        MoveGrab::new_shrunk(start_data, window.clone(), pos, restore),
-                        serial,
-                        Focus::Clear,
-                    );
-                    return true;
-                }
-            }
-            pointer.set_grab(
-                self,
-                MoveGrab::new(start_data, window.clone(), initial_pos),
-                serial,
-                Focus::Clear,
-            );
-            return true;
+            return self.start_move(window, start_data, serial);
         }
 
         let Some(toplevel) = window.toplevel().cloned() else {
             return false;
         };
-        // Resizing a maximized (or fullscreen) window makes it a floating one right away: the
-        // desk forgets the maximized state and the client is told, so the two never disagree.
-        // The resize starts from the geometry it has now.
-        if self.desk.is_maximized(|w| w == window) {
-            self.desk.take_restore_where(|w| w == window);
-            toplevel.with_pending_state(|s| {
-                s.states.unset(xdg_toplevel::State::Maximized);
-                s.states.unset(xdg_toplevel::State::Fullscreen);
-                s.size = Some((size.w, size.h).into());
-            });
-            toplevel.send_pending_configure();
+        if !self.desk.is_floating(|w| w == window) {
+            self.desk.float_in_place_where(|w| w == window);
+            configure_mode(&toplevel, WindowMode::Floating, false, Some((size.w, size.h)));
         }
         let local = (
             location.x - initial_pos.0 as f64,
@@ -600,6 +557,64 @@ impl JffState {
         );
         let edges = geom::nearest_corner(local, (size.w, size.h));
         let grab = ResizeGrab::new(start_data, toplevel, edges, initial_pos, (size.w, size.h));
+        pointer.set_grab(self, grab, serial, Focus::Clear);
+        true
+    }
+
+    pub fn start_move(
+        &mut self,
+        window: &Window,
+        start_data: GrabStartData<JffState>,
+        serial: smithay::utils::Serial,
+    ) -> bool {
+        let Some((pos, size)) = self
+            .desk
+            .find_by(|w| w == window)
+            .map(|e| (e.pos, e.window.geometry().size))
+        else {
+            return false;
+        };
+        let Some(pointer) = self.seat.get_pointer() else {
+            return false;
+        };
+        let at = (start_data.location.x, start_data.location.y);
+        let mode = self.desk.mode_of(|w| w == window);
+        let mut initial_pos = pos;
+        let mut back = None;
+
+        if let Some(toplevel) = window.toplevel().cloned() {
+            match mode {
+                WindowMode::Maximized => {
+                    let monitor = self.rect_for_window(pos, (size.w, size.h));
+                    let (new_pos, new_size) = shrunk_geometry(monitor, start_data.location);
+                    let restore = self.desk.float_in_place_where(|w| w == window);
+                    self.desk.set_pos_where(|w| w == window, new_pos);
+                    configure_mode(&toplevel, WindowMode::Floating, false, Some(new_size));
+                    initial_pos = new_pos;
+                    back = Some((mode, restore));
+                }
+                WindowMode::Snapped(_) => {
+                    let restore = self.desk.float_in_place_where(|w| w == window);
+                    let floating = restore.map_or((size.w, size.h), |(_, size)| size);
+                    initial_pos = geom::pointer_anchored_pos(
+                        (pos.0, pos.1, size.w, size.h),
+                        floating,
+                        at,
+                    );
+                    self.desk.set_pos_where(|w| w == window, initial_pos);
+                    configure_mode(&toplevel, WindowMode::Floating, false, Some(floating));
+                    back = Some((mode, restore));
+                }
+                _ => {}
+            }
+        }
+
+        let grab = match back {
+            Some((mode, restore)) => {
+                MoveGrab::new_unfilled(start_data, window.clone(), initial_pos, mode, restore)
+            }
+            None => MoveGrab::new(start_data, window.clone(), initial_pos),
+        };
         pointer.set_grab(self, grab, serial, Focus::Clear);
         true
     }

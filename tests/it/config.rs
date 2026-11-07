@@ -14,7 +14,7 @@ use jff_wm::config::{
     DEFAULT_REPEAT_RATE, DEFAULT_WORKSPACES, MAX_BORDER_PERIOD_MS, MAX_BORDER_WIDTH, MAX_GAPS,
     MAX_RADIUS, TOP_LEVEL_NODES,
 };
-use jff_wm::desk::Goto;
+use jff_wm::desk::{Goto, Side};
 
 fn mods(ctrl: bool, alt: bool, shift: bool, logo: bool) -> ModifiersState {
     ModifiersState {
@@ -242,6 +242,20 @@ fn overview_is_bound_by_default() {
         Some(&Action::Overview)
     );
     assert!(Config::parse("binds { Alt+O { overview 1; } }").is_err());
+}
+
+#[test]
+fn window_switcher_is_bound_by_default() {
+    let config = Config::default();
+    assert_eq!(
+        config.action_for(&mods(false, true, false, false), Keysym::Tab),
+        Some(&Action::SwitchWindow { backwards: false })
+    );
+    assert_eq!(
+        config.action_for(&mods(false, true, true, false), Keysym::Tab),
+        Some(&Action::SwitchWindow { backwards: true })
+    );
+    assert!(Config::parse("binds { Alt+Tab { switch-window 1; } }").is_err());
 }
 
 fn key(name: &str) -> Keysym {
@@ -619,6 +633,16 @@ fn maximized_windows_leave_room_for_the_border() {
     assert_eq!(wide.maximize_inset(), 6);
 }
 
+#[test]
+fn snapped_windows_leave_room_for_both_borders() {
+    assert_eq!(Config::parse("gaps 10").unwrap().snap_gap(), 10);
+    assert_eq!(Config::parse("border { width 4; }").unwrap().snap_gap(), 8);
+    let both = Config::parse("gaps 10\nborder { width 4; }").unwrap();
+    assert_eq!(both.snap_gap(), 10);
+    let wide = Config::parse("gaps 2\nborder { width 6; }").unwrap();
+    assert_eq!(wide.snap_gap(), 12);
+}
+
 fn stamp(len: u64) -> Option<FileStamp> {
     Some(FileStamp {
         modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(len)),
@@ -793,4 +817,30 @@ fn blur_rejects_bad_values() {
     assert!(Config::parse("blur { offset 0; }").is_err());
     assert!(Config::parse("blur { offset \"x\"; }").is_err());
     assert!(Config::parse("blur { radius 3; }").is_err());
+}
+
+#[test]
+fn snap_actions_are_parsed() {
+    let config = Config::parse(
+        "binds { Alt+Left { snap-left; } Alt+Right { snap-right; } Alt+Up { snap-top; } Alt+Down { snap-bottom; } }",
+    )
+    .unwrap();
+    let alt = mods(false, true, false, false);
+    assert_eq!(
+        config.action_for(&alt, Keysym::Left),
+        Some(&Action::Snap(Side::Left))
+    );
+    assert_eq!(
+        config.action_for(&alt, Keysym::Right),
+        Some(&Action::Snap(Side::Right))
+    );
+    assert_eq!(
+        config.action_for(&alt, Keysym::Up),
+        Some(&Action::Snap(Side::Top))
+    );
+    assert_eq!(
+        config.action_for(&alt, Keysym::Down),
+        Some(&Action::Snap(Side::Bottom))
+    );
+    assert!(Config::parse("binds { Alt+Left { snap-left 1; } }").is_err());
 }

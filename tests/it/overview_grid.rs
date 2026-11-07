@@ -7,7 +7,7 @@ use jff_wm::primitives::layout;
 use jff_wm::primitives::layout::Rect;
 use jff_wm::primitives::overview_grid::{
     anchor_in, arrange, cycle, dragged_thumb, drop_pos, ease_out_cubic, hit_test, lerp_thumb,
-    moved_past, neighbor, progress, Dir, Thumb,
+    modifier_released, moved_past, neighbor, progress, strip, Dir, Thumb,
 };
 
 const SCREEN: Rect = (0, 0, 1920, 1080);
@@ -218,4 +218,84 @@ fn lerp_thumb_goes_from_real_window_to_thumbnail() {
     assert_eq!(mid.pos, (50, 50));
     assert_eq!(mid.size, (600, 450));
     assert_eq!(mid.scale, 0.75);
+}
+
+#[test]
+fn nothing_to_strip() {
+    assert!(strip(&[], SCREEN, 16, 360).is_empty());
+}
+
+#[test]
+fn a_lone_window_in_the_strip_keeps_its_size() {
+    let t = strip(&[(400, 300)], SCREEN, 16, 360);
+    assert_eq!(t, vec![thumb(760, 390, 400, 300)]);
+}
+
+#[test]
+fn the_strip_is_one_centered_row_in_order() {
+    let t = strip(&[(400, 300), (800, 300)], SCREEN, 20, 360);
+    assert_eq!(
+        t,
+        vec![thumb(350, 390, 400, 300), thumb(770, 390, 800, 300)]
+    );
+}
+
+#[test]
+fn strip_thumbnails_share_a_height() {
+    let t = strip(&[(1600, 1200), (800, 300)], SCREEN, 16, 300);
+    assert_eq!(t[0].size, (400, 300));
+    assert_eq!(t[0].scale, 0.25);
+    assert_eq!(t[1].size, (800, 300));
+    assert_eq!(t[1].scale, 1.0);
+    assert_eq!(t[1].pos.0, t[0].pos.0 + 400 + 16);
+}
+
+#[test]
+fn a_long_strip_shrinks_to_fit_the_area() {
+    let sizes = vec![(1920, 1080); 10];
+    let t = strip(&sizes, SCREEN, 16, 360);
+    assert!(t.iter().all(|t| t.scale < 0.5));
+    assert!(t[0].pos.0 >= 0);
+    let last = t[9];
+    assert!(last.pos.0 + last.size.0 <= 1920);
+}
+
+#[test]
+fn strip_stays_inside_the_area_without_overlap() {
+    for n in 1..30usize {
+        for width in [2 * n as i32, 200, 1000, 1920] {
+            if width < 2 * n as i32 {
+                continue;
+            }
+            let area = (50, 20, width, 600);
+            let sizes: Vec<Size> = (0..n as i32)
+                .map(|i| (300 + 37 * i, 200 + 53 * (i % 5)))
+                .collect();
+            let t = strip(&sizes, area, 24, 200);
+            assert_eq!(t.len(), n);
+            let mut right = area.0;
+            for t in &t {
+                assert!(t.size.0 >= 1 && t.size.1 >= 1);
+                assert!(t.pos.0 >= right, "overlap, n={n} width={width}");
+                assert!(t.pos.1 >= area.1 && t.pos.1 + t.size.1 <= area.1 + area.3);
+                right = t.pos.0 + t.size.0;
+            }
+            assert!(right <= area.0 + area.2, "n={n} width={width}");
+        }
+    }
+}
+
+#[test]
+fn releasing_a_held_modifier_ends_the_switcher() {
+    let alt = (true, false, false);
+    assert!(!modifier_released(alt, alt));
+    assert!(modifier_released(alt, (false, false, false)));
+    // another modifier coming or going doesn't matter
+    assert!(!modifier_released(alt, (true, true, true)));
+    assert!(modifier_released((true, false, true), (true, false, false)));
+    // nothing held at open: nothing to let go of
+    assert!(!modifier_released(
+        (false, false, false),
+        (false, false, false)
+    ));
 }

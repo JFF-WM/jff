@@ -42,7 +42,7 @@ use crate::feature::outputs::output_rect;
 use crate::input::{BTN_LEFT, BTN_MIDDLE};
 use crate::primitives::geom::Size;
 use crate::primitives::layout::{self, Rect};
-use crate::primitives::overview_grid::{self as overview, Dir, Thumb};
+use crate::primitives::overview_grid::{self as overview, Dir, Held, Thumb};
 use crate::protocol::layer_shell::{ABOVE_WINDOWS, BELOW_WINDOWS};
 use crate::render::effects::background_effect::render_for_surface_zoomed;
 use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
@@ -134,6 +134,9 @@ pub struct Overview {
     closing: Option<Instant>,
     /// Stable id of the highlight, so damage tracking sees it move rather than reappear.
     highlight: Id,
+    /// Set when this is the window switcher: a row of thumbnails with no animation, ended when
+    /// these modifiers are let go.
+    switcher: Option<Held>,
 }
 
 impl Overview {
@@ -144,6 +147,9 @@ impl Overview {
 
     /// 0.0 = windows at their real spot, 1.0 = windows in the grid.
     fn progress(&self) -> f64 {
+        if self.switcher.is_some() {
+            return 1.0;
+        }
         match self.closing {
             Some(since) => {
                 1.0 - overview::ease_out_cubic(overview::progress(since.elapsed(), ANIMATION))
@@ -362,6 +368,36 @@ impl JffState {
         }
     }
 
+    /// Open the overview as the window switcher, with the next window selected (the last one
+    /// with `backwards`). It ends on its own when the modifiers held now are let go.
+    pub fn open_switcher(&mut self, backwards: bool) {
+        if self.overview_active() {
+            return;
+        }
+        self.open_overview();
+        if !self.overview_active() {
+            return;
+        }
+        let held = self
+            .seat
+            .get_keyboard()
+            .map(|k| k.modifier_state())
+            .map_or((false, false, false), |m| (m.alt, m.ctrl, m.logo));
+        if let Some(ov) = self.overview.as_mut() {
+            ov.switcher = Some(held);
+        }
+        self.handle_overview_key(OverviewKey::Cycle { backwards });
+    }
+
+    /// Whether the switcher is open and a modifier it was opened with is no longer in `now`.
+    pub fn switcher_released(&self, now: Held) -> bool {
+        self.overview
+            .as_ref()
+            .filter(|ov| ov.closing.is_none())
+            .and_then(|ov| ov.switcher)
+            .is_some_and(|held| overview::modifier_released(held, now))
+    }
+
     /// Pick the monitor: the one under the pointer, so no click is needed to choose it. If it
     /// has no windows, fall back to the monitor with the focused window, so the key still does
     /// something.
@@ -489,6 +525,7 @@ impl JffState {
             opened: Instant::now(),
             closing: None,
             highlight: Id::new(),
+            switcher: None,
         });
 
         let start_data = GrabStartData {
@@ -550,6 +587,14 @@ impl JffState {
             None => self.refocus_topmost(),
         }
         self.refresh_pointer_focus();
+        // The switcher has no closing animation.
+        if self
+            .overview
+            .as_ref()
+            .is_some_and(|ov| ov.switcher.is_some())
+        {
+            self.overview = None;
+        }
     }
 
     /// Drop the overview at once, no animation (monitor unplugged, VT switch).
@@ -595,11 +640,12 @@ impl JffState {
                 (size.w, size.h)
             })
             .collect();
-        ov.windows
-            .iter()
-            .cloned()
-            .zip(overview::arrange(&sizes, area, GAP))
-            .collect()
+        let thumbs = if ov.switcher.is_some() {
+            overview::strip(&sizes, area, GAP, area.3 / 3)
+        } else {
+            overview::arrange(&sizes, area, GAP)
+        };
+        ov.windows.iter().cloned().zip(thumbs).collect()
     }
 
     /// Layer surface the pointer can reach at `p` while the overview is open: overlay and top

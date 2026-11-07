@@ -24,13 +24,10 @@ fn shrunk_window_is_half_the_output() {
 
 #[test]
 fn shrunk_window_keeps_pointer_at_same_relative_spot() {
-    // Pointer at the middle of the output: the middle of the smaller window.
     let (pos, _) = shrunk_geometry((0, 0, 1920, 1080), (960.0, 540.0).into());
     assert_eq!(pos, (480, 270));
-    // Pointer in the top-left corner: the window's top-left corner.
     let (pos, _) = shrunk_geometry((0, 0, 1920, 1080), (0.0, 0.0).into());
     assert_eq!(pos, (0, 0));
-    // Bottom-right corner: the window's bottom-right corner.
     let (pos, size) = shrunk_geometry((0, 0, 1920, 1080), (1920.0, 1080.0).into());
     assert_eq!(pos, (1920 - size.0, 1080 - size.1));
 }

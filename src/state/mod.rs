@@ -88,9 +88,8 @@ use smithay::wayland::xdg_foreign::{XdgForeignHandler, XdgForeignState};
 
 use crate::app::Backend;
 use crate::config::{Config, KeyboardConfig};
-use crate::desk::Desk;
+use crate::desk::{Desk, Side, WindowMode};
 use crate::focus::{KeyboardFocus, PopupGrabState};
-use crate::input::grabs::r#move::MoveGrab;
 use crate::input::grabs::resize::ResizeGrab;
 use crate::primitives::geom;
 use crate::protocol::ext_foreign_toplevel::ExtForeignToplevel;
@@ -1015,9 +1014,6 @@ impl XdgShellHandler for JffState {
             return;
         };
         let wl_surface = surface.wl_surface();
-        if self.desk.is_maximized(|w| is_window_for(w, wl_surface)) {
-            return;
-        }
         let Some(window) = self
             .desk
             .find_by(|w| is_window_for(w, wl_surface))
@@ -1025,14 +1021,13 @@ impl XdgShellHandler for JffState {
         else {
             return;
         };
-        let Some(initial_pos) = self.desk.pos_of(|w| *w == window) else {
-            return;
-        };
-
-        let pointer = self.seat.get_pointer().unwrap();
-        let grab = MoveGrab::new(start_data, window, initial_pos);
-        // Focus::Clear: the client stops receiving pointer events for the duration of the drag.
-        pointer.set_grab(self, grab, serial, Focus::Clear);
+        let draggable = matches!(
+            self.desk.mode_of(|w| *w == window),
+            WindowMode::Floating | WindowMode::Snapped(_)
+        );
+        if draggable {
+            self.start_move(&window, start_data, serial);
+        }
     }
 
     // A client asked to be resized from one of its edges or corners.
@@ -1047,7 +1042,7 @@ impl XdgShellHandler for JffState {
             return;
         };
         let wl_surface = surface.wl_surface();
-        if self.desk.is_maximized(|w| is_window_for(w, wl_surface)) {
+        if !self.desk.is_floating(|w| is_window_for(w, wl_surface)) {
             return;
         }
         let Some((initial_pos, size)) = self
@@ -1249,7 +1244,7 @@ impl JffState {
         if !self.desk.mark_fitted_where(|w| is_window_for(w, root)) {
             return;
         }
-        if self.desk.is_maximized(|w| is_window_for(w, root)) {
+        if !self.desk.is_floating(|w| is_window_for(w, root)) {
             return;
         }
         // `maximize-new-windows` (on by default). Done now rather than in `new_toplevel` so the
@@ -1282,8 +1277,8 @@ impl JffState {
         self.set_filled(surface, xdg_toplevel::State::Maximized, on);
     }
 
-    /// Make a window fill the output (maximized or fullscreen), or put it back where it was.
-    /// Always answers with a configure, as the protocol requires, even if nothing changed.
+    /// Maximize or fullscreen a window, or float it again. Always answers with a configure,
+    /// as the protocol requires, even if nothing changed.
     pub fn set_filled(
         &mut self,
         surface: &ToplevelSurface,
@@ -1292,70 +1287,62 @@ impl JffState {
     ) {
         let wl_surface = surface.wl_surface();
         let is_this = |w: &Window| is_window_for(w, wl_surface);
-        // Leaving fullscreen with the maximized state still set: the window was maximized
-        // before it went fullscreen.
-        let back_to_maximized = !on
-            && state_kind == xdg_toplevel::State::Fullscreen
-            && surface.with_pending_state(|s| s.states.contains(xdg_toplevel::State::Maximized));
-
-        let new_size = if on {
-            let current = self
-                .desk
-                .find_by(is_this)
-                .map(|e| e.window.geometry().size)
-                .unwrap_or_default();
-            let pos = self.desk.pos_of(is_this).unwrap_or_default();
-            let monitor = self.rect_for_window(pos, (current.w, current.h));
-            // Maximized windows leave the room panels reserved, fullscreen ones cover it.
-            let (out_x, out_y, out_w, out_h) = if state_kind == xdg_toplevel::State::Fullscreen {
-                monitor
-            } else {
-                self.usable_rect(monitor)
-            };
-            // (An already maximized window keeps the geometry it will go back to.)
-            if !self
-                .desk
-                .maximize_where(is_this, (out_x, out_y), (current.w, current.h))
-            {
-                self.desk.set_pos_where(is_this, (out_x, out_y));
-            }
-            Some((out_w, out_h).into())
-        } else if back_to_maximized {
-            // Fullscreen was entered from a maximized window (the state is still set, and the
-            // remembered floating geometry is still in `restore`): go back to the maximized
-            // window, not past it to the floating one.
-            let current = self
-                .desk
-                .find_by(is_this)
-                .map(|e| e.window.geometry().size)
-                .unwrap_or_default();
-            let pos = self.desk.pos_of(is_this).unwrap_or_default();
-            let monitor = self.rect_for_window(pos, (current.w, current.h));
-            let (out_x, out_y, out_w, out_h) = self.usable_rect(monitor);
-            self.desk.set_pos_where(is_this, (out_x, out_y));
-            Some((out_w, out_h).into())
-        } else {
-            self.desk
-                .unmaximize_where(is_this)
-                .map(|(w, h)| (w, h).into())
+        let target = match (state_kind == xdg_toplevel::State::Fullscreen, on) {
+            (true, true) => WindowMode::Fullscreen,
+            (true, false) => self.desk.mode_after_fullscreen(is_this),
+            (false, true) => WindowMode::Maximized,
+            (false, false) => WindowMode::Floating,
         };
+        self.set_mode(surface, target);
+    }
 
-        tracing::info!("{state_kind:?}={on}, configuring size {new_size:?}");
-        surface.with_pending_state(|state| {
-            if on {
-                state.states.set(state_kind);
-            } else if back_to_maximized {
-                state.states.unset(xdg_toplevel::State::Fullscreen);
-            } else {
-                // Leaving either mode returns the window to its normal geometry.
-                state.states.unset(xdg_toplevel::State::Maximized);
-                state.states.unset(xdg_toplevel::State::Fullscreen);
-            }
-            if let Some(size) = new_size {
-                state.size = Some(size);
-            }
-        });
-        surface.send_pending_configure();
+    pub fn set_mode(&mut self, surface: &ToplevelSurface, target: WindowMode) {
+        let wl_surface = surface.wl_surface();
+        let is_this = |w: &Window| is_window_for(w, wl_surface);
+        let size = self
+            .desk
+            .find_by(is_this)
+            .map(|e| e.window.geometry().size)
+            .unwrap_or_default();
+        let new_size = if target == WindowMode::Floating {
+            self.desk.float_where(is_this)
+        } else {
+            let pos = self.desk.pos_of(is_this).unwrap_or_default();
+            let monitor = self.rect_for_window(pos, (size.w, size.h));
+            let (x, y, w, h) = match target {
+                WindowMode::Fullscreen => monitor,
+                WindowMode::Snapped(side) => geom::snapped_rect(
+                    self.panel_free_rect(monitor),
+                    self.config.maximize_inset(),
+                    self.config.snap_gap(),
+                    side,
+                ),
+                _ => self.usable_rect(monitor),
+            };
+            self.desk
+                .set_mode_where(is_this, target, (x, y), (size.w, size.h));
+            Some((w, h))
+        };
+        let keep_maximized = self
+            .desk
+            .find_by(is_this)
+            .is_some_and(|e| e.before_fullscreen == WindowMode::Maximized);
+        tracing::info!("{target:?}, configuring size {new_size:?}");
+        configure_mode(surface, target, keep_maximized, new_size);
+    }
+
+    pub fn snap_focused(&mut self, side: Side) {
+        let Some(focus) = self.seat.get_keyboard().and_then(|k| k.current_focus()) else {
+            return;
+        };
+        let Some(toplevel) = self
+            .desk
+            .find_by(|w| is_window_for(w, &focus))
+            .and_then(|e| e.window.toplevel().cloned())
+        else {
+            return;
+        };
+        self.set_mode(&toplevel, WindowMode::Snapped(side));
     }
 
     /// Toggle maximize on the window that has keyboard focus.
@@ -1466,3 +1453,35 @@ fn is_window_for(window: &Window, surface: &WlSurface) -> bool {
 
 // One macro wires every protocol global this state has handlers for.
 smithay::delegate_dispatch2!(JffState);
+
+pub fn configure_mode(
+    toplevel: &ToplevelSurface,
+    mode: WindowMode,
+    keep_maximized: bool,
+    size: Option<(i32, i32)>,
+) {
+    use xdg_toplevel::State as S;
+    let maximized = mode == WindowMode::Maximized
+        || (mode == WindowMode::Fullscreen && keep_maximized);
+    let flags = [
+        (S::Maximized, maximized),
+        (S::Fullscreen, mode == WindowMode::Fullscreen),
+        (S::TiledLeft, mode == WindowMode::Snapped(Side::Left)),
+        (S::TiledRight, mode == WindowMode::Snapped(Side::Right)),
+        (S::TiledTop, mode == WindowMode::Snapped(Side::Top)),
+        (S::TiledBottom, mode == WindowMode::Snapped(Side::Bottom)),
+    ];
+    toplevel.with_pending_state(|state| {
+        for (flag, on) in flags {
+            if on {
+                state.states.set(flag);
+            } else {
+                state.states.unset(flag);
+            }
+        }
+        if let Some((w, h)) = size {
+            state.size = Some((w, h).into());
+        }
+    });
+    toplevel.send_pending_configure();
+}

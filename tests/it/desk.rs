@@ -1,6 +1,6 @@
 //! Tests for `jff_wm::desk`.
 
-use jff_wm::desk::{resolve, Desk, Goto};
+use jff_wm::desk::{resolve, Desk, Goto, Side, WindowMode};
 
 fn order(d: &Desk<&'static str>) -> Vec<&'static str> {
     d.top_down().map(|e| e.window).collect()
@@ -37,29 +37,72 @@ fn set_pos_moves_only_the_match() {
 }
 
 #[test]
-fn maximize_then_restore_round_trips() {
+fn maximize_then_float_round_trips() {
     let mut d = Desk::default();
     let a = d.add("a");
-    assert!(d.maximize_where(|w| *w == "a", (0, 0), (300, 200)));
+    assert!(d.set_mode_where(|w| *w == "a", WindowMode::Maximized, (0, 0), (300, 200)));
     assert!(d.is_maximized(|w| *w == "a"));
     assert_eq!(d.pos_of(|w| *w == "a"), Some((0, 0)));
-    // A second maximize must not clobber the remembered geometry.
-    assert!(!d.maximize_where(|w| *w == "a", (0, 0), (999, 999)));
-    assert_eq!(d.unmaximize_where(|w| *w == "a"), Some((300, 200)));
-    assert_eq!(d.pos_of(|w| *w == "a"), Some(a));
+    assert!(d.set_mode_where(
+        |w| *w == "a",
+        WindowMode::Snapped(Side::Left),
+        (0, 0),
+        (999, 999)
+    ));
     assert!(!d.is_maximized(|w| *w == "a"));
-    assert_eq!(d.unmaximize_where(|w| *w == "a"), None);
+    assert_eq!(d.float_where(|w| *w == "a"), Some((300, 200)));
+    assert_eq!(d.pos_of(|w| *w == "a"), Some(a));
+    assert!(d.is_floating(|w| *w == "a"));
+    assert_eq!(d.float_where(|w| *w == "a"), None);
 }
 
 #[test]
-fn restore_pos_changes_only_while_maximized() {
+fn floating_is_not_a_mode_to_set() {
+    let mut d = Desk::default();
+    d.add("a");
+    assert!(!d.set_mode_where(|w| *w == "a", WindowMode::Floating, (0, 0), (1, 1)));
+    assert!(!d.set_mode_where(|w| *w == "zzz", WindowMode::Maximized, (0, 0), (1, 1)));
+}
+
+#[test]
+fn fullscreen_goes_back_to_the_mode_before_it() {
+    let mut d = Desk::default();
+    d.add("a");
+    assert!(d.set_mode_where(|w| *w == "a", WindowMode::Maximized, (0, 0), (300, 200)));
+    assert!(d.set_mode_where(|w| *w == "a", WindowMode::Fullscreen, (0, 0), (900, 900)));
+    assert!(!d.is_maximized(|w| *w == "a"));
+    assert_eq!(d.mode_after_fullscreen(|w| *w == "a"), WindowMode::Maximized);
+    assert!(d.set_mode_where(|w| *w == "a", WindowMode::Maximized, (0, 0), (900, 900)));
+    assert_eq!(d.float_where(|w| *w == "a"), Some((300, 200)));
+    assert_eq!(d.mode_after_fullscreen(|w| *w == "a"), WindowMode::Floating);
+}
+
+#[test]
+fn floating_in_place_keeps_position_and_hands_back_the_old_geometry() {
+    let mut d = Desk::default();
+    let a = d.add("a");
+    assert_eq!(d.float_in_place_where(|w| *w == "a"), None);
+    assert!(d.set_mode_where(|w| *w == "a", WindowMode::Maximized, (0, 0), (300, 200)));
+    d.set_pos_where(|w| *w == "a", (700, 400));
+    assert_eq!(d.float_in_place_where(|w| *w == "a"), Some((a, (300, 200))));
+    assert!(d.is_floating(|w| *w == "a"));
+    assert_eq!(d.pos_of(|w| *w == "a"), Some((700, 400)));
+}
+
+#[test]
+fn restore_changes_only_while_not_floating() {
     let mut d = Desk::default();
     d.add("a");
     d.set_restore_pos_where(|w| *w == "a", (5, 5));
-    assert!(d.maximize_where(|w| *w == "a", (0, 0), (300, 200)));
+    d.set_restore_where(|w| *w == "a", ((1, 1), (2, 2)));
+    assert!(d.set_mode_where(|w| *w == "a", WindowMode::Maximized, (0, 0), (300, 200)));
     d.set_restore_pos_where(|w| *w == "a", (2000, 70));
-    assert_eq!(d.unmaximize_where(|w| *w == "a"), Some((300, 200)));
+    assert_eq!(d.float_where(|w| *w == "a"), Some((300, 200)));
     assert_eq!(d.pos_of(|w| *w == "a"), Some((2000, 70)));
+    assert!(d.set_mode_where(|w| *w == "a", WindowMode::Maximized, (0, 0), (300, 200)));
+    d.set_restore_where(|w| *w == "a", ((9, 9), (50, 60)));
+    assert_eq!(d.float_where(|w| *w == "a"), Some((50, 60)));
+    assert_eq!(d.pos_of(|w| *w == "a"), Some((9, 9)));
 }
 
 #[test]
@@ -136,29 +179,4 @@ fn remove_drops_window() {
     d.remove_where(|w| *w == "a");
     assert_eq!(order(&d), ["b"]);
     assert_eq!(d.len(), 1);
-}
-
-#[test]
-fn take_restore_then_remaximize_keeps_original_geometry() {
-    let mut d = Desk::default();
-    let a = d.add("a");
-    assert!(d.maximize_where(|w| *w == "a", (0, 0), (300, 200)));
-    let saved = d.take_restore_where(|w| *w == "a").unwrap();
-    assert_eq!(saved, (a, (300, 200)));
-    assert!(!d.is_maximized(|w| *w == "a"));
-    d.set_pos_where(|w| *w == "a", (700, 400));
-    assert!(d.remaximize_where(|w| *w == "a", (0, 0), saved));
-    assert!(d.is_maximized(|w| *w == "a"));
-    assert_eq!(d.unmaximize_where(|w| *w == "a"), Some((300, 200)));
-    assert_eq!(d.pos_of(|w| *w == "a"), Some(a));
-}
-
-#[test]
-fn remaximize_does_nothing_for_floating_or_already_maximized() {
-    let mut d = Desk::default();
-    d.add("a");
-    assert_eq!(d.take_restore_where(|w| *w == "a"), None);
-    assert!(d.maximize_where(|w| *w == "a", (0, 0), (300, 200)));
-    assert!(!d.remaximize_where(|w| *w == "a", (0, 0), ((1, 1), (9, 9))));
-    assert!(!d.remaximize_where(|w| *w == "zzz", (0, 0), ((1, 1), (9, 9))));
 }
