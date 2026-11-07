@@ -1828,15 +1828,24 @@ impl JffState {
             }
             let entry = apps::entry_for_app_id(&ov.search.entries, app_id)
                 .and_then(|i| ov.search.entries.get(i));
-            // What the window says itself comes first, the app's desktop file is the guess.
-            let icon = window
+            // What the window says itself comes first, the app's desktop file is the guess. A
+            // picture smaller than the badge only wins when there is nothing else: blown up
+            // it looks worse than the desktop file's icon.
+            let own = window
                 .toplevel()
                 .filter(|_| own_icon)
-                .and_then(|toplevel| toplevel_icon::client_icon(toplevel.wl_surface()))
+                .and_then(|toplevel| toplevel_icon::client_icon(toplevel.wl_surface()));
+            let (own_sharp, own_blurry) = match own {
+                Some((icon, true)) => (Some(icon), None),
+                Some((icon, false)) => (None, Some(icon)),
+                None => (None, None),
+            };
+            let icon = own_sharp
                 .or_else(|| {
                     entry.and_then(|entry| crate::feature::app_icons::icon_for(&entry.icon))
                 })
-                .or_else(|| crate::feature::app_icons::icon_for(app_id));
+                .or_else(|| crate::feature::app_icons::icon_for(app_id))
+                .or(own_blurry);
             let name = entry.map_or(app_id, |entry| entry.name.as_str());
             let picture = search_ui::paint_badge(fonts, icon.as_deref(), name);
             ov.badges.insert(key, buffer_of(&picture));

@@ -44,9 +44,11 @@ pub fn fingerprint(surface: &WlSurface) -> u64 {
     })
 }
 
-/// The icon `surface` set, ready to draw. A theme name that can be found wins over pictures, as
-/// the protocol suggests. `None` when it set nothing usable.
-pub fn client_icon(surface: &WlSurface) -> Option<Arc<Icon>> {
+/// The icon `surface` set, ready to draw, and whether it is sharp: found by theme name, or a
+/// picture at least as big as we draw. A smaller picture would be blown up and look blurry, so
+/// the caller should prefer another source when it has one. A theme name that can be found wins
+/// over pictures, as the protocol suggests. `None` when it set nothing usable.
+pub fn client_icon(surface: &WlSurface) -> Option<(Arc<Icon>, bool)> {
     // Copy what's needed out of the surface state first: reading the pictures takes a while.
     let (name, buffers) = with_states(surface, |states| {
         let mut cached = states.cached_state.get::<ToplevelIconCachedState>();
@@ -61,7 +63,7 @@ pub fn client_icon(surface: &WlSurface) -> Option<Arc<Icon>> {
         )
     });
     if let Some(icon) = name.as_deref().and_then(icon_for) {
-        return Some(icon);
+        return Some((icon, true));
     }
     // The smallest picture that is at least as big as we draw, else the biggest there is.
     let mut pictures: Vec<(Vec<u8>, u32, u32)> = buffers.iter().filter_map(read_picture).collect();
@@ -75,10 +77,11 @@ pub fn client_icon(surface: &WlSurface) -> Option<Arc<Icon>> {
     };
     let mut hasher = DefaultHasher::new();
     rgba.hash(&mut hasher);
-    Some(Arc::new(Icon {
+    let icon = Icon {
         source: PathBuf::from(format!("toplevel-icon:{:016x}", hasher.finish())),
         rgba: scale(&rgba, width, height, ICON_PX as u32),
-    }))
+    };
+    Some((Arc::new(icon), width.max(height) >= ICON_PX as u32))
 }
 
 /// An shm buffer as straight-alpha 8-bit RGBA with its size. `None` for other kinds of buffer,
