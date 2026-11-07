@@ -914,6 +914,7 @@ impl JffState {
 
     /// Draw one frame to the monitor on `crtc` and queue it for the next vblank.
     fn render_crtc(&mut self, crtc: crtc::Handle) {
+        self.reconcile_window_workspaces();
         self.refresh_window_outputs();
         // Needs &mut self, so it has to happen before the backend is borrowed. May end the overview.
         let overview = self.overview_plan();
@@ -1169,7 +1170,7 @@ impl JffState {
                 crate::feature::window_anim::ghost_elements(
                     &mut *renderer,
                     &mut self.closing,
-                    self.desk.current(),
+                    self.desk.current_on(&lit.output.name()),
                     origin,
                     close_time,
                     &mut elements,

@@ -736,7 +736,7 @@ impl JffState {
     /// Move the pointer from `from` to `to`, but not to another monitor through the edges of a
     /// hot corner: the corner can be reached by sliding along the edge without overshooting
     /// onto the neighbouring monitor. Only where the hot corner itself is active (see
-    /// [`JffState::hot_corner_blocked`]), returns `to` untouched everywhere else.
+    /// [`JffState::hot_corner_blocked`]); returns `to` untouched everywhere else.
     fn hot_corner_barrier(
         &self,
         from: Point<f64, Logical>,

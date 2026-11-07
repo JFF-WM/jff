@@ -3,9 +3,9 @@
 //! Looked up at `$JFF_CONFIG`, then `$XDG_CONFIG_HOME/jff/config.kdl`, then
 //! `~/.config/jff/config.kdl`. When none exists, the built-in [`DEFAULT_CONFIG`] is used.
 //!
-//! The format is one KDL document. Top-level nodes: `workspaces`, `maximize-new-windows`,
+//! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9; per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
 //! `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
-//! `keyboard { … }`, `blur { … }`, `osd { … }`, `switcher { … }`, `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
+//! `keyboard { … }`, `blur { … }`, `osd { … }`, `switcher { … }`, `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`; `hot-corner 0` or no block: off; while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
 //! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -623,6 +623,8 @@ pub struct Config {
     binds: Vec<Binding>,
     outputs: Vec<OutputConfig>,
     workspaces: usize,
+    /// Every monitor has its own shown workspace, `workspaces { per-output }`.
+    workspaces_per_output: bool,
     maximize_new_windows: bool,
     window_animations: WindowAnimations,
     no_client_decorations: bool,
@@ -666,6 +668,7 @@ impl Default for Config {
                 binds: Vec::new(),
                 outputs: Vec::new(),
                 workspaces: DEFAULT_WORKSPACES,
+                workspaces_per_output: false,
                 maximize_new_windows: true,
                 window_animations: WindowAnimations::default(),
                 no_client_decorations: false,
@@ -799,14 +802,9 @@ impl Config {
             }
         }
 
-        let workspaces = match doc.get("workspaces") {
-            None => DEFAULT_WORKSPACES,
-            Some(node) => positional(node)
-                .first()
-                .and_then(|value| value.as_integer())
-                .and_then(|n| usize::try_from(n).ok())
-                .filter(|n| (1..=MAX_WORKSPACES).contains(n))
-                .with_context(|| format!("workspaces takes a number from 1 to {MAX_WORKSPACES}"))?,
+        let (workspaces, workspaces_per_output) = match doc.get("workspaces") {
+            None => (DEFAULT_WORKSPACES, false),
+            Some(node) => parse_workspaces(node)?,
         };
 
         let maximize_new_windows = parse_flag(&doc, "maximize-new-windows", true)?;
@@ -890,6 +888,7 @@ impl Config {
             binds,
             outputs,
             workspaces,
+            workspaces_per_output,
             maximize_new_windows,
             window_animations,
             no_client_decorations,
@@ -1025,6 +1024,12 @@ impl Config {
     /// How many workspaces there are.
     pub fn workspaces(&self) -> usize {
         self.workspaces
+    }
+
+    /// Whether every monitor shows its own workspace (`workspaces { per-output }`), instead of
+    /// all of them showing the same one. Off by default.
+    pub fn workspaces_per_output(&self) -> bool {
+        self.workspaces_per_output
     }
 
     /// What the config says about `name`, if anything.
@@ -1360,6 +1365,43 @@ fn parse_switcher(node: &KdlNode) -> anyhow::Result<SwitcherConfig> {
         }
     }
     Ok(config)
+}
+
+/// A workspace count: one number from 1 to [`MAX_WORKSPACES`].
+fn workspace_count(node: &KdlNode) -> anyhow::Result<usize> {
+    positional(node)
+        .first()
+        .and_then(|value| value.as_integer())
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|n| (1..=MAX_WORKSPACES).contains(n))
+        .with_context(|| {
+            format!(
+                "{} takes a number from 1 to {MAX_WORKSPACES}",
+                node.name().value()
+            )
+        })
+}
+
+/// `workspaces N`, or a block with `count N` and `per-output`. Returns the count and whether
+/// every monitor gets its own workspace.
+fn parse_workspaces(node: &KdlNode) -> anyhow::Result<(usize, bool)> {
+    let mut count = DEFAULT_WORKSPACES;
+    let mut per_output = false;
+    let children = node.children().map(KdlDocument::nodes).unwrap_or_default();
+    if positional(node).is_empty() && children.is_empty() {
+        bail!("workspaces takes a number from 1 to {MAX_WORKSPACES}, or a block");
+    }
+    if !positional(node).is_empty() {
+        count = workspace_count(node)?;
+    }
+    for child in children {
+        match child.name().value() {
+            "count" => count = workspace_count(child).context("in workspaces")?,
+            "per-output" => per_output = flag_value(child).context("in workspaces")?,
+            other => bail!("unknown workspaces setting {other:?}"),
+        }
+    }
+    Ok((count, per_output))
 }
 
 /// The `hot-corner { … }` block, or `hot-corner N` for just the size. `None` when `size` is 0.

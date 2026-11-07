@@ -216,6 +216,7 @@ impl JffState {
         }
 
         self.clamp_pointer();
+        self.reconcile_window_workspaces();
         self.refresh_window_outputs();
         // wlr-output-management clients (wlr-randr, kanshi) want to know about any change.
         self.output_management_changed();

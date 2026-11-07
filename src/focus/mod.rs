@@ -186,6 +186,13 @@ impl JffState {
                 return Some(window.clone());
             }
         }
+        // A workspace per monitor: the topmost window on the monitor in use comes first.
+        if self.desk.per_output() {
+            let active = self.active_output_name();
+            if let Some(entry) = self.desk.top_down().find(|entry| entry.output == active) {
+                return Some(entry.window.clone());
+            }
+        }
         self.desk
             .top_down()
             .next()

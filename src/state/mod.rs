@@ -519,6 +519,9 @@ impl JffState {
             layer_on_demand_focus: None,
             popup_grab: None,
         };
+        state
+            .desk
+            .set_per_output(state.config.workspaces_per_output(), "");
         state.apply_numlock();
         state.relayout_outputs();
         state
@@ -973,8 +976,9 @@ impl XdgShellHandler for JffState {
         surface.send_configure();
         let window = Window::new_wayland_window(surface);
         self.assign_view_id(&window);
-        let cascade = self.desk.add(window.clone());
-        // New windows open on the monitor the pointer is on.
+        // New windows open on the monitor the pointer is on, on the workspace it shows.
+        let output = self.active_output_name();
+        let cascade = self.desk.add_on(window.clone(), &output);
         let area = self.rect_at_pointer();
         let pos = (cascade.0 + area.0, cascade.1 + area.1);
         self.desk.set_pos_where(|w| *w == window, pos);

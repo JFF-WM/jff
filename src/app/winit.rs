@@ -218,7 +218,8 @@ impl JffState {
                     crate::feature::window_anim::ghost_elements(
                         &mut *renderer,
                         &mut self.closing,
-                        self.desk.current(),
+                        self.desk
+                            .current_on(&self.outputs.first().map(Output::name).unwrap_or_default()),
                         origin,
                         close_time,
                         &mut elements,

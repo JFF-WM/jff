@@ -939,3 +939,34 @@ fn hot_corner_rejects_bad_values() {
 fn hot_corner_is_a_known_top_level_node() {
     assert!(TOP_LEVEL_NODES.contains(&"hot-corner"));
 }
+
+#[test]
+fn workspaces_are_shared_unless_per_output() {
+    assert!(!Config::default().workspaces_per_output());
+    assert!(!Config::parse("workspaces 3").unwrap().workspaces_per_output());
+}
+
+#[test]
+fn workspaces_block_sets_per_output_and_count() {
+    let config = Config::parse("workspaces { per-output; }").unwrap();
+    assert!(config.workspaces_per_output());
+    assert_eq!(config.workspaces(), DEFAULT_WORKSPACES);
+    let config = Config::parse("workspaces { count 4; per-output; }").unwrap();
+    assert!(config.workspaces_per_output());
+    assert_eq!(config.workspaces(), 4);
+    let config = Config::parse("workspaces 5 { per-output #true; }").unwrap();
+    assert!(config.workspaces_per_output());
+    assert_eq!(config.workspaces(), 5);
+    let config = Config::parse("workspaces { count 2; per-output #false; }").unwrap();
+    assert!(!config.workspaces_per_output());
+    assert_eq!(config.workspaces(), 2);
+}
+
+#[test]
+fn workspaces_block_rejects_bad_values() {
+    assert!(Config::parse("workspaces { count 0; }").is_err());
+    assert!(Config::parse("workspaces { count 65; }").is_err());
+    assert!(Config::parse("workspaces { count; }").is_err());
+    assert!(Config::parse("workspaces { per-output 3; }").is_err());
+    assert!(Config::parse("workspaces { nonsense 1; }").is_err());
+}

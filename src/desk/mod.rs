@@ -3,6 +3,8 @@
 //! No Smithay/Wayland types in here, on purpose, the stacking policy can be tested
 //! without a compositor. `W` is whatever handle the caller uses for a window.
 
+use std::collections::HashMap;
+
 pub type Pos = (i32, i32);
 
 /// Where a workspace request leads: a specific workspace, or the neighbour of the current one
@@ -59,14 +61,26 @@ pub struct Entry<W> {
     /// animation runs from here, not from `add`: a client can take 100 ms to send its first
     /// frame, and the fade would be over by then.
     pub shown: Option<std::time::Instant>,
+    /// The monitor the window lives on, by name (empty: none yet). Only matters with
+    /// per-output workspaces, where a window is shown when this monitor shows its workspace.
+    /// The caller keeps it up to date, see [`Desk::assign_outputs`].
+    pub output: String,
 }
 
 pub struct Desk<W> {
     /// Bottom of the stack first, topmost window last. One stack for every workspace: the
     /// order of the windows of a workspace is the order they have here.
     entries: Vec<Entry<W>>,
-    /// The workspace that's shown.
+    /// The workspace that's shown. With per-output workspaces: the one a monitor shows until it
+    /// gets its own.
     current: usize,
+    /// Every monitor has its own shown workspace (`shown`) instead of all of them showing
+    /// `current`.
+    per_output: bool,
+    /// The workspace each monitor shows, by name, with per-output workspaces. A monitor that's
+    /// not in here shows `current`. Kept for monitors that are unplugged, they pick up where
+    /// they were when plugged back in.
+    shown: HashMap<String, usize>,
 }
 
 impl<W> Default for Desk<W> {
@@ -74,6 +88,8 @@ impl<W> Default for Desk<W> {
         Self {
             entries: Vec::new(),
             current: 0,
+            per_output: false,
+            shown: HashMap::new(),
         }
     }
 }
@@ -82,34 +98,113 @@ impl<W> Desk<W> {
     /// Add a window on top of the current workspace, cascading so new windows don't hide each
     /// other. Returns the position it was given.
     pub fn add(&mut self, window: W) -> Pos {
-        let step = (self.count_on(self.current) % 10) as i32;
+        self.add_on(window, "")
+    }
+
+    /// [`Desk::add`] on the monitor `output`: with per-output workspaces the window goes on the
+    /// workspace that monitor shows, and cascades among the windows there.
+    pub fn add_on(&mut self, window: W, output: &str) -> Pos {
+        let workspace = self.current_on(output);
+        let per_output = self.per_output;
+        let on_workspace = self
+            .entries
+            .iter()
+            .filter(|e| e.workspace == workspace && (!per_output || e.output == output))
+            .count();
+        let step = (on_workspace % 10) as i32;
         let pos = (40 + step * 32, 40 + step * 32);
         self.entries.push(Entry {
             window,
             pos,
-            workspace: self.current,
+            workspace,
             mode: WindowMode::Floating,
             before_fullscreen: WindowMode::Floating,
             restore: None,
             fitted: false,
             shown: None,
+            output: output.to_owned(),
         });
         pos
     }
 
-    /// The workspace that's shown (0-based).
+    /// The workspace that's shown (0-based). With per-output workspaces this is only what a
+    /// monitor without its own shows, ask [`Desk::current_on`] instead.
     pub fn current(&self) -> usize {
         self.current
     }
 
-    /// Show another workspace. Doesn't touch the windows.
+    /// Show another workspace on every monitor (or, with per-output workspaces, on those that
+    /// don't have their own). Doesn't touch the windows.
     pub fn set_current(&mut self, workspace: usize) {
         self.current = workspace;
     }
 
-    /// Whether `entry` is on the workspace that's shown.
+    /// Whether every monitor has its own workspace.
+    pub fn per_output(&self) -> bool {
+        self.per_output
+    }
+
+    /// Switch between one workspace for all monitors and one per monitor. Turning it on, every
+    /// monitor keeps showing what is shown now. Turning it off, every monitor shows what
+    /// `active` (the monitor that's in use) showed.
+    pub fn set_per_output(&mut self, on: bool, active: &str) {
+        if on == self.per_output {
+            return;
+        }
+        if !on {
+            self.current = self.current_on(active);
+        }
+        self.per_output = on;
+        self.shown.clear();
+    }
+
+    /// The workspace shown on the monitor `output` (0-based).
+    pub fn current_on(&self, output: &str) -> usize {
+        if self.per_output {
+            self.shown.get(output).copied().unwrap_or(self.current)
+        } else {
+            self.current
+        }
+    }
+
+    /// Show a workspace on the monitor `output`. Everywhere without per-output workspaces.
+    /// Doesn't touch the windows.
+    pub fn set_current_on(&mut self, output: &str, workspace: usize) {
+        if self.per_output {
+            self.shown.insert(output.to_owned(), workspace);
+        } else {
+            self.current = workspace;
+        }
+    }
+
+    /// Whether `entry` is on the workspace that's shown where it is.
     pub fn is_visible(&self, entry: &Entry<W>) -> bool {
-        entry.workspace == self.current
+        entry.workspace == self.current_on(&entry.output)
+    }
+
+    /// With per-output workspaces: put every window on the monitor `home` names for it (`None`:
+    /// leave it where it is). A window that was shown and moved to another monitor goes on the
+    /// workspace that monitor shows, so it doesn't disappear on the way. A hidden one keeps its
+    /// workspace. Does nothing without per-output workspaces.
+    pub fn assign_outputs(&mut self, mut home: impl FnMut(&Entry<W>) -> Option<String>) {
+        if !self.per_output {
+            return;
+        }
+        for i in 0..self.entries.len() {
+            let Some(name) = home(&self.entries[i]) else {
+                continue;
+            };
+            if self.entries[i].output == name {
+                continue;
+            }
+            let was_shown = self.is_visible(&self.entries[i]);
+            let target = self.current_on(&name);
+            let entry = &mut self.entries[i];
+            if was_shown {
+                entry.workspace = target;
+            }
+            entry.output = name;
+        }
     }
 
     /// How many windows live on `workspace`.
@@ -118,6 +213,14 @@ impl<W> Desk<W> {
             .iter()
             .filter(|e| e.workspace == workspace)
             .count()
+    }
+
+    /// The monitor and the workspace of the first window matching `pred`.
+    pub fn home_of(&self, pred: impl Fn(&W) -> bool) -> Option<(String, usize)> {
+        self.entries
+            .iter()
+            .find(|e| pred(&e.window))
+            .map(|e| (e.output.clone(), e.workspace))
     }
 
     /// The workspace of the first window matching `pred`.
@@ -148,16 +251,15 @@ impl<W> Desk<W> {
             entry.workspace = entry.workspace.min(last);
         }
         self.current = self.current.min(last);
+        for shown in self.shown.values_mut() {
+            *shown = (*shown).min(last);
+        }
     }
 
     /// Windows of the current workspace, topmost first - the order renderers want. Windows on
     /// other workspaces are skipped, use [`Desk::all_top_down`] for those.
     pub fn top_down(&self) -> impl Iterator<Item = &Entry<W>> {
-        let current = self.current;
-        self.entries
-            .iter()
-            .rev()
-            .filter(move |e| e.workspace == current)
+        self.entries.iter().rev().filter(move |e| self.is_visible(e))
     }
 
     /// Every window of every workspace, topmost first.

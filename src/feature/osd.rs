@@ -760,11 +760,18 @@ impl JffState {
             let window = self
                 .desk
                 .find_by(|w| w.toplevel().is_some_and(|t| t.wl_surface() == &root))
-                .map(|entry| (entry.pos, entry.window.geometry().size, entry.workspace));
-            if let Some((pos, size, workspace)) = window {
+                .map(|entry| {
+                    (
+                        entry.pos,
+                        entry.window.geometry().size,
+                        entry.workspace,
+                        self.desk.is_visible(entry),
+                    )
+                });
+            if let Some((pos, size, workspace, shown)) = window {
                 let (app_id, title) = toplevel_names(&root);
                 // only named when it isn't the current one
-                let hidden = (workspace != self.desk.current()).then_some(workspace + 1);
+                let hidden = (!shown).then_some(workspace + 1);
                 notice.subtitle = subtitle_of(&app_id, &title, hidden);
                 let rect = self.rect_for_window(pos, (size.w, size.h));
                 output = self

@@ -1,8 +1,8 @@
 //! Tests for `jff_wm::primitives::layout`.
 
 use jff_wm::primitives::layout::{
-    arrange, bounds, clamp_to_rects, fit_into, hot_corner_barrier, hot_corner_rect,
-    inside_any_corner, intersects, nearest, reachable, Rect,
+    arrange, bounds, clamp_to_rects, fit_into, hot_corner_barrier, hot_corner_rect, inside_any_corner, intersects,
+    nearest, reachable, Rect,
 };
 
 const A: Rect = (0, 0, 1920, 1080);

@@ -4,7 +4,8 @@
 // Every block is optional: anything you leave out uses the built-in default.
 
 // Number of workspaces.
-workspaces 9
+workspaces { count 9; per-output }
+//workspaces 5 { per-output } // number plus block also works
 
 // Maximize new windows when they open.
 maximize-new-windows #true

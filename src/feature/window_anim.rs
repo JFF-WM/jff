@@ -173,7 +173,10 @@ impl JffState {
     pub fn start_close_fade(&mut self, window: &Window, pos: (i32, i32), workspace: usize) {
         if !self.config.window_animations()
             || self.overview.is_some()
-            || workspace != self.desk.current()
+            || !self
+                .desk
+                .find_by(|w| w == window)
+                .is_some_and(|entry| self.desk.is_visible(entry))
             || is_fullscreen(window)
         {
             return;

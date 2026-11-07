@@ -413,7 +413,7 @@ impl JffState {
                 Ok(format!(
                     "{{\"ok\":true,\"views\":[{}],\"workspace\":{},\"count\":{}}}\n",
                     views.join(","),
-                    self.desk.current() + 1,
+                    self.current_workspace() + 1,
                     self.workspace_count(),
                 ))
             }
@@ -593,7 +593,7 @@ impl JffState {
     fn workspace_reply(&self) -> String {
         format!(
             "{{\"ok\":true,\"workspace\":{},\"count\":{}}}\n",
-            self.desk.current() + 1,
+            self.current_workspace() + 1,
             self.workspace_count()
         )
     }
@@ -703,7 +703,7 @@ impl JffState {
             .collect();
         Snapshot {
             views,
-            workspace: self.desk.current() + 1,
+            workspace: self.current_workspace() + 1,
             count: self.workspace_count(),
             focused,
             outputs,

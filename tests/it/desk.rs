@@ -180,3 +180,120 @@ fn remove_drops_window() {
     assert_eq!(order(&d), ["b"]);
     assert_eq!(d.len(), 1);
 }
+
+fn per_output_desk() -> Desk<&'static str> {
+    let mut d = Desk::default();
+    d.set_per_output(true, "");
+    d
+}
+
+#[test]
+fn shared_workspaces_ignore_the_monitor() {
+    let mut d = Desk::default();
+    d.add_on("a", "left");
+    d.add_on("b", "right");
+    d.set_current_on("left", 1);
+    // One workspace for everyone: both monitors moved, nothing is visible any more.
+    assert_eq!(d.current_on("right"), 1);
+    assert_eq!(order(&d), Vec::<&str>::new());
+    assert!(!d.per_output());
+}
+
+#[test]
+fn each_monitor_shows_its_own_workspace() {
+    let mut d = per_output_desk();
+    d.add_on("a", "left");
+    d.add_on("b", "right");
+    d.set_current_on("left", 1);
+    assert_eq!(d.current_on("left"), 1);
+    assert_eq!(d.current_on("right"), 0);
+    // Switching the left monitor hides only its windows.
+    assert_eq!(order(&d), ["b"]);
+    // New windows land on the workspace their monitor shows.
+    d.add_on("c", "left");
+    assert_eq!(d.workspace_of(|w| *w == "c"), Some(1));
+    assert_eq!(order(&d), ["c", "b"]);
+    assert_eq!(d.home_of(|w| *w == "c"), Some(("left".to_owned(), 1)));
+}
+
+#[test]
+fn cascade_counts_only_the_monitor() {
+    let mut d = per_output_desk();
+    let first = d.add_on("a", "left");
+    let other = d.add_on("b", "right");
+    assert_eq!(first, other);
+    assert_ne!(first, d.add_on("c", "left"));
+}
+
+#[test]
+fn a_shown_window_that_changes_monitor_follows_its_workspace() {
+    let mut d = per_output_desk();
+    d.add_on("a", "left");
+    d.set_current_on("right", 3);
+    d.assign_outputs(|_| Some("right".to_owned()));
+    assert_eq!(d.home_of(|w| *w == "a"), Some(("right".to_owned(), 3)));
+    assert_eq!(order(&d), ["a"]);
+}
+
+#[test]
+fn a_hidden_window_that_changes_monitor_keeps_its_workspace() {
+    let mut d = per_output_desk();
+    d.add_on("a", "left");
+    d.set_current_on("left", 2);
+    // "a" is on workspace 0 of the left monitor, which shows 2: hidden.
+    d.assign_outputs(|_| Some("right".to_owned()));
+    assert_eq!(d.home_of(|w| *w == "a"), Some(("right".to_owned(), 0)));
+    // The right monitor shows 0, so it turns up there.
+    assert_eq!(order(&d), ["a"]);
+    // A monitor that is gone is remembered: "b" was shown there, so it lands on the workspace
+    // the left monitor shows.
+    let mut d = per_output_desk();
+    d.set_current_on("gone", 2);
+    d.add_on("b", "gone");
+    d.assign_outputs(|_| Some("left".to_owned()));
+    assert_eq!(d.workspace_of(|w| *w == "b"), Some(0));
+}
+
+#[test]
+fn assigning_outputs_does_nothing_for_shared_workspaces() {
+    let mut d = Desk::default();
+    d.add_on("a", "left");
+    d.assign_outputs(|_| Some("right".to_owned()));
+    assert_eq!(d.home_of(|w| *w == "a"), Some(("left".to_owned(), 0)));
+}
+
+#[test]
+fn assigning_skips_windows_without_an_answer() {
+    let mut d = per_output_desk();
+    d.add_on("a", "left");
+    d.assign_outputs(|_| None);
+    assert_eq!(d.home_of(|w| *w == "a"), Some(("left".to_owned(), 0)));
+}
+
+#[test]
+fn turning_per_output_on_keeps_the_view_and_off_follows_the_active_monitor() {
+    let mut d = Desk::default();
+    d.add_on("a", "left");
+    d.set_current(1);
+    d.add_on("b", "right");
+    d.set_per_output(true, "left");
+    assert_eq!(d.current_on("left"), 1);
+    assert_eq!(d.current_on("right"), 1);
+    assert_eq!(order(&d), ["b"]);
+    d.set_current_on("left", 0);
+    // "a" is on the left monitor's workspace 0 now, which it shows.
+    assert_eq!(order(&d), ["b", "a"]);
+    d.set_per_output(false, "left");
+    assert_eq!(d.current(), 0);
+    assert_eq!(d.current_on("right"), 0);
+}
+
+#[test]
+fn fewer_workspaces_fold_every_monitors_workspace() {
+    let mut d = per_output_desk();
+    d.set_current_on("left", 7);
+    d.set_current_on("right", 4);
+    d.clamp_workspaces(3);
+    assert_eq!(d.current_on("left"), 2);
+    assert_eq!(d.current_on("right"), 2);
+}
