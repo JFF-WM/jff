@@ -1,8 +1,8 @@
 //! Tests for `jff_wm::primitives::layout`.
 
 use jff_wm::primitives::layout::{
-    arrange, bounds, clamp_to_rects, fit_into, hot_corner_barrier, hot_corner_rect, inside_any_corner, intersects,
-    nearest, reachable, Rect,
+    arrange, bounds, clamp_to_rects, dialog_pos, fit_into, hot_corner_barrier, hot_corner_rect,
+    inside_any_corner, intersects, nearest, reachable, Rect,
 };
 
 const A: Rect = (0, 0, 1920, 1080);
@@ -187,5 +187,47 @@ fn barrier_leaves_other_moves_alone() {
     assert_eq!(
         hot_corner_barrier((1930.0, 2.0), (1900.0, 2.0), &all, &[A], 4),
         (1900.0, 2.0)
+    );
+}
+
+#[test]
+fn a_dialog_is_centered_over_its_parent() {
+    let parent = (300, 200, 800, 600);
+    assert_eq!(dialog_pos((400, 200), Some(parent), A, 40), (500, 400));
+}
+
+#[test]
+fn a_dialog_without_a_parent_is_centered_on_the_monitor() {
+    assert_eq!(dialog_pos((400, 200), None, A, 40), (760, 440));
+    // on the second monitor
+    assert_eq!(dialog_pos((400, 200), None, B, 40), (1920 + 440, 412));
+}
+
+#[test]
+fn a_dialog_stays_inside_the_monitor() {
+    // the parent hangs off the left edge: the dialog is pulled back in, with the margin
+    let parent = (-500, 100, 800, 600);
+    let (x, y) = dialog_pos((400, 200), Some(parent), A, 40);
+    assert_eq!((x, y), (40, 300));
+    // and off the bottom right
+    let parent = (1700, 900, 600, 400);
+    let (x, y) = dialog_pos((400, 200), Some(parent), A, 40);
+    assert_eq!((x, y), (1920 - 400 - 40, 1080 - 200 - 40));
+}
+
+#[test]
+fn a_parent_on_another_monitor_is_not_followed() {
+    // the parent is on A, the dialog is placed for B
+    assert_eq!(
+        dialog_pos((400, 200), Some((100, 100, 600, 400)), B, 40),
+        dialog_pos((400, 200), None, B, 40)
+    );
+}
+
+#[test]
+fn a_dialog_too_big_for_the_monitor_keeps_its_corner_reachable() {
+    assert_eq!(
+        dialog_pos((3000, 2000), Some((0, 0, 800, 600)), A, 40),
+        (40, 40)
     );
 }

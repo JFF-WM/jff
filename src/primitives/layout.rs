@@ -7,6 +7,24 @@ use crate::primitives::geom::{Pos, Size};
 
 pub type Rect = (i32, i32, i32, i32);
 
+/// Where a dialog `size` big goes: centred on `parent`, the rect of the window it belongs to,
+/// or on `area` (the monitor) when it has none or the parent isn't on that monitor. Then moved
+/// to lie inside `area` with `margin` px to spare, a dialog too big for that keeps its
+/// top-left corner reachable instead.
+pub fn dialog_pos(size: Size, parent: Option<Rect>, area: Rect, margin: i32) -> Pos {
+    let anchor = parent
+        .filter(|p| p.2 > 0 && p.3 > 0 && intersects(*p, area))
+        .unwrap_or(area);
+    let inside = |want: i32, start: i32, length: i32, extent: i32| {
+        want.min(start + length - extent - margin)
+            .max(start + margin)
+    };
+    (
+        inside(anchor.0 + (anchor.2 - size.0) / 2, area.0, area.2, size.0),
+        inside(anchor.1 + (anchor.3 - size.1) / 2, area.1, area.3, size.1),
+    )
+}
+
 /// Whether `p` is inside `rect`. The right and bottom edges count as outside.
 pub fn contains(rect: Rect, p: (f64, f64)) -> bool {
     p.0 >= rect.0 as f64

@@ -1,6 +1,6 @@
 //! Compositor state and the Wayland protocol handlers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -75,6 +75,7 @@ use smithay::wayland::selection::wlr_data_control::{DataControlHandler, DataCont
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
+use smithay::wayland::shell::xdg::dialog::{ToplevelDialogHint, XdgDialogHandler, XdgDialogState};
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
@@ -93,6 +94,7 @@ use crate::desk::{Desk, Side, WindowMode};
 use crate::focus::{KeyboardFocus, PopupGrabState};
 use crate::input::grabs::resize::ResizeGrab;
 use crate::primitives::geom;
+use crate::primitives::layout;
 use crate::protocol::ext_foreign_toplevel::ExtForeignToplevel;
 use crate::protocol::foreign_toplevel::ForeignToplevel;
 use crate::protocol::image_copy::ImageCopy;
@@ -125,6 +127,16 @@ pub struct JffState {
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    /// xdg_wm_dialog_v1: a window can say it is a dialog and whether it is modal.
+    #[allow(dead_code)]
+    pub xdg_dialog_state: XdgDialogState,
+    /// Windows that said they are dialogs (modal or not). With or without a parent they are
+    /// centred when they first show (see `fit_to_output_once`).
+    pub dialog_toplevels: HashSet<WlSurface>,
+    /// Dialogs that were centred a moment ago: when they were first centred, the size they were
+    /// centred for and where they were put. Apps often show a small window first and grow it to
+    /// its real size right after, so they are centred again while that goes on.
+    pub settling_dialogs: HashMap<WlSurface, (Instant, (i32, i32), (i32, i32))>,
     /// xdg-decoration: lets `no-client-decorations` ask apps to leave out their titlebar.
     #[allow(dead_code)]
     pub xdg_decoration_state: XdgDecorationState,
@@ -300,6 +312,7 @@ impl JffState {
             &display_handle,
             [WmCapabilities::Fullscreen, WmCapabilities::Maximize],
         );
+        let xdg_dialog_state = XdgDialogState::new::<Self>(&display_handle);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
@@ -463,6 +476,9 @@ impl JffState {
             retiring_globals: Vec::new(),
             compositor_state,
             xdg_shell_state,
+            xdg_dialog_state,
+            dialog_toplevels: HashSet::new(),
+            settling_dialogs: HashMap::new(),
             xdg_decoration_state,
             shm_state,
             output_manager_state,
@@ -633,6 +649,7 @@ impl CompositorHandler for JffState {
         if let Some(entry) = self.desk.find_by(|w| is_window_for(w, &root)) {
             entry.window.on_commit();
             self.fit_to_output_once(&root);
+            self.recenter_settling_dialog(&root);
         } else {
             // Panels, launchers, wallpapers.
             self.layer_commit(&root);
@@ -978,6 +995,22 @@ impl XdgDecorationHandler for JffState {
 
 // ---- xdg-shell -------------------------------------------------------------------------------
 
+// xdg_wm_dialog_v1: a window says it is a dialog, modal or not. It is remembered until the
+// window first shows, when dialogs are centred.
+impl XdgDialogHandler for JffState {
+    fn dialog_hint_changed(&mut self, toplevel: ToplevelSurface, hint: ToplevelDialogHint) {
+        let surface = toplevel.wl_surface().clone();
+        match hint {
+            ToplevelDialogHint::Unknown => {
+                self.dialog_toplevels.remove(&surface);
+            }
+            ToplevelDialogHint::Dialog | ToplevelDialogHint::Modal => {
+                self.dialog_toplevels.insert(surface);
+            }
+        }
+    }
+}
+
 impl XdgShellHandler for JffState {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
@@ -1021,6 +1054,8 @@ impl XdgShellHandler for JffState {
         }
         self.desk
             .remove_where(|w| w.toplevel().map(|t| t == &surface).unwrap_or(false));
+        self.dialog_toplevels.remove(surface.wl_surface());
+        self.settling_dialogs.remove(surface.wl_surface());
     }
 
     // Popups (menus, tooltips, and X11 override-redirect windows via xwayland-satellite).
@@ -1204,6 +1239,8 @@ impl XdgShellHandler for JffState {
 
 /// Space kept free around a freshly mapped window that was too big for the output.
 const WINDOW_MARGIN: i32 = 40;
+/// How long after a dialog first shows it is still centred again when its size changes.
+const DIALOG_SETTLE: std::time::Duration = std::time::Duration::from_millis(2000);
 
 impl JffState {
     /// Keep a popup on screen: let the client's positioner flip/slide it into the output.
@@ -1277,11 +1314,18 @@ impl JffState {
         if !self.desk.is_floating(|w| is_window_for(w, root)) {
             return;
         }
+        // A dialog is a window that belongs to another one, or says it is a dialog. It keeps the
+        // size it asks for (shrunk to fit) and is centred over its parent.
+        let parent = toplevel.parent();
+        let dialog = parent.is_some() || self.dialog_toplevels.contains(root);
         // `maximize-new-windows` (on by default). Done now rather than in `new_toplevel` so the
-        // window's own size is known and remembered for when it's restored. Dialogs that belong
-        // to another window keep the size they ask for.
-        if self.config.maximize_new_windows() && toplevel.parent().is_none() {
+        // window's own size is known and remembered for when it's restored.
+        if self.config.maximize_new_windows() && !dialog {
             self.set_maximized(&toplevel, true);
+            return;
+        }
+        if dialog {
+            self.center_dialog(root, parent.as_ref(), (size.w, size.h));
             return;
         }
         // Only windows that overflow the output are touched, one that exactly fills it (a game
@@ -1301,6 +1345,68 @@ impl JffState {
             toplevel.with_pending_state(|state| state.size = Some((fitted.0, fitted.1).into()));
             toplevel.send_pending_configure();
         }
+    }
+
+    /// Put a dialog of `size` in the middle of the window it belongs to (the monitor the pointer
+    /// is on when it has none), keeping it on that monitor. One too big for the monitor is
+    /// shrunk to fit first.
+    fn center_dialog(&mut self, root: &WlSurface, parent: Option<&WlSurface>, size: (i32, i32)) {
+        let parent_rect = parent
+            .and_then(|parent| self.desk.find_by(|w| is_window_for(w, parent)))
+            .map(|entry| {
+                let size = entry.window.geometry().size;
+                (entry.pos.0, entry.pos.1, size.w, size.h)
+            });
+        let monitor = match parent_rect {
+            Some((x, y, w, h)) => self.rect_for_window((x, y), (w, h)),
+            None => self.rect_at_pointer(),
+        };
+        let fitted = geom::fit_size(size, (monitor.2, monitor.3), WINDOW_MARGIN);
+        let pos = layout::dialog_pos(fitted, parent_rect, monitor, WINDOW_MARGIN);
+        self.desk.set_pos_where(|w| is_window_for(w, root), pos);
+        let since = self
+            .settling_dialogs
+            .get(root)
+            .map_or_else(Instant::now, |settling| settling.0);
+        self.settling_dialogs
+            .insert(root.clone(), (since, size, pos));
+        if fitted != size {
+            if let Some(toplevel) = self
+                .desk
+                .find_by(|w| is_window_for(w, root))
+                .and_then(|entry| entry.window.toplevel().cloned())
+            {
+                toplevel.with_pending_state(|state| state.size = Some(fitted.into()));
+                toplevel.send_pending_configure();
+            }
+        }
+    }
+
+    /// A dialog that was centred a moment ago and has a new size now (the app showed a small
+    /// window and grew it) is centred again, for its new size. Stops after a moment, or as soon
+    /// as something else moved the window (the user dragging it).
+    fn recenter_settling_dialog(&mut self, root: &WlSurface) {
+        let Some(&(since, last, placed)) = self.settling_dialogs.get(root) else {
+            return;
+        };
+        let Some(entry) = self.desk.find_by(|w| is_window_for(w, root)) else {
+            self.settling_dialogs.remove(root);
+            return;
+        };
+        if since.elapsed() > DIALOG_SETTLE || entry.pos != placed {
+            self.settling_dialogs.remove(root);
+            return;
+        }
+        let size = entry.window.geometry().size;
+        let size = (size.w, size.h);
+        if size == last || size.0 <= 0 || size.1 <= 0 {
+            return;
+        }
+        let parent = entry
+            .window
+            .toplevel()
+            .and_then(|toplevel| toplevel.parent());
+        self.center_dialog(root, parent.as_ref(), size);
     }
 
     pub fn set_maximized(&mut self, surface: &ToplevelSurface, on: bool) {
