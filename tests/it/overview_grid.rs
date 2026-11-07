@@ -7,7 +7,8 @@ use jff_wm::primitives::layout;
 use jff_wm::primitives::layout::Rect;
 use jff_wm::primitives::overview_grid::{
     anchor_in, arrange, cycle, dragged_thumb, drop_pos, ease_out_cubic, hit_test, lerp_thumb,
-    modifier_released, moved_past, neighbor, progress, strip, Dir, Thumb,
+    modifier_released, moved_past, neighbor, progress, shifted, slide_at, strip, strip_offset, Dir,
+    Thumb,
 };
 
 const SCREEN: Rect = (0, 0, 1920, 1080);
@@ -223,21 +224,19 @@ fn lerp_thumb_goes_from_real_window_to_thumbnail() {
 #[test]
 fn nothing_to_strip() {
     assert!(strip(&[], SCREEN, 16, 360).is_empty());
+    assert_eq!(strip_offset(&[], 0, SCREEN), 0);
 }
 
 #[test]
 fn a_lone_window_in_the_strip_keeps_its_size() {
     let t = strip(&[(400, 300)], SCREEN, 16, 360);
-    assert_eq!(t, vec![thumb(760, 390, 400, 300)]);
+    assert_eq!(t, vec![thumb(0, 390, 400, 300)]);
 }
 
 #[test]
-fn the_strip_is_one_centered_row_in_order() {
+fn the_strip_is_one_row_from_the_left_edge_in_order() {
     let t = strip(&[(400, 300), (800, 300)], SCREEN, 20, 360);
-    assert_eq!(
-        t,
-        vec![thumb(350, 390, 400, 300), thumb(770, 390, 800, 300)]
-    );
+    assert_eq!(t, vec![thumb(0, 390, 400, 300), thumb(420, 390, 800, 300)]);
 }
 
 #[test]
@@ -251,38 +250,82 @@ fn strip_thumbnails_share_a_height() {
 }
 
 #[test]
-fn a_long_strip_shrinks_to_fit_the_area() {
-    let sizes = vec![(1920, 1080); 10];
-    let t = strip(&sizes, SCREEN, 16, 360);
-    assert!(t.iter().all(|t| t.scale < 0.5));
-    assert!(t[0].pos.0 >= 0);
-    let last = t[9];
-    assert!(last.pos.0 + last.size.0 <= 1920);
+fn strip_thumbnails_keep_their_size_however_many_there_are() {
+    let one = strip(&[(1920, 1080)], SCREEN, 16, 360);
+    let many = strip(&vec![(1920, 1080); 10], SCREEN, 16, 360);
+    assert_eq!(one[0].size, (640, 360));
+    assert!(many.iter().all(|t| t.size == (640, 360)));
+    // The row runs off the area instead of shrinking.
+    let last = many[9];
+    assert_eq!(last.pos.0, 9 * (640 + 16));
+    assert!(last.pos.0 + last.size.0 > SCREEN.2);
 }
 
 #[test]
-fn strip_stays_inside_the_area_without_overlap() {
-    for n in 1..30usize {
-        for width in [2 * n as i32, 200, 1000, 1920] {
-            if width < 2 * n as i32 {
-                continue;
-            }
-            let area = (50, 20, width, 600);
-            let sizes: Vec<Size> = (0..n as i32)
-                .map(|i| (300 + 37 * i, 200 + 53 * (i % 5)))
-                .collect();
-            let t = strip(&sizes, area, 24, 200);
-            assert_eq!(t.len(), n);
-            let mut right = area.0;
-            for t in &t {
-                assert!(t.size.0 >= 1 && t.size.1 >= 1);
-                assert!(t.pos.0 >= right, "overlap, n={n} width={width}");
-                assert!(t.pos.1 >= area.1 && t.pos.1 + t.size.1 <= area.1 + area.3);
-                right = t.pos.0 + t.size.0;
-            }
-            assert!(right <= area.0 + area.2, "n={n} width={width}");
-        }
+fn a_window_wider_than_the_area_is_scaled_to_fit_it() {
+    let t = strip(&[(8000, 1000)], SCREEN, 16, 360);
+    assert_eq!(t[0].size, (1920, 240));
+    assert_eq!(t[0].scale, 0.24);
+}
+
+#[test]
+fn a_row_that_fits_is_centered_as_a_whole() {
+    let t = strip(&[(400, 300), (800, 300)], SCREEN, 20, 360);
+    // row is 0..1220, its middle goes to 960
+    assert_eq!(strip_offset(&t, 0, SCREEN), 350);
+    assert_eq!(strip_offset(&t, 1, SCREEN), 350);
+}
+
+#[test]
+fn a_row_that_does_not_fit_slides_to_center_the_selected_one() {
+    let t = strip(&vec![(1920, 1080); 10], SCREEN, 16, 360);
+    for i in 0..10 {
+        let dx = strip_offset(&t, i, SCREEN);
+        let t = shifted(t[i], dx);
+        assert_eq!(t.pos.0 + t.size.0 / 2, 960, "selected {i}");
     }
+    // moving the selection one on moves the row one thumbnail plus gap back
+    let step = strip_offset(&t, 4, SCREEN) - strip_offset(&t, 5, SCREEN);
+    assert_eq!(step, 640 + 16);
+}
+
+#[test]
+fn the_offset_is_relative_to_the_area() {
+    let t = strip(&vec![(1920, 1080); 10], (100, 0, 1000, 600), 16, 200);
+    let dx = strip_offset(&t, 7, (100, 0, 1000, 600));
+    let t = shifted(t[7], dx);
+    assert_eq!(t.pos.0 + t.size.0 / 2, 600);
+}
+
+#[test]
+fn a_selection_past_the_end_counts_as_the_first_window() {
+    let t = strip(&vec![(1920, 1080); 10], SCREEN, 16, 360);
+    assert_eq!(strip_offset(&t, 99, SCREEN), strip_offset(&t, 0, SCREEN));
+}
+
+#[test]
+fn shifting_moves_only_sideways() {
+    let t = shifted(thumb(10, 20, 30, 40), -15);
+    assert_eq!(t, thumb(-5, 20, 30, 40));
+}
+
+#[test]
+fn a_slide_eases_from_where_it_was_to_where_it_goes() {
+    let d = Duration::from_millis(120);
+    assert_eq!(slide_at(-300.0, 500.0, Duration::ZERO, d), -300.0);
+    assert_eq!(slide_at(-300.0, 500.0, d, d), 500.0);
+    assert_eq!(slide_at(-300.0, 500.0, d * 3, d), 500.0);
+    // not a jump, and fast at the start: more than half way after half the time
+    let half = slide_at(0.0, 100.0, d / 2, d);
+    assert!(half > 50.0 && half < 100.0, "{half}");
+    let mut last = 0.0;
+    for ms in 0..=120 {
+        let now = slide_at(0.0, 100.0, Duration::from_millis(ms), d);
+        assert!(now >= last);
+        last = now;
+    }
+    // sliding back works the same way
+    assert!(slide_at(100.0, 0.0, d / 2, d) < 50.0);
 }
 
 #[test]

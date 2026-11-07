@@ -100,6 +100,33 @@ pub fn overview_key(sym: Keysym) -> Option<OverviewKey> {
     }
 }
 
+/// The sideways slide of the switcher's row: where it was, where it is headed, and since when.
+#[derive(Clone, Copy)]
+struct Slide {
+    from: f64,
+    to: i32,
+    since: Instant,
+    /// How long it takes (`switcher { slide-ms }` when it started).
+    total: Duration,
+}
+
+impl Slide {
+    /// Standing still at `at`.
+    fn still(at: i32) -> Self {
+        Self {
+            from: at as f64,
+            to: at,
+            since: Instant::now(),
+            total: Duration::ZERO,
+        }
+    }
+
+    /// The offset right now.
+    fn now(&self) -> f64 {
+        overview::slide_at(self.from, self.to as f64, self.since.elapsed(), self.total)
+    }
+}
+
 /// A thumbnail being carried by the pointer.
 struct Drag {
     window: Window,
@@ -134,9 +161,11 @@ pub struct Overview {
     closing: Option<Instant>,
     /// Stable id of the highlight, so damage tracking sees it move rather than reappear.
     highlight: Id,
-    /// Set when this is the window switcher: a row of thumbnails with no animation, ended when
-    /// these modifiers are let go.
+    /// Set when this is the window switcher: a row of fixed-size thumbnails that slides to keep
+    /// the selected one centered, ended when these modifiers are let go.
     switcher: Option<Held>,
+    /// How far the switcher's row is slid sideways. Unused outside the switcher.
+    slide: Slide,
 }
 
 impl Overview {
@@ -267,7 +296,14 @@ pub fn overview_elements(
     for i in order {
         let (window, thumb) = &plan.thumbs[i];
         thumb_elements(
-            renderer, window, thumb, origin, blur, plan.radius, &mut out, snapshot,
+            renderer,
+            window,
+            thumb,
+            origin,
+            blur,
+            plan.radius,
+            &mut out,
+            snapshot,
         );
     }
 
@@ -334,7 +370,14 @@ pub fn overview_drag_elements(
     if let Some((window, thumb)) = plan.dragged.and_then(|i| plan.thumbs.get(i)) {
         if layout::intersects(thumb.rect(), rect) {
             thumb_elements(
-                renderer, window, thumb, origin, blur, plan.radius, &mut out, snapshot,
+                renderer,
+                window,
+                thumb,
+                origin,
+                blur,
+                plan.radius,
+                &mut out,
+                snapshot,
             );
         }
     }
@@ -386,6 +429,8 @@ impl JffState {
         if let Some(ov) = self.overview.as_mut() {
             ov.switcher = Some(held);
         }
+        // Start with the focused window centered, so the first press already slides.
+        self.switcher_retarget(true);
         self.handle_overview_key(OverviewKey::Cycle { backwards });
     }
 
@@ -526,6 +571,7 @@ impl JffState {
             closing: None,
             highlight: Id::new(),
             switcher: None,
+            slide: Slide::still(0),
         });
 
         let start_data = GrabStartData {
@@ -626,26 +672,41 @@ impl JffState {
         pointer.frame(self);
     }
 
-    /// Final (not animated) place of every window in the overview.
+    /// Place of every window in the overview, without the open and close animation. In the
+    /// switcher that includes where the row has slid to so far.
     fn overview_slots(&self) -> Vec<(Window, Thumb)> {
         let Some(ov) = self.overview.as_ref() else {
             return Vec::new();
         };
-        let area = layout::grow(output_rect(&ov.output), -MARGIN);
-        let sizes: Vec<Size> = ov
-            .windows
-            .iter()
-            .map(|w| {
-                let size = w.geometry().size;
-                (size.w, size.h)
-            })
-            .collect();
-        let thumbs = if ov.switcher.is_some() {
-            overview::strip(&sizes, area, GAP, area.3 / 3)
-        } else {
-            overview::arrange(&sizes, area, GAP)
-        };
+        let mut thumbs = overview_layout(ov, self.config.switcher().thumbnail_height);
+        if ov.switcher.is_some() {
+            let dx = ov.slide.now().round() as i32;
+            thumbs = thumbs
+                .into_iter()
+                .map(|t| overview::shifted(t, dx))
+                .collect();
+        }
         ov.windows.iter().cloned().zip(thumbs).collect()
+    }
+
+    /// Aim the switcher's row at the selected window. Does nothing while it is already headed
+    /// there, otherwise it slides on from wherever it is now, or jumps with `snap`.
+    fn switcher_retarget(&mut self, snap: bool) {
+        let Some(ov) = self.overview.as_mut().filter(|ov| ov.switcher.is_some()) else {
+            return;
+        };
+        let settings = *self.config.switcher();
+        let target = switcher_target(ov, settings.thumbnail_height);
+        if snap {
+            ov.slide = Slide::still(target);
+        } else if ov.slide.to != target {
+            ov.slide = Slide {
+                from: ov.slide.now(),
+                to: target,
+                since: Instant::now(),
+                total: Duration::from_millis(settings.slide_ms.into()),
+            };
+        }
     }
 
     /// Layer surface the pointer can reach at `p` while the overview is open: overlay and top
@@ -959,6 +1020,7 @@ impl JffState {
     /// backend - the layout is recomputed every frame, there are few windows.
     pub fn overview_plan(&mut self) -> Option<OverviewPlan> {
         self.overview_tick();
+        self.switcher_retarget(false);
         let ov = self.overview.as_ref()?;
         let t = ov.progress();
         let at = self
@@ -1027,6 +1089,36 @@ impl JffState {
             highlight: ov.highlight.clone(),
         })
     }
+}
+
+/// Where the overview puts its windows, before the switcher's slide: the grid, or in the
+/// switcher a row of fixed-size thumbnails that starts at the left edge.
+fn overview_layout(ov: &Overview, thumbnail_height: Option<i32>) -> Vec<Thumb> {
+    let area = layout::grow(output_rect(&ov.output), -MARGIN);
+    let sizes: Vec<Size> = ov
+        .windows
+        .iter()
+        .map(|w| {
+            let size = w.geometry().size;
+            (size.w, size.h)
+        })
+        .collect();
+    if ov.switcher.is_some() {
+        overview::strip(&sizes, area, GAP, thumbnail_height.unwrap_or(area.3 / 3))
+    } else {
+        overview::arrange(&sizes, area, GAP)
+    }
+}
+
+/// The slide that puts the switcher's selected window in the middle of the screen.
+fn switcher_target(ov: &Overview, thumbnail_height: Option<i32>) -> i32 {
+    let area = layout::grow(output_rect(&ov.output), -MARGIN);
+    let selected = ov
+        .selected
+        .as_ref()
+        .and_then(|s| ov.windows.iter().position(|w| w == s))
+        .unwrap_or(0);
+    overview::strip_offset(&overview_layout(ov, thumbnail_height), selected, area)
 }
 
 /// Owns the pointer while the overview is open: windows see nothing, layer surfaces (panels,

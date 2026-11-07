@@ -108,60 +108,26 @@ fn grid(sizes: &[Size], area: Rect, gap: i32, cols: usize) -> Vec<Thumb> {
         .collect()
 }
 
-/// Windows in one row, centered in `area`, `gap` px apart: the layout of the window switcher.
-/// Every thumbnail is as tall as the row allows (or its real height, if that is less), no taller
-/// than `max_height`, and the row fits in `area`. One entry per size, in order.
-pub fn strip(sizes: &[Size], area: Rect, gap: i32, max_height: i32) -> Vec<Thumb> {
-    let n = sizes.len();
-    if n == 0 {
-        return Vec::new();
-    }
+/// Windows in one row at a fixed size, `gap` px apart: the layout of the window switcher.
+///
+/// Every thumbnail is `height` tall (or its real height, if that is less) however many windows
+/// there are, and no wider than `area`. The row starts at the left edge of `area` and is
+/// centered vertically, it may be longer than `area`. `strip_offset` says how far to slide it.
+/// One entry per size, in order.
+pub fn strip(sizes: &[Size], area: Rect, gap: i32, height: i32) -> Vec<Thumb> {
     let area = (area.0, area.1, area.2.max(1), area.3.max(1));
-    let sizes: Vec<Size> = sizes.iter().map(|s| (s.0.max(1), s.1.max(1))).collect();
-    // Rounding can add up to a pixel per window, keep that much room.
-    let slack = n as i32;
-    let gap = if n > 1 {
-        gap.clamp(0, (area.2 - 2 * slack).max(0) / (n as i32 - 1))
-    } else {
-        0
-    };
-    let scale_at = |height: f64, size: Size| (height / size.1 as f64).min(1.0);
-    let row_w = |height: f64| {
-        let windows: f64 = sizes
-            .iter()
-            .map(|s| s.0 as f64 * scale_at(height, *s))
-            .sum();
-        windows + (gap * (n as i32 - 1)) as f64
-    };
-    let budget = (area.2 - slack) as f64;
-    let mut height = max_height.clamp(1, area.3) as f64;
-    if row_w(height) > budget {
-        let (mut lo, mut hi) = (0.0, height);
-        for _ in 0..40 {
-            let mid = (lo + hi) / 2.0;
-            if row_w(mid) <= budget {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        height = lo;
-    }
-
-    let sizes_out: Vec<(Size, f64)> = sizes
+    let height = height.clamp(1, area.3) as f64;
+    let gap = gap.max(0);
+    let mut x = area.0;
+    sizes
         .iter()
-        .map(|&s| {
-            let scale = scale_at(height, s);
-            let tw = (s.0 as f64 * scale).round().max(1.0) as i32;
-            let th = (s.1 as f64 * scale).round().max(1.0) as i32;
-            ((tw, th), scale)
-        })
-        .collect();
-    let total: i32 = sizes_out.iter().map(|(s, _)| s.0).sum::<i32>() + gap * (n as i32 - 1);
-    let mut x = area.0 + (area.2 - total) / 2;
-    sizes_out
-        .into_iter()
-        .map(|(size, scale)| {
+        .map(|&(w, h)| {
+            let (w, h) = (w.max(1), h.max(1));
+            let scale = (height / h as f64).min(area.2 as f64 / w as f64).min(1.0);
+            let size = (
+                (w as f64 * scale).round().max(1.0) as i32,
+                (h as f64 * scale).round().max(1.0) as i32,
+            );
             let thumb = Thumb {
                 pos: (x, area.1 + (area.3 - size.1) / 2),
                 size,
@@ -171,6 +137,35 @@ pub fn strip(sizes: &[Size], area: Rect, gap: i32, max_height: i32) -> Vec<Thumb
             thumb
         })
         .collect()
+}
+
+/// How far to slide a row made by `strip` sideways so that `selected` is in the middle of
+/// `area`. A row that fits in `area` doesn't scroll, it is centered as a whole. An index past
+/// the end counts as the first thumbnail.
+pub fn strip_offset(thumbs: &[Thumb], selected: usize, area: Rect) -> i32 {
+    let (Some(first), Some(last)) = (thumbs.first(), thumbs.last()) else {
+        return 0;
+    };
+    let middle = area.0 + area.2 / 2;
+    let (left, right) = (first.pos.0, last.pos.0 + last.size.0);
+    if right - left <= area.2 {
+        return middle - (left + right) / 2;
+    }
+    let t = thumbs.get(selected).unwrap_or(first);
+    middle - (t.pos.0 + t.size.0 / 2)
+}
+
+/// `thumb`, `dx` px further right.
+pub fn shifted(thumb: Thumb, dx: i32) -> Thumb {
+    Thumb {
+        pos: (thumb.pos.0 + dx, thumb.pos.1),
+        ..thumb
+    }
+}
+
+/// Where a slide from `from` to `to` is `elapsed` into its `total` time: fast start, gentle stop.
+pub fn slide_at(from: f64, to: f64, elapsed: Duration, total: Duration) -> f64 {
+    lerp(from, to, ease_out_cubic(progress(elapsed, total)))
 }
 
 /// Which of alt, ctrl and logo are held (in that order).

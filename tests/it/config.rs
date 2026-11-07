@@ -11,8 +11,8 @@ use jff_wm::config::{
     closest, edit_distance, parse_color, Action, BorderAnimation, Config, ConfigWatch, FileStamp,
     KeyboardConfig, ModeRequest, ScreenshotConfig, Vrr, DEFAULT_BORDER_FADE_MS,
     DEFAULT_BORDER_PERIOD_MS, DEFAULT_BORDER_WIDTH, DEFAULT_CONFIG, DEFAULT_REPEAT_DELAY,
-    DEFAULT_REPEAT_RATE, DEFAULT_WORKSPACES, MAX_BORDER_PERIOD_MS, MAX_BORDER_WIDTH, MAX_GAPS,
-    MAX_RADIUS, TOP_LEVEL_NODES,
+    DEFAULT_REPEAT_RATE, DEFAULT_SWITCHER_SLIDE_MS, DEFAULT_WORKSPACES, MAX_BORDER_PERIOD_MS,
+    MAX_BORDER_WIDTH, MAX_GAPS, MAX_RADIUS, TOP_LEVEL_NODES,
 };
 use jff_wm::desk::{Goto, Side};
 
@@ -796,8 +796,12 @@ fn blur_settings_are_read() {
             .blur()
             .all_layers
     );
-    assert!(Config::parse("blur {}").unwrap().blur_ignore_layers().is_empty());
-    let cfg = Config::parse("blur { ignore-layer \"Nbar-Top\"; ignore-layer \"wallpaper\"; }").unwrap();
+    assert!(Config::parse("blur {}")
+        .unwrap()
+        .blur_ignore_layers()
+        .is_empty());
+    let cfg =
+        Config::parse("blur { ignore-layer \"Nbar-Top\"; ignore-layer \"wallpaper\"; }").unwrap();
     assert_eq!(cfg.blur_ignore_layers(), ["Nbar-Top", "wallpaper"]);
     assert!(Config::parse("blur { ignore-layer; }").is_err());
     assert!(Config::parse("blur { ignore-layer 3; }").is_err());
@@ -843,4 +847,31 @@ fn snap_actions_are_parsed() {
         Some(&Action::Snap(Side::Bottom))
     );
     assert!(Config::parse("binds { Alt+Left { snap-left 1; } }").is_err());
+}
+
+#[test]
+fn switcher_defaults_to_a_third_of_the_screen_and_a_short_slide() {
+    let config = Config::default();
+    assert_eq!(config.switcher().thumbnail_height, None);
+    assert_eq!(config.switcher().slide_ms, DEFAULT_SWITCHER_SLIDE_MS);
+}
+
+#[test]
+fn switcher_settings_are_parsed() {
+    let config = Config::parse("switcher { thumbnail-height 240; slide-ms 200; }").unwrap();
+    assert_eq!(config.switcher().thumbnail_height, Some(240));
+    assert_eq!(config.switcher().slide_ms, 200);
+    let config = Config::parse("switcher { slide-ms 0; }").unwrap();
+    assert_eq!(config.switcher().thumbnail_height, None);
+    assert_eq!(config.switcher().slide_ms, 0);
+}
+
+#[test]
+fn switcher_rejects_bad_values() {
+    assert!(Config::parse("switcher { thumbnail-height 10; }").is_err());
+    assert!(Config::parse("switcher { thumbnail-height 5000; }").is_err());
+    assert!(Config::parse("switcher { thumbnail-height \"big\"; }").is_err());
+    assert!(Config::parse("switcher { slide-ms 5000; }").is_err());
+    assert!(Config::parse("switcher { slide-ms -1; }").is_err());
+    assert!(Config::parse("switcher { nonsense 1; }").is_err());
 }

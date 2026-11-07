@@ -5,7 +5,7 @@
 //!
 //! The format is one KDL document. Top-level nodes: `workspaces`, `maximize-new-windows`,
 //! `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
-//! `keyboard { … }`, `blur { … }`, `osd { … }`, `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
+//! `keyboard { … }`, `blur { … }`, `osd { … }`, `switcher { … }`, `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
 //! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -122,6 +122,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "keyboard",
     "blur",
     "osd",
+    "switcher",
     "autostart",
     "sh-autostart",
     "outputs",
@@ -415,6 +416,33 @@ impl Default for OsdConfig {
     }
 }
 
+/// Default time (ms) the window switcher's row takes to slide to the selected window.
+pub const DEFAULT_SWITCHER_SLIDE_MS: u32 = 120;
+/// Bounds for the switcher's `thumbnail-height`, in pixels.
+pub const MIN_THUMBNAIL_HEIGHT: i32 = 32;
+pub const MAX_THUMBNAIL_HEIGHT: i32 = 4096;
+/// Upper bound for the switcher's `slide-ms`.
+pub const MAX_SWITCHER_SLIDE_MS: i32 = 2000;
+
+/// The `switcher { … }` block, the Alt+Tab window switcher. `thumbnail-height` is the height in
+/// pixels of every thumbnail (a window smaller than that keeps its real size), without it, a
+/// third of the monitor's height. `slide-ms` is how long the row takes to slide to the selected
+/// window, 0 to jump.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SwitcherConfig {
+    pub thumbnail_height: Option<i32>,
+    pub slide_ms: u32,
+}
+
+impl Default for SwitcherConfig {
+    fn default() -> Self {
+        Self {
+            thumbnail_height: None,
+            slide_ms: DEFAULT_SWITCHER_SLIDE_MS,
+        }
+    }
+}
+
 /// How a new window appears.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OpenStyle {
@@ -594,6 +622,7 @@ pub struct Config {
     /// Layer-surface namespaces the blur leaves alone (`blur { ignore-layer "…" }`).
     blur_ignore_layers: Vec<String>,
     osd: OsdConfig,
+    switcher: SwitcherConfig,
     autostart: Vec<Action>,
 }
 
@@ -630,6 +659,7 @@ impl Default for Config {
                 blur: Blur::default(),
                 blur_ignore_layers: Vec::new(),
                 osd: OsdConfig::default(),
+                switcher: SwitcherConfig::default(),
                 autostart: Vec::new(),
             }
         })
@@ -817,6 +847,11 @@ impl Config {
             Some(node) => parse_osd(node).context("in osd")?,
         };
 
+        let switcher = match doc.get("switcher") {
+            None => SwitcherConfig::default(),
+            Some(node) => parse_switcher(node).context("in switcher")?,
+        };
+
         let mut autostart = Vec::new();
         for node in doc.nodes() {
             let name = node.name().value();
@@ -842,6 +877,7 @@ impl Config {
             blur,
             blur_ignore_layers,
             osd,
+            switcher,
             autostart,
         })
     }
@@ -900,6 +936,10 @@ impl Config {
 
     pub fn osd(&self) -> &OsdConfig {
         &self.osd
+    }
+
+    pub fn switcher(&self) -> &SwitcherConfig {
+        &self.switcher
     }
 
     /// The screenshot block.
@@ -1265,6 +1305,27 @@ fn parse_osd(node: &KdlNode) -> anyhow::Result<OsdConfig> {
                     .context("font takes a family name, like \"Inter\"")?;
             }
             other => bail!("unknown osd setting {other:?}"),
+        }
+    }
+    Ok(config)
+}
+
+/// The `switcher { … }` block.
+fn parse_switcher(node: &KdlNode) -> anyhow::Result<SwitcherConfig> {
+    let mut config = SwitcherConfig::default();
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "thumbnail-height" => {
+                let height = int_arg(child, MAX_THUMBNAIL_HEIGHT)?;
+                if height < MIN_THUMBNAIL_HEIGHT {
+                    bail!(
+                        "thumbnail-height takes a number from {MIN_THUMBNAIL_HEIGHT} to {MAX_THUMBNAIL_HEIGHT}"
+                    );
+                }
+                config.thumbnail_height = Some(height);
+            }
+            "slide-ms" => config.slide_ms = u32::try_from(int_arg(child, MAX_SWITCHER_SLIDE_MS)?)?,
+            other => bail!("unknown switcher setting {other:?}"),
         }
     }
     Ok(config)
