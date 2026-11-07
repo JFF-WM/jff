@@ -1,0 +1,14 @@
+# Manual test client for wp_alpha_modifier_v1. Its own package (not part of jff's build),
+# so jff gains no dependencies: `cargo run --manifest-path tools/alpha-test-client/Cargo.toml`.
+[package]
+name = "alpha-test-client"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+
+# Keep cargo from treating this as a member of any enclosing workspace.
+[workspace]

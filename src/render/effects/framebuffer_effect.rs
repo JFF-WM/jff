@@ -103,6 +103,7 @@ impl WallpaperSnapshot {
             captures: Some(self.clone()),
             source: None,
             mask: None,
+            alpha: 1.0,
         }
     }
 }
@@ -122,6 +123,8 @@ pub struct FramebufferEffectElement {
     blur_options: BlurOptions,
     /// The window's rounded corners: the blurred picture is painted through this mask.
     mask: Option<Rounding>,
+    /// How opaque the blurred picture is painted, 1.0 unless the window is faded.
+    alpha: f32,
 }
 
 /// What `capture_framebuffer` leaves for `draw`.
@@ -163,6 +166,7 @@ impl FramebufferEffect {
             captures: None,
             source: None,
             mask: params.mask,
+            alpha: params.alpha,
         }
     }
 }
@@ -274,6 +278,10 @@ impl Element for FramebufferEffectElement {
 
     fn geometry(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
         self.geometry.to_physical_precise_round(scale)
+    }
+
+    fn alpha(&self) -> f32 {
+        self.alpha
     }
 
     fn is_framebuffer_effect(&self) -> bool {
@@ -534,7 +542,7 @@ impl RenderElement<GlesRenderer> for FramebufferEffectElement {
             &filtered[..],
             &[],
             texture_transform,
-            1.,
+            self.alpha,
         );
         if self.mask.is_some() {
             Rounding::clear(frame);

@@ -12,6 +12,9 @@
 //! Blur itself is opt-in: nothing runs unless the config has a `blur { … }` block - the
 //! renderer hands these functions `None` otherwise (see `render_for_surface`).
 //!
+//! * `surface_alpha`: the opacity a client set with wp_alpha_modifier_v1. Blur and border fade
+//!   with it, and a faded window is never scanned out directly.
+//!
 //! Needs Smithay's framebuffer-effect support (`RenderElement::capture_framebuffer`).
 
 pub mod background_effect;
@@ -19,3 +22,4 @@ pub mod blur;
 pub mod border;
 pub mod framebuffer_effect;
 pub mod rounded;
+pub mod surface_alpha;

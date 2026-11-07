@@ -42,7 +42,9 @@ use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Transform};
 
 use super::rounded::{is_fullscreen, make_ring, ring_area, RingMotion};
+use super::surface_alpha::window_multiplier;
 use crate::config::{Border, BorderAnimation};
+use crate::primitives::alpha;
 use crate::primitives::overview_grid::{ease_out_cubic, progress};
 
 /// What a window's border looks like right now, from the config and the focus.
@@ -170,6 +172,9 @@ fn target(paint: &BorderPaint) -> [f32; 4] {
 ///
 /// `geo` is the window geometry in frame coordinates, `radius` its corner radius. Push the
 /// element after the window's own elements and their blur, so it is drawn behind them.
+///
+/// The ring fades with the window when its client set an opacity (wp_alpha_modifier_v1), and
+/// is gone with a window that is fully transparent.
 pub fn border_element(
     renderer: &mut GlesRenderer,
     window: &Window,
@@ -182,6 +187,10 @@ pub fn border_element(
         return None;
     }
     let id = window.toplevel()?.wl_surface().id();
+    let visible = window_multiplier(window);
+    if alpha::is_invisible(visible) {
+        return None;
+    }
     let style = paint.style;
     let width = style.width;
     let fade = Duration::from_millis(u64::try_from(style.fade_ms).unwrap_or(0));
@@ -224,7 +233,7 @@ pub fn border_element(
         // after frame, so the ring is the same element and costs nothing.
         let motion = if amount > 0.0 {
             RingMotion {
-                color2: style.focus_color_2(),
+                color2: alpha::faded(style.focus_color_2(), visible),
                 phase: phase(now.saturating_duration_since(clock_start()), period),
                 amount,
                 sweep: style.animate == BorderAnimation::Sweep,
@@ -236,7 +245,8 @@ pub fn border_element(
             area: ring_area(geo, width),
             width,
             radius,
-            color,
+            // Faded only here: the fade state above keeps the colours as configured.
+            color: alpha::faded(color, visible),
             motion,
         };
         let cached = state

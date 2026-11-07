@@ -382,6 +382,9 @@ impl JffState {
         let loc: Point<i32, Physical> =
             Point::<i32, Logical>::from((-geo.loc.x, -geo.loc.y)).to_physical_precise_round(scale);
         let renderer = self.backend.renderer();
+        // A client's fade (wp_alpha_modifier_v1) is applied per surface on top of the 1.0, so
+        // the picture shows the window as it looks on screen, translucent where it is faded.
+        // The closing fade starts from this picture, so it carries on from what was shown.
         let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
             window.render_elements(&mut *renderer, loc, scale, 1.0);
         render_to_rgba(

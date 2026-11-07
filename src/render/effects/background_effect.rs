@@ -26,8 +26,10 @@ use super::blur::BlurOptions;
 use super::border::{border_element, BorderPaint};
 use super::framebuffer_effect::{FramebufferEffect, FramebufferEffectElement, WallpaperSnapshot};
 use super::rounded::{is_fullscreen, Rounding};
+use super::surface_alpha::multiplier_of;
 use crate::config;
 use crate::feature::window_anim::OpenFrame;
+use crate::primitives::alpha;
 use crate::primitives::region::TransformedRegion;
 use crate::protocol::background_effect::get_cached_blur_region;
 use crate::render::elements::JffElement;
@@ -41,12 +43,17 @@ pub struct RenderParams {
     /// Rounded corners of the window this blur sits behind: the blur is painted through the
     /// same mask as the window, so it doesn't show square around round corners.
     pub mask: Option<Rounding>,
+    /// How strongly the blur shows: the multiplier its surface's client set, so the blur fades
+    /// with the window instead of staying solid behind a see-through one.
+    pub alpha: f32,
 }
 
 #[derive(Debug)]
 struct BackgroundEffect {
     framebuffer: FramebufferEffect,
     options: Option<BlurOptions>,
+    /// Strength of the last frame's blur.
+    alpha: f32,
 }
 
 impl BackgroundEffect {
@@ -60,6 +67,15 @@ impl BackgroundEffect {
             self.damage();
         }
     }
+
+    /// A new strength changes what is painted without anything behind it moving, so it has to
+    /// be repainted by hand.
+    fn set_alpha(&mut self, alpha: f32) {
+        if self.alpha != alpha {
+            self.alpha = alpha;
+            self.damage();
+        }
+    }
 }
 
 struct SurfaceBackgroundEffect(Mutex<BackgroundEffect>);
@@ -70,6 +86,7 @@ impl SurfaceBackgroundEffect {
             SurfaceBackgroundEffect(Mutex::new(BackgroundEffect {
                 framebuffer: FramebufferEffect::new(),
                 options: None,
+                alpha: 1.0,
             }))
         })
     }
@@ -148,6 +165,13 @@ pub fn render_for_surface_zoomed(
             return;
         };
 
+        // A client can fade its surface (wp_alpha_modifier_v1): the blur fades with it, and a
+        // surface nobody can see blurs nothing.
+        let alpha = multiplier_of(states);
+        if alpha::is_invisible(alpha) {
+            return;
+        }
+
         let (rects, area) = match client_region {
             Some(rects) if rects.is_empty() => return,
             Some(rects) => {
@@ -174,6 +198,7 @@ pub fn render_for_surface_zoomed(
         let effect = SurfaceBackgroundEffect::get(states);
         let mut effect = effect.0.lock().unwrap();
         effect.set_options(options);
+        effect.set_alpha(alpha);
 
         let subregion = TransformedRegion {
             rects,
@@ -188,6 +213,7 @@ pub fn render_for_surface_zoomed(
                 geometry,
                 subregion,
                 mask: mask.cloned(),
+                alpha,
             },
             options,
         ));
@@ -253,7 +279,8 @@ pub fn popup_elements(
 /// radius in pixels (0 = square), fullscreen windows are never rounded. `popup_radius` is the
 /// same for the blur behind the window's popups.
 /// `border` is the outline around the window (see `border`), `None` for none. `alpha` is the
-/// look of the window while it opens (`OpenFrame::DONE` once it has).
+/// look of the window while it opens (`OpenFrame::DONE` once it has). The client's own
+/// multiplier (wp_alpha_modifier_v1) is applied by Smithay on top of it, per surface.
 pub fn window_elements(
     renderer: &mut GlesRenderer,
     window: &Window,

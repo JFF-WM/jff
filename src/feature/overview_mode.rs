@@ -466,6 +466,8 @@ fn thumb_elements(
             (f64::from(radius) * thumb.scale).round() as i32,
         )
     };
+    // Alpha 1.0 is the thumbnail's own: a client's fade (wp_alpha_modifier_v1) is applied per
+    // surface on top, so a faded window stays faded here, as it is what the user sees live.
     let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
         window.render_elements(&mut *renderer, loc, scale, 1.0);
     for surface in surfaces {

@@ -1,5 +1,6 @@
 //! Integration tests for jff-wm, built as one binary so the crate is linked once.
 
+mod alpha;
 mod app_index;
 mod app_search;
 mod border;

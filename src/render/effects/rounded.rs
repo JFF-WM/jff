@@ -252,6 +252,9 @@ impl<E: Element> Element for RoundedElement<E> {
         OpaqueRegions::default()
     }
 
+    // Forwarded, never reset: the surface's alpha (the window's open fade times the client's
+    // wp_alpha_modifier_v1 multiplier) reaches the shader's `alpha` uniform through the draw
+    // call, so a faded window stays faded behind the mask.
     fn alpha(&self) -> f32 {
         self.inner.alpha()
     }

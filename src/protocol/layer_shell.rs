@@ -40,9 +40,11 @@ use smithay::wayland::shell::xdg::PopupSurface;
 use crate::config;
 use crate::desk::Desk;
 use crate::feature::outputs::output_rect;
+use crate::primitives::alpha;
 use crate::primitives::geom;
 use crate::primitives::layout::{self, Rect};
 use crate::render::effects::background_effect::{popup_elements, render_for_surface};
+use crate::render::effects::surface_alpha::window_multiplier;
 use crate::render::elements::JffElement;
 use crate::state::JffState;
 
@@ -56,7 +58,9 @@ pub const OVERLAY_ONLY: [Layer; 1] = [Layer::Overlay];
 /// geometry is exactly the monitor. Only then does it hide everything behind it, so the render
 /// path can leave those elements out and let `DrmCompositor` put the window's buffer straight on
 /// the primary plane (direct scanout). A window that was asked to go fullscreen but still has
-/// its old size doesn't count: the windows behind it are still visible.
+/// its old size doesn't count: the windows behind it are still visible. Neither does a window
+/// its client faded (wp_alpha_modifier_v1): what is behind shows through, so the compositor has
+/// to blend it.
 pub fn fullscreen_covers(desk: &Desk<Window>, rect: Rect) -> bool {
     let Some(entry) = desk.top_down().find(|entry| {
         let size = entry.window.geometry().size;
@@ -68,9 +72,11 @@ pub fn fullscreen_covers(desk: &Desk<Window>, rect: Rect) -> bool {
     if (entry.pos.0, entry.pos.1, size.w, size.h) != rect {
         return false;
     }
-    entry.window.toplevel().is_some_and(|toplevel| {
-        toplevel.with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen))
-    })
+    alpha::is_opaque(window_multiplier(&entry.window))
+        && entry.window.toplevel().is_some_and(|toplevel| {
+            toplevel
+                .with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen))
+        })
 }
 
 /// Whether the fullscreen window covering the monitor at `rect` (see `fullscreen_covers`) says
