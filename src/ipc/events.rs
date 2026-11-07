@@ -307,6 +307,10 @@ pub struct Snapshot {
     pub popups: Vec<PopupInfo>,
     /// Mapped layer-shell surfaces.
     pub layers: Vec<LayerInfo>,
+    /// The view the user is moving with the pointer right now (a titlebar drag, or a thumbnail
+    /// carried in the overview). `diff` turns
+    /// changes of it into `drag` events, the snapshot itself doesn't carry it.
+    pub dragging: Option<u64>,
 }
 
 impl Snapshot {
@@ -376,6 +380,11 @@ pub enum Event {
         width: i32,
         height: i32,
     },
+    /// The user started (`on`) or stopped dragging a window with the pointer.
+    Drag {
+        id: u64,
+        on: bool,
+    },
     Maximized {
         id: u64,
         on: bool,
@@ -431,6 +440,7 @@ impl Event {
             | Event::Title { .. }
             | Event::AppId { .. }
             | Event::Geometry { .. }
+            | Event::Drag { .. }
             | Event::Maximized { .. }
             | Event::Fullscreen { .. }
             | Event::ViewWorkspace { .. } => Group::Views,
@@ -476,6 +486,9 @@ impl Event {
                 "{{\"event\":\"geometry\",\"id\":{id},\"x\":{x},\"y\":{y},\"width\":{width},\
                  \"height\":{height}}}"
             ),
+            Event::Drag { id, on } => {
+                format!("{{\"event\":\"drag\",\"id\":{id},\"on\":{on}}}")
+            }
             Event::Maximized { id, on } => {
                 format!("{{\"event\":\"maximized\",\"id\":{id},\"on\":{on}}}")
             }
@@ -519,7 +532,7 @@ impl Event {
 /// The events that turn `old` into `new`, in the order a client should see them. Monitors are
 /// added or changed first, then panels open, then windows open (ascending id), then menus open,
 /// then changes on windows already there (ascending id, and per window: title, app id,
-/// geometry, maximized, fullscreen, workspace), then the shown workspace, then focus, then
+/// drag start, geometry, maximized, fullscreen, workspace, drag end), then the shown workspace, then focus, then
 /// menus close, windows close (ascending id, after the focus event that moved away from them),
 /// panels close, then monitors removed, overview, screenshot, lock. A menu always opens after
 /// and closes before what it belongs to.
@@ -595,6 +608,9 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
                 app_id: after.app_id.clone(),
             });
         }
+        if new.dragging == Some(id) && old.dragging != Some(id) {
+            events.push(Event::Drag { id, on: true });
+        }
         if (before.x, before.y, before.width, before.height)
             != (after.x, after.y, after.width, after.height)
         {
@@ -623,6 +639,9 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
                 id,
                 workspace: after.workspace,
             });
+        }
+        if old.dragging == Some(id) && new.dragging != Some(id) {
+            events.push(Event::Drag { id, on: false });
         }
     }
 

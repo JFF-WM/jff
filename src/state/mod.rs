@@ -244,6 +244,8 @@ pub struct JffState {
     pub last_snapshot: Option<crate::ipc::events::Snapshot>,
     /// Events that are not a change of the snapshot (button presses), sent with the next diff.
     pub pending_events: Vec<crate::ipc::events::Event>,
+    /// Id of the view an interactive move grab is dragging, for the `drag` watch event.
+    pub dragging_view: Option<u64>,
 
     pub desk: Desk<Window>,
     /// Tracks popups (menus, tooltips) so they're drawn and receive input with their parent.
@@ -504,6 +506,7 @@ impl JffState {
             next_subscriber_id: 1,
             last_snapshot: None,
             pending_events: Vec::new(),
+            dragging_view: None,
             desk: Desk::default(),
             popups: PopupManager::default(),
             resize: None,

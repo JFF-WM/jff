@@ -81,6 +81,7 @@
 //! title            id, title (string or null)                views
 //! app-id           id, app_id (string or null)               views
 //! geometry         id, x, y, width, height                   views
+//! drag             id, on                                    views
 //! maximized        id, on                                    views
 //! fullscreen       id, on                                    views
 //! view-workspace   id, workspace                             views
@@ -115,6 +116,14 @@
 //! `scanout` is true while the monitor's primary plane shows a client's buffer directly (direct
 //! scanout, no copy), false while it shows a frame jff composited. It changes with an
 //! `output-changed` event, so `jff msg watch outputs` shows direct scanout starting and stopping.
+//!
+//! `drag` says the user started (`on` true) or stopped (`on` false) moving a window by its
+//! titlebar, or carrying its thumbnail in the overview (after the pointer moved far enough to
+//! be a drag, not a click). In the overview the window itself doesn't move until it's dropped
+//! on another monitor, so there may be no `geometry` between the two. Otherwise the `geometry`
+//! events in between are the movement, so a panel can tell a drag from a window that moved by
+//! itself. It comes before the first `geometry` of the drag and
+//! after the last one. A press and release inside one event-loop iteration makes no event.
 //!
 //! `geometry` is one move or resize event, however many of the four numbers changed, a view
 //! gets at most one per event-loop iteration, so a drag is coalesced. `focus` follows the
@@ -712,6 +721,7 @@ impl JffState {
             locked: self.session_locked(),
             popups: self.popup_list(),
             layers: self.layer_list(),
+            dragging: self.dragging_view.or_else(|| self.overview_dragged_view()),
         }
     }
 

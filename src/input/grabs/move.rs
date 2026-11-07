@@ -202,6 +202,7 @@ impl PointerGrab<JffState> for MoveGrab {
     }
 
     fn unset(&mut self, data: &mut JffState) {
+        data.dragging_view = None;
         let window = self.window.clone();
         let Some(toplevel) = window.toplevel().cloned() else {
             return;

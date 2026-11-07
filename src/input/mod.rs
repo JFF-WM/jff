@@ -25,6 +25,7 @@ use crate::feature::overview_mode::{overview_key, typed_char, OverviewKey};
 use crate::feature::screenshot::{report_failure, screenshot_key, ScreenshotKey};
 use crate::input::grabs::r#move::{shrunk_geometry, MoveGrab};
 use crate::input::grabs::resize::ResizeGrab;
+use crate::ipc::ViewId;
 use crate::primitives::geom;
 use crate::primitives::layout;
 use crate::protocol::layer_shell::Under;
@@ -632,6 +633,7 @@ impl JffState {
             }
             None => MoveGrab::new(start_data, window.clone(), initial_pos),
         };
+        self.dragging_view = window.user_data().get::<ViewId>().map(|id| id.0);
         pointer.set_grab(self, grab, serial, Focus::Clear);
         true
     }
@@ -736,7 +738,7 @@ impl JffState {
     /// Move the pointer from `from` to `to`, but not to another monitor through the edges of a
     /// hot corner: the corner can be reached by sliding along the edge without overshooting
     /// onto the neighbouring monitor. Only where the hot corner itself is active (see
-    /// [`JffState::hot_corner_blocked`]); returns `to` untouched everywhere else.
+    /// [`JffState::hot_corner_blocked`]), returns `to` untouched everywhere else.
     fn hot_corner_barrier(
         &self,
         from: Point<f64, Logical>,

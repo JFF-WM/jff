@@ -230,6 +230,53 @@ fn title_and_app_id_changes() {
 }
 
 #[test]
+fn a_drag_starts_moves_and_ends() {
+    let old = snapshot(vec![view(1)]);
+    let mut start = old.clone();
+    start.dragging = Some(1);
+    start.views[0].x = 100;
+    let mut end = start.clone();
+    end.dragging = None;
+    end.views[0].x = 120;
+    assert_eq!(
+        diff(&old, &start),
+        vec![
+            Event::Drag { id: 1, on: true },
+            Event::Geometry {
+                id: 1,
+                x: 100,
+                y: 40,
+                width: 800,
+                height: 600
+            }
+        ]
+    );
+    assert_eq!(
+        diff(&start, &end),
+        vec![
+            Event::Geometry {
+                id: 1,
+                x: 120,
+                y: 40,
+                width: 800,
+                height: 600
+            },
+            Event::Drag { id: 1, on: false }
+        ]
+    );
+    // Still dragging, nothing else changed: nothing to say.
+    assert_eq!(diff(&start, &start), vec![]);
+}
+
+#[test]
+fn drag_events_are_flat_json() {
+    assert_eq!(
+        Event::Drag { id: 3, on: true }.to_json(),
+        "{\"event\":\"drag\",\"id\":3,\"on\":true}"
+    );
+}
+
+#[test]
 fn geometry_is_one_event_however_much_changed() {
     let old = snapshot(vec![view(1)]);
     let mut moved = old.clone();
@@ -479,6 +526,7 @@ fn every_event_belongs_to_its_group() {
             },
             Group::Views,
         ),
+        (Event::Drag { id: 1, on: true }, Group::Views),
         (Event::Maximized { id: 1, on: true }, Group::Views),
         (Event::Fullscreen { id: 1, on: true }, Group::Views),
         (
