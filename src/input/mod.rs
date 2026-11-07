@@ -4,7 +4,8 @@ pub mod grabs;
 
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-    KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+    InputTime, KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+    PointerMotionEvent,
 };
 use smithay::desktop::{Window, WindowSurfaceType};
 use smithay::input::keyboard::KeyboardSource;
@@ -319,119 +320,7 @@ impl JffState {
             }
 
             InputEvent::PointerButton { event } => {
-                // Mouse bindings (MouseBack, MouseForward): the press runs the action, and both
-                // press and release are kept from clients so none sees half a click.
-                let button = event.button_code();
-                match event.state() {
-                    ButtonState::Pressed => {
-                        let mods = self
-                            .seat
-                            .get_keyboard()
-                            .map(|k| k.modifier_state())
-                            .unwrap_or_default();
-                        // Not while a window that asked for the shortcuts has the keyboard.
-                        let inhibited = self.shortcuts_inhibited() || self.session_locked();
-                        if let Some(action) = self
-                            .config
-                            .button_action_for(&mods, button)
-                            .filter(|_| !inhibited)
-                            .cloned()
-                        {
-                            self.swallowed_buttons.insert(button);
-                            // Like keys: with overview or screenshot open, only `overview`
-                            // (which closes it) and `quit` act, anything else is ignored.
-                            let modal = self.overview_active() || self.screenshot.is_some();
-                            if !modal || matches!(action, Action::Overview | Action::Quit) {
-                                self.run_action(action);
-                            }
-                            return;
-                        }
-                    }
-                    ButtonState::Released => {
-                        if self.swallowed_buttons.remove(&button) {
-                            return;
-                        }
-                    }
-                }
-
-                // The overview acts on clicks itself, they never reach a client.
-                if self.overview_active() {
-                    self.overview_button(event.button_code(), event.state(), event.time());
-                    return;
-                }
-                // Same for the screenshot selection: no client sees the clicks that draw it.
-                if self.screenshot.is_some() {
-                    self.screenshot_button(event.button_code(), event.state());
-                    return;
-                }
-                let pointer = self.seat.get_pointer().unwrap();
-                let serial = SERIAL_COUNTER.next_serial();
-                let state = event.state();
-
-                // Click-to-focus and click-to-raise, before the click reaches the client.
-                if state == ButtonState::Pressed && !self.session_locked() {
-                    let under = self.under(pointer.current_location());
-                    let at = pointer.current_location();
-                    self.record_click(event.button_code(), (at.x, at.y), under.as_ref());
-                    if let Some(Under::Layer(layer, _, _)) = &under {
-                        // A panel or launcher was clicked: it may take the keyboard, and the
-                        // windows stay as they are.
-                        self.click_layer(layer);
-                    }
-                    if let Some(Under::Window(window, surface, _)) = under {
-                        tracing::debug!(
-                            "button {} pressed on surface {:?}",
-                            event.button_code(),
-                            surface.id()
-                        );
-                        self.focus_window(&window);
-
-                        // Modifier+drag (Alt, see `drag-modifier`) works on any window, even
-                        // ones without their own titlebar: left button moves, right button
-                        // resizes from the nearest corner.
-                        let alt = self
-                            .seat
-                            .get_keyboard()
-                            .map(|k| self.config.drag_modifier_held(&k.modifier_state()))
-                            .unwrap_or(false);
-                        if let Some(k) = self.seat.get_keyboard() {
-                            let m = k.modifier_state();
-                            tracing::debug!(
-                                "click on window: ctrl={} alt={} shift={} logo={} drag_modifier_held={alt}",
-                                m.ctrl, m.alt, m.shift, m.logo
-                            );
-                        }
-                        // A window that asked for the shortcuts gets Alt and the clicks itself.
-                        if alt
-                            && !self.window_inhibits_shortcuts(&window)
-                            && self.start_modifier_grab(&window, event.button_code(), serial)
-                        {
-                            // The grab owns the pointer now, so the client never sees this press.
-                            pointer.button(
-                                self,
-                                &ButtonEvent {
-                                    button: event.button_code(),
-                                    state,
-                                    serial,
-                                    time: event.time(),
-                                },
-                            );
-                            pointer.frame(self);
-                            return;
-                        }
-                    }
-                }
-
-                pointer.button(
-                    self,
-                    &ButtonEvent {
-                        button: event.button_code(),
-                        state,
-                        serial,
-                        time: event.time(),
-                    },
-                );
-                pointer.frame(self);
+                self.pointer_button(event.button_code(), event.state(), event.time());
             }
 
             InputEvent::PointerAxis { event } => {
@@ -463,6 +352,122 @@ impl JffState {
 
             _ => {}
         }
+    }
+
+    /// A pointer button went down or up: mouse bindings, click-to-focus, window drags, the
+    /// overview and screenshot selection, then the client under the pointer. Real mice and
+    /// `jff msg click` both come through here.
+    pub(crate) fn pointer_button(&mut self, button: u32, state: ButtonState, time: InputTime) {
+        // Mouse bindings (MouseBack, MouseForward): the press runs the action, and both
+        // press and release are kept from clients so none sees half a click.
+        match state {
+            ButtonState::Pressed => {
+                let mods = self
+                    .seat
+                    .get_keyboard()
+                    .map(|k| k.modifier_state())
+                    .unwrap_or_default();
+                // Not while a window that asked for the shortcuts has the keyboard.
+                let inhibited = self.shortcuts_inhibited() || self.session_locked();
+                if let Some(action) = self
+                    .config
+                    .button_action_for(&mods, button)
+                    .filter(|_| !inhibited)
+                    .cloned()
+                {
+                    self.swallowed_buttons.insert(button);
+                    // Like keys: with overview or screenshot open, only `overview`
+                    // (which closes it) and `quit` act, anything else is ignored.
+                    let modal = self.overview_active() || self.screenshot.is_some();
+                    if !modal || matches!(action, Action::Overview | Action::Quit) {
+                        self.run_action(action);
+                    }
+                    return;
+                }
+            }
+            ButtonState::Released => {
+                if self.swallowed_buttons.remove(&button) {
+                    return;
+                }
+            }
+        }
+
+        // The overview acts on clicks itself, they never reach a client.
+        if self.overview_active() {
+            self.overview_button(button, state, time);
+            return;
+        }
+        // Same for the screenshot selection: no client sees the clicks that draw it.
+        if self.screenshot.is_some() {
+            self.screenshot_button(button, state);
+            return;
+        }
+        let pointer = self.seat.get_pointer().unwrap();
+        let serial = SERIAL_COUNTER.next_serial();
+
+        // Click-to-focus and click-to-raise, before the click reaches the client.
+        if state == ButtonState::Pressed && !self.session_locked() {
+            let under = self.under(pointer.current_location());
+            let at = pointer.current_location();
+            self.record_click(button, (at.x, at.y), under.as_ref());
+            if let Some(Under::Layer(layer, _, _)) = &under {
+                // A panel or launcher was clicked: it may take the keyboard, and the
+                // windows stay as they are.
+                self.click_layer(layer);
+            }
+            if let Some(Under::Window(window, surface, _)) = under {
+                tracing::debug!("button {} pressed on surface {:?}", button, surface.id());
+                self.focus_window(&window);
+
+                // Modifier+drag (Alt, see `drag-modifier`) works on any window, even
+                // ones without their own titlebar: left button moves, right button
+                // resizes from the nearest corner.
+                let alt = self
+                    .seat
+                    .get_keyboard()
+                    .map(|k| self.config.drag_modifier_held(&k.modifier_state()))
+                    .unwrap_or(false);
+                if let Some(k) = self.seat.get_keyboard() {
+                    let m = k.modifier_state();
+                    tracing::debug!(
+                        "click on window: ctrl={} alt={} shift={} logo={} drag_modifier_held={alt}",
+                        m.ctrl,
+                        m.alt,
+                        m.shift,
+                        m.logo
+                    );
+                }
+                // A window that asked for the shortcuts gets Alt and the clicks itself.
+                if alt
+                    && !self.window_inhibits_shortcuts(&window)
+                    && self.start_modifier_grab(&window, button, serial)
+                {
+                    // The grab owns the pointer now, so the client never sees this press.
+                    pointer.button(
+                        self,
+                        &ButtonEvent {
+                            button: button,
+                            state,
+                            serial,
+                            time: time,
+                        },
+                    );
+                    pointer.frame(self);
+                    return;
+                }
+            }
+        }
+
+        pointer.button(
+            self,
+            &ButtonEvent {
+                button: button,
+                state,
+                serial,
+                time: time,
+            },
+        );
+        pointer.frame(self);
     }
 
     /// Carry out the action of a triggered key binding.

@@ -21,6 +21,8 @@
 //! workspace N|next|prev      show a workspace (N counts from 1)
 //! move-to-workspace N [ID]   send a view (the focused one without an ID) to workspace N
 //! move-cursor X Y            put the pointer at X, Y (pixels in the shared space, like events)
+//! click left|right|middle    press and release that button where the pointer is
+//! toggle-overview            open the window overview, or close it when it is open
 //! status                     views and workspace state in one reply (for panels)
 //! screenshot-area            freeze the monitor under the pointer and pick a rectangle to save
 //! screenshot-fullscreen      save a picture of the monitor under the pointer
@@ -141,6 +143,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context};
+use smithay::backend::input::{ButtonState, InputTime};
 use smithay::desktop::{layer_map_for_output, PopupManager, Window};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
@@ -153,7 +156,7 @@ use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use crate::app::Backend;
 use crate::desk::Goto;
 use crate::feature::outputs::output_rect;
-use crate::input::spawn_command;
+use crate::input::{spawn_command, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use crate::ipc::events::{
     ClickInfo, ClickTarget, Event, Group, GroupSet, LayerInfo, OutputInfo, PopupInfo, Snapshot,
     View,
@@ -199,6 +202,14 @@ pub enum Maximize {
     Toggle,
 }
 
+/// The buttons `click` can press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClickButton {
+    Left,
+    Right,
+    Middle,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     Views,
@@ -225,6 +236,10 @@ pub enum Request {
     ScreenshotWindow,
     /// `move-cursor X Y`: put the pointer there (clamped to the monitors).
     MoveCursor(i32, i32),
+    /// `toggle-overview`: open the overview, or close it when it is open.
+    ToggleOverview,
+    /// `click left|right|middle`: a press and release at the pointer.
+    Click(ClickButton),
     /// `watch [GROUP...]`: keep the connection and stream events. No groups means all of them.
     /// Only the accept loop can carry this out (see `serve`).
     Watch(Vec<Group>),
@@ -233,7 +248,7 @@ pub enum Request {
 pub const COMMANDS: &str =
     "views, status, focused, view-info, close, maximize, unmaximize, toggle-maximize, \
      fullscreen, unfullscreen, focus, workspaces, workspace, move-to-workspace, spawn, spawn-sh, \
-     screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, watch";
+     screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
     word.parse::<usize>()
@@ -286,6 +301,8 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
     match (command, rest.as_slice()) {
         ("workspaces", []) => return Ok(Request::Workspaces),
         ("workspaces", _) => return Err("workspaces takes no arguments".to_string()),
+        ("toggle-overview", []) => return Ok(Request::ToggleOverview),
+        ("toggle-overview", _) => return Err("toggle-overview takes no arguments".to_string()),
         ("status", []) => return Ok(Request::Status),
         ("status", _) => return Err("status takes no arguments".to_string()),
         ("screenshot-area", []) => return Ok(Request::ScreenshotArea),
@@ -302,6 +319,10 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
             return Ok(Request::MoveCursor(coord(x)?, coord(y)?));
         }
         ("move-cursor", _) => return Err("move-cursor needs X and Y".to_string()),
+        ("click", ["left"]) => return Ok(Request::Click(ClickButton::Left)),
+        ("click", ["right"]) => return Ok(Request::Click(ClickButton::Right)),
+        ("click", ["middle"]) => return Ok(Request::Click(ClickButton::Middle)),
+        ("click", _) => return Err("click needs left, right or middle".to_string()),
         ("workspace", ["next"]) => return Ok(Request::Workspace(Goto::Next)),
         ("workspace", ["prev"]) => return Ok(Request::Workspace(Goto::Prev)),
         ("workspace", [n]) => {
@@ -508,9 +529,39 @@ impl JffState {
             Request::ScreenshotWindow => self
                 .screenshot_window()
                 .map(|()| "{\"ok\":true}\n".to_string()),
+            Request::ToggleOverview => {
+                // Same as the key binding. It can decline (a move or resize is going on, or
+                // there is no window to show), so the reply says what state it ended in.
+                self.toggle_overview();
+                Ok(format!(
+                    "{{\"ok\":true,\"open\":{}}}\n",
+                    self.overview_active()
+                ))
+            }
             Request::MoveCursor(x, y) => {
                 let (x, y) = self.move_cursor((f64::from(x), f64::from(y)));
                 Ok(format!("{{\"ok\":true,\"x\":{x},\"y\":{y}}}\n"))
+            }
+            Request::Click(button) => {
+                let (code, name) = match button {
+                    ClickButton::Left => (BTN_LEFT, "left"),
+                    ClickButton::Right => (BTN_RIGHT, "right"),
+                    ClickButton::Middle => (BTN_MIDDLE, "middle"),
+                };
+                // The same path a real mouse takes, so focus, panels, grabs and `click`
+                // events for watchers all behave as for a physical click.
+                self.pointer_button(code, ButtonState::Pressed, InputTime::now());
+                self.pointer_button(code, ButtonState::Released, InputTime::now());
+                let at = self
+                    .seat
+                    .get_pointer()
+                    .map(|p| p.current_location())
+                    .unwrap_or_default();
+                Ok(format!(
+                    "{{\"ok\":true,\"button\":\"{name}\",\"x\":{},\"y\":{}}}\n",
+                    at.x.round() as i32,
+                    at.y.round() as i32
+                ))
             }
             // The connection has to stay open, which a reply can't express. `serve` handles
             // `watch` before it gets here.

@@ -14,7 +14,7 @@
 //! The same pass keeps the `Activated` state of toplevels in step with the focus, and ends a
 //! menu grab when the window that owns the menu stops having the keyboard.
 
-use smithay::backend::input::InputTime;
+use smithay::backend::input::{InputTime, KeyState};
 use smithay::desktop::{
     layer_map_for_output, PopupGrab, PopupKind, PopupManager, PopupUngrabStrategy, Window,
 };
@@ -143,8 +143,31 @@ impl JffState {
             self.end_popup_grab();
         }
 
-        self.keyboard_focus.clone_from(&focus);
         let to_client = focus.surface().is_some();
+        // A client that is left while a key is down never sees that key come up: the overview
+        // and the screenshot selection keep every release from reaching anyone, and the key
+        // that opened them is often still down (`jff msg toggle-overview` typed in a terminal:
+        // the terminal got the Enter press, so it repeats Enter until told otherwise, and not
+        // every client stops repeating on a leave). Tell it the keys came up, before it
+        // loses the keyboard. Keys whose press it never saw (a binding took them) stay out.
+        if self.keyboard_focus != focus && !to_client && self.keyboard_focus.surface().is_some() {
+            let held: Vec<_> = keyboard
+                .pressed_keys()
+                .into_iter()
+                .filter(|key| !self.suppressed_keys.contains(key))
+                .collect();
+            for key in held {
+                keyboard.input_forward(
+                    self,
+                    key,
+                    KeyState::Released,
+                    SERIAL_COUNTER.next_serial(),
+                    InputTime::now(),
+                    false,
+                );
+            }
+        }
+        self.keyboard_focus.clone_from(&focus);
         keyboard.set_focus(self, focus.into_surface(), SERIAL_COUNTER.next_serial());
         // Modifiers can change while no client has the keyboard: the Alt release that opened
         // the overview is kept from everybody, and the window that was left never saw it. Its

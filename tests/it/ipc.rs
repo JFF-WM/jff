@@ -8,7 +8,9 @@ use std::os::unix::net::UnixStream;
 
 use jff_wm::desk::Goto;
 use jff_wm::ipc::events::{Group, GroupSet};
-use jff_wm::ipc::{parse_request, Maximize, Outbox, Request, Subscriber, COMMANDS, MAX_PENDING};
+use jff_wm::ipc::{
+    parse_request, ClickButton, Maximize, Outbox, Request, Subscriber, COMMANDS, MAX_PENDING,
+};
 use jff_wm::primitives::json::{json_opt, json_str};
 
 #[test]
@@ -383,4 +385,34 @@ fn move_cursor_parses_two_numbers() {
     assert!(parse_request("move-cursor 1 2 3").is_err());
     assert!(parse_request("move-cursor a b").is_err());
     assert!(parse_request("move-cursor 1.5 2").is_err());
+}
+
+#[test]
+fn click_parses_left_right_and_middle_only() {
+    assert_eq!(
+        parse_request("click left"),
+        Ok(Request::Click(ClickButton::Left))
+    );
+    assert_eq!(
+        parse_request("click right"),
+        Ok(Request::Click(ClickButton::Right))
+    );
+    assert_eq!(
+        parse_request("click middle"),
+        Ok(Request::Click(ClickButton::Middle))
+    );
+    assert!(parse_request("click").is_err());
+    assert!(parse_request("click back").is_err());
+    assert!(parse_request("click left right").is_err());
+    assert!(parse_request("click 1").is_err());
+}
+
+#[test]
+fn toggle_overview_takes_no_arguments() {
+    assert_eq!(
+        parse_request("toggle-overview"),
+        Ok(Request::ToggleOverview)
+    );
+    assert!(parse_request("toggle-overview 1").is_err());
+    assert!(parse_request("toggle-overview open").is_err());
 }
