@@ -206,6 +206,35 @@ impl<W> Desk<W> {
         Some(size)
     }
 
+    /// Take the remembered geometry out of a maximized window, leaving it where it is and no
+    /// longer maximized as far as the desk is concerned. Pair with `remaximize_where`.
+    pub fn take_restore_where(&mut self, pred: impl Fn(&W) -> bool) -> Option<(Pos, (i32, i32))> {
+        self.entries
+            .iter_mut()
+            .find(|e| pred(&e.window))?
+            .restore
+            .take()
+    }
+
+    /// Maximize a window that isn't maximized, going back to the geometry `restore` that
+    /// `take_restore_where` returned instead of the current one. Returns false (and changes
+    /// nothing) if the window is gone or became maximized meanwhile.
+    pub fn remaximize_where(
+        &mut self,
+        pred: impl Fn(&W) -> bool,
+        area_pos: Pos,
+        restore: (Pos, (i32, i32)),
+    ) -> bool {
+        match self.entries.iter_mut().find(|e| pred(&e.window)) {
+            Some(e) if e.restore.is_none() => {
+                e.restore = Some(restore);
+                e.pos = area_pos;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Place the first window matching `pred` at `pos`.
     pub fn set_pos_where(&mut self, pred: impl Fn(&W) -> bool, pos: Pos) {
         if let Some(e) = self.entries.iter_mut().find(|e| pred(&e.window)) {

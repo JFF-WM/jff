@@ -137,3 +137,28 @@ fn remove_drops_window() {
     assert_eq!(order(&d), ["b"]);
     assert_eq!(d.len(), 1);
 }
+
+#[test]
+fn take_restore_then_remaximize_keeps_original_geometry() {
+    let mut d = Desk::default();
+    let a = d.add("a");
+    assert!(d.maximize_where(|w| *w == "a", (0, 0), (300, 200)));
+    let saved = d.take_restore_where(|w| *w == "a").unwrap();
+    assert_eq!(saved, (a, (300, 200)));
+    assert!(!d.is_maximized(|w| *w == "a"));
+    d.set_pos_where(|w| *w == "a", (700, 400));
+    assert!(d.remaximize_where(|w| *w == "a", (0, 0), saved));
+    assert!(d.is_maximized(|w| *w == "a"));
+    assert_eq!(d.unmaximize_where(|w| *w == "a"), Some((300, 200)));
+    assert_eq!(d.pos_of(|w| *w == "a"), Some(a));
+}
+
+#[test]
+fn remaximize_does_nothing_for_floating_or_already_maximized() {
+    let mut d = Desk::default();
+    d.add("a");
+    assert_eq!(d.take_restore_where(|w| *w == "a"), None);
+    assert!(d.maximize_where(|w| *w == "a", (0, 0), (300, 200)));
+    assert!(!d.remaximize_where(|w| *w == "a", (0, 0), ((1, 1), (9, 9))));
+    assert!(!d.remaximize_where(|w| *w == "zzz", (0, 0), ((1, 1), (9, 9))));
+}

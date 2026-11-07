@@ -12,6 +12,7 @@ use smithay::input::keyboard::KeyboardSource;
 use smithay::input::pointer::{
     AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent, RelativeMotionEvent,
 };
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Size, SERIAL_COUNTER};
@@ -20,7 +21,7 @@ use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerCons
 use crate::config::{Action, Config};
 use crate::feature::overview_mode::{overview_key, OverviewKey};
 use crate::feature::screenshot::{report_failure, screenshot_key, ScreenshotKey};
-use crate::input::grabs::r#move::MoveGrab;
+use crate::input::grabs::r#move::{shrunk_geometry, MoveGrab};
 use crate::input::grabs::resize::ResizeGrab;
 use crate::primitives::geom;
 use crate::primitives::layout;
@@ -534,6 +535,41 @@ impl JffState {
         };
 
         if button == BTN_LEFT {
+            // A maximized window shrinks to half the output while it's dragged, and is
+            // maximized again when it's let go.
+            // Only a window in the xdg Maximized state (not floating, not fullscreen: the desk
+            // counts both fullscreen and maximized windows as "filled").
+            let maximized = self.desk.is_maximized(|w| w == window)
+                && window.toplevel().is_some_and(|t| {
+                    t.with_pending_state(|s| {
+                        s.states.contains(xdg_toplevel::State::Maximized)
+                            && !s.states.contains(xdg_toplevel::State::Fullscreen)
+                    })
+                });
+            if maximized {
+                if let Some(toplevel) = window.toplevel().cloned() {
+                    let output = self.rect_for_window(initial_pos, (size.w, size.h));
+                    let (pos, new_size) = shrunk_geometry(output, location);
+                    // The window is a floating one for the duration of the drag (desk and
+                    // xdg state agree), the geometry it returns to is kept in the grab.
+                    let Some(restore) = self.desk.take_restore_where(|w| w == window) else {
+                        return false;
+                    };
+                    self.desk.set_pos_where(|w| w == window, pos);
+                    toplevel.with_pending_state(|s| {
+                        s.states.unset(xdg_toplevel::State::Maximized);
+                        s.size = Some(new_size.into());
+                    });
+                    toplevel.send_pending_configure();
+                    pointer.set_grab(
+                        self,
+                        MoveGrab::new_shrunk(start_data, window.clone(), pos, restore),
+                        serial,
+                        Focus::Clear,
+                    );
+                    return true;
+                }
+            }
             pointer.set_grab(
                 self,
                 MoveGrab::new(start_data, window.clone(), initial_pos),
@@ -546,6 +582,18 @@ impl JffState {
         let Some(toplevel) = window.toplevel().cloned() else {
             return false;
         };
+        // Resizing a maximized (or fullscreen) window makes it a floating one right away: the
+        // desk forgets the maximized state and the client is told, so the two never disagree.
+        // The resize starts from the geometry it has now.
+        if self.desk.is_maximized(|w| w == window) {
+            self.desk.take_restore_where(|w| w == window);
+            toplevel.with_pending_state(|s| {
+                s.states.unset(xdg_toplevel::State::Maximized);
+                s.states.unset(xdg_toplevel::State::Fullscreen);
+                s.size = Some((size.w, size.h).into());
+            });
+            toplevel.send_pending_configure();
+        }
         let local = (
             location.x - initial_pos.0 as f64,
             location.y - initial_pos.1 as f64,
