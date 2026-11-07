@@ -53,7 +53,10 @@ use smithay::utils::{
 };
 
 use crate::config;
-use crate::feature::osd::{toplevel_names, SHADOW};
+use crate::desk::WindowMode;
+use crate::feature::osd::{
+    draw_text, half_line, text_width, toplevel_names, Fonts, Picture, Pixel, SHADOW,
+};
 use crate::feature::outputs::output_rect;
 use crate::feature::overview_search::{self as search_ui, Row};
 use crate::input::{BTN_LEFT, BTN_MIDDLE};
@@ -261,6 +264,11 @@ pub struct Overview {
     closing: Option<Instant>,
     /// Stable id of the highlight, so damage tracking sees it move rather than reappear.
     highlight: Id,
+    /// Stable ids of the fills of the workspace wall's squares, one per square.
+    wall_ids: Vec<Id>,
+    /// The painted number of each square of the wall: the text size it was painted at, the
+    /// buffer, and its size. Painted again only when the size changes.
+    wall_labels: Vec<Option<(i32, MemoryRenderBuffer, (i32, i32))>>,
     /// Set when this is the window switcher: a row of fixed-size thumbnails that slides to keep
     /// the selected one centered, ended when these modifiers are let go.
     switcher: Option<Held>,
@@ -318,8 +326,33 @@ pub struct OverviewPlan {
     pub radius: i32,
     /// The search box and the app list. Not in the switcher.
     pub search: Option<SearchPlan>,
+    /// The workspace wall, while a thumbnail is dragged and `workspace-wall` is on.
+    pub wall: Option<WallPlan>,
     highlight: Id,
 }
+
+/// The squares of the workspace wall for one frame, in the shared space.
+pub struct WallPlan {
+    cells: Vec<Rect>,
+    ids: Vec<Id>,
+    /// The number of each square and where it goes (top-left, shared space). `None` while the
+    /// font loads.
+    labels: Vec<Option<(MemoryRenderBuffer, Point<i32, Logical>)>>,
+    /// The workspace shown on the overview's monitor.
+    current: usize,
+    /// The square the pointer is over.
+    hover: Option<usize>,
+}
+
+/// Fill of a square of the wall (premultiplied).
+const WALL_FILL: [f32; 4] = [0.05, 0.06, 0.10, 0.55];
+/// Outline of the square of the workspace that is shown now (straight alpha).
+const WALL_CURRENT: [f32; 4] = [0.85, 0.85, 0.90, 0.55];
+/// Colour of the numbers on the wall.
+const WALL_NUMBER: [f32; 3] = [0.95, 0.95, 0.97];
+/// Distance between squares, and from the bottom of the usable area.
+const WALL_GAP: i32 = 12;
+const WALL_BOTTOM_GAP: i32 = 24;
 
 /// The painted search box and app list, placed in the shared space (shadow margin included).
 pub struct SearchPlan {
@@ -437,12 +470,16 @@ pub fn overview_elements(
         }
     }
 
-    // The dragged thumbnail sits in front of the rest.
+    // The dragged thumbnail sits in front of the rest, the workspace wall right behind it.
     let order = plan
         .dragged
         .into_iter()
         .chain((0..plan.thumbs.len()).filter(|i| Some(*i) != plan.dragged));
-    for i in order {
+    let wall_at = usize::from(plan.dragged.is_some());
+    for (n, i) in order.enumerate() {
+        if n == wall_at {
+            wall_elements(renderer, plan, origin, &mut out);
+        }
         let (window, thumb) = &plan.thumbs[i];
         thumb_elements(
             renderer,
@@ -454,6 +491,10 @@ pub fn overview_elements(
             &mut out,
             snapshot,
         );
+    }
+    // Nothing came after the dragged thumbnail (or there are no thumbnails): the wall goes last.
+    if plan.thumbs.len() <= wall_at {
+        wall_elements(renderer, plan, origin, &mut out);
     }
 
     // The highlight is pushed last so it's drawn behind: only its rim shows. It is a rounded
@@ -505,6 +546,70 @@ pub fn overview_elements(
     out
 }
 
+/// The squares of the workspace wall: the outline of the hovered one (and of the shown
+/// workspace's) in front, the fills behind. Nothing without a wall in the plan.
+fn wall_elements(
+    renderer: &mut GlesRenderer,
+    plan: &OverviewPlan,
+    origin: Point<i32, Logical>,
+    out: &mut Vec<JffElement>,
+) {
+    let Some(wall) = &plan.wall else {
+        return;
+    };
+    let radius = plan.radius / 2;
+    for (i, cell) in wall.cells.iter().enumerate() {
+        let local = Rectangle::<i32, Logical>::new(
+            (cell.0 - origin.x, cell.1 - origin.y).into(),
+            (cell.2, cell.3).into(),
+        );
+        let outline = if wall.hover == Some(i) {
+            Some((HIGHLIGHT_BORDER, HIGHLIGHT_COLOR))
+        } else if i == wall.current {
+            Some((2, WALL_CURRENT))
+        } else {
+            None
+        };
+        if let Some((border, color)) = outline {
+            if let Some(ring) = ring_element(renderer, local, border, radius, color) {
+                out.push(JffElement::Ring(ring));
+            }
+        }
+    }
+    for (buffer, pos) in wall.labels.iter().flatten() {
+        let loc: Point<f64, Physical> =
+            (f64::from(pos.x - origin.x), f64::from(pos.y - origin.y)).into();
+        match MemoryRenderBufferRenderElement::from_buffer(
+            &mut *renderer,
+            loc,
+            buffer,
+            Some(1.0),
+            None,
+            None,
+            Kind::Unspecified,
+        ) {
+            Ok(element) => out.push(JffElement::Memory(element)),
+            Err(err) => tracing::warn!("error drawing a workspace number: {err:?}"),
+        }
+    }
+    for (i, cell) in wall.cells.iter().enumerate() {
+        let Some(id) = wall.ids.get(i) else {
+            continue;
+        };
+        let geometry = Rectangle::<i32, Physical>::new(
+            (cell.0 - origin.x, cell.1 - origin.y).into(),
+            (cell.2, cell.3).into(),
+        );
+        out.push(JffElement::Solid(SolidColorRenderElement::new(
+            id.clone(),
+            geometry,
+            CommitCounter::default(),
+            WALL_FILL,
+            Kind::Unspecified,
+        )));
+    }
+}
+
 /// Elements for the dragged thumbnail on a monitor that isn't showing the overview, so you can
 /// see the window travelling there. `origin` is the monitor's top-left at `rect`.
 pub fn overview_drag_elements(
@@ -545,6 +650,70 @@ impl JffState {
     /// stays on its own monitor, other monitors keep their panels and draw as usual.
     pub fn pointer_bounds(&self) -> Vec<Rect> {
         self.output_rects()
+    }
+
+    /// The squares of the workspace wall on the overview's monitor, in the shared space. Empty
+    /// when `workspace-wall` is off, in the switcher, or with a single workspace.
+    fn wall_cells(&self) -> Vec<Rect> {
+        let Some(ov) = self.overview.as_ref().filter(|ov| ov.switcher.is_none()) else {
+            return Vec::new();
+        };
+        let Some(wall) = self.config.workspace_wall() else {
+            return Vec::new();
+        };
+        let count = self.workspace_count();
+        if count < 2 {
+            return Vec::new();
+        }
+        let rect = output_rect(&ov.output);
+        overview::wall(
+            count,
+            self.panel_free_rect(rect),
+            (rect.2, rect.3),
+            wall.height,
+            WALL_GAP,
+            WALL_BOTTOM_GAP,
+        )
+    }
+
+    /// The number of every square of the wall, painted when the text size changes. Centered in
+    /// its square. `None` for all of them while the font loads.
+    fn wall_labels(
+        &mut self,
+        cells: &[Rect],
+    ) -> Vec<Option<(MemoryRenderBuffer, Point<i32, Logical>)>> {
+        let fonts = self.osd.fonts();
+        let Some(ov) = self.overview.as_mut() else {
+            return cells.iter().map(|_| None).collect();
+        };
+        ov.wall_labels.resize_with(cells.len(), || None);
+        let Some(fonts) = fonts else {
+            return cells.iter().map(|_| None).collect();
+        };
+        cells
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| {
+                let px = (cell.3 * 2 / 5).clamp(12, 64);
+                let stale = ov.wall_labels[i]
+                    .as_ref()
+                    .map_or(true, |(had, _, _)| *had != px);
+                if stale {
+                    let picture = paint_number(fonts, i + 1, px as f32);
+                    let size = (picture.width, picture.height);
+                    ov.wall_labels[i] = Some((px, buffer_of(&picture), size));
+                }
+                ov.wall_labels[i].as_ref().map(|(_, buffer, size)| {
+                    (
+                        buffer.clone(),
+                        Point::from((
+                            cell.0 + (cell.2 - size.0) / 2,
+                            cell.1 + (cell.3 - size.1) / 2,
+                        )),
+                    )
+                })
+            })
+            .collect()
     }
 
     /// Whether a thumbnail is being dragged.
@@ -732,6 +901,8 @@ impl JffState {
             opened: Instant::now(),
             closing: None,
             highlight: Id::new(),
+            wall_ids: Vec::new(),
+            wall_labels: Vec::new(),
             switcher: None,
             slide: Slide::still(0),
             search: Search::new(entries, version),
@@ -989,6 +1160,12 @@ impl JffState {
             return;
         };
         let at = pointer.current_location();
+        // Dropped on a square of the workspace wall: the window goes to that workspace.
+        let cells = self.wall_cells();
+        if let Some(workspace) = overview::wall_hit(&cells, (at.x, at.y)) {
+            self.send_to_workspace(&drag.window, workspace);
+            return;
+        }
         let rects = self.output_rects();
         let target = layout::nearest((at.x, at.y), &rects)
             .map(|i| rects[i])
@@ -1391,6 +1568,22 @@ impl JffState {
     pub fn overview_plan(&mut self) -> Option<OverviewPlan> {
         self.overview_tick();
         self.switcher_retarget(false);
+        // The wall only exists while a thumbnail is dragged.
+        let wall_cells = if self.overview_dragging() {
+            self.wall_cells()
+        } else {
+            Vec::new()
+        };
+        if let Some(ov) = self.overview.as_mut() {
+            while ov.wall_ids.len() < wall_cells.len() {
+                ov.wall_ids.push(Id::new());
+            }
+        }
+        let wall_labels = if wall_cells.is_empty() {
+            Vec::new()
+        } else {
+            self.wall_labels(&wall_cells)
+        };
         let ov = self.overview.as_ref()?;
         let t = ov.progress();
         let at = self
@@ -1398,6 +1591,22 @@ impl JffState {
             .get_pointer()
             .map(|p| p.current_location())
             .unwrap_or_default();
+        // With a wall the dragged thumbnail is as big as one of its squares, so it can be
+        // matched with one. On another monitor it is the window's real size, as it will land.
+        let overview_rect = output_rect(&ov.output);
+        // (how much the dragged window is scaled, the monitor the pointer is on)
+        let drag_wall = wall_cells.first().map(|cell| {
+            let rects = self.output_rects();
+            let here = layout::nearest((at.x, at.y), &rects)
+                .map(|i| rects[i])
+                .unwrap_or(overview_rect);
+            let scale = if here == overview_rect {
+                f64::from(cell.2) / f64::from(overview_rect.2.max(1))
+            } else {
+                1.0
+            };
+            (scale, here)
+        });
 
         let thumbs: Vec<(Window, Thumb)> = self
             .overview_slots()
@@ -1418,7 +1627,40 @@ impl JffState {
                     .unwrap_or(grid);
                 let thumb = overview::lerp_thumb(real, grid, t);
                 let thumb = match ov.drag.as_ref().filter(|drag| drag.window == window) {
-                    Some(drag) => overview::dragged_thumb(thumb, drag.anchor, (at.x, at.y)),
+                    Some(drag) => {
+                        let thumb = match drag_wall {
+                            Some((scale, monitor)) => {
+                                // The size the window has while it is carried, as when it is
+                                // dragged by its title: a maximized one is half the monitor
+                                // (it maximizes again when dropped), a snapped or fullscreen
+                                // one the size it floats at, any other its own.
+                                let carried = self.desk.find_by(|w| *w == window).map_or(
+                                    real.size,
+                                    |entry| match entry.mode {
+                                        WindowMode::Maximized => {
+                                            ((monitor.2 / 2).max(1), (monitor.3 / 2).max(1))
+                                        }
+                                        WindowMode::Snapped(_) | WindowMode::Fullscreen => {
+                                            entry.restore.map_or(real.size, |(_, size)| size)
+                                        }
+                                        WindowMode::Floating => real.size,
+                                    },
+                                );
+                                let size = (
+                                    ((f64::from(carried.0) * scale).round() as i32).max(1),
+                                    ((f64::from(carried.1) * scale).round() as i32).max(1),
+                                );
+                                Thumb {
+                                    size,
+                                    // The picture is the window's real buffer, shrunk to `size`.
+                                    scale: f64::from(size.0) / f64::from(real.size.0.max(1)),
+                                    ..thumb
+                                }
+                            }
+                            None => thumb,
+                        };
+                        overview::dragged_thumb(thumb, drag.anchor, (at.x, at.y))
+                    }
                     None => thumb,
                 };
                 (window, thumb)
@@ -1454,6 +1696,13 @@ impl JffState {
         let output = ov.output.clone();
         let highlight = ov.highlight.clone();
         let radius = self.config.radius();
+        let wall = (!wall_cells.is_empty()).then(|| WallPlan {
+            ids: ov.wall_ids.clone(),
+            labels: wall_labels,
+            current: self.desk.current_on(&output.name()),
+            hover: overview::wall_hit(&wall_cells, (at.x, at.y)),
+            cells: wall_cells,
+        });
         Some(OverviewPlan {
             output,
             thumbs,
@@ -1461,6 +1710,7 @@ impl JffState {
             dragged,
             radius,
             search: self.search_plan(),
+            wall,
             highlight,
         })
     }
@@ -1515,6 +1765,37 @@ impl JffState {
             list,
             alpha,
         })
+    }
+}
+
+/// The number `n` of a workspace, `px` tall, on a transparent canvas just big enough for it.
+fn paint_number(fonts: &Fonts, n: usize, px: f32) -> Picture {
+    let text = n.to_string();
+    let width = text_width(&fonts.medium, &text, px).ceil() as i32 + 4;
+    let height = (px * 1.4).ceil() as i32;
+    let mut canvas: Vec<Pixel> = vec![[0.0; 4]; (width * height) as usize];
+    let baseline = height as f32 / 2.0 + half_line(&fonts.medium, px);
+    draw_text(
+        &mut canvas,
+        width,
+        height,
+        &fonts.medium,
+        &text,
+        px,
+        2.0,
+        baseline,
+        WALL_NUMBER,
+    );
+    let mut rgba = Vec::with_capacity(canvas.len() * 4);
+    for pixel in &canvas {
+        for channel in pixel {
+            rgba.push((channel.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        }
+    }
+    Picture {
+        rgba,
+        width,
+        height,
     }
 }
 

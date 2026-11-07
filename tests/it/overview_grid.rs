@@ -7,8 +7,8 @@ use jff_wm::primitives::layout;
 use jff_wm::primitives::layout::Rect;
 use jff_wm::primitives::overview_grid::{
     anchor_in, arrange, cycle, dragged_thumb, drop_pos, ease_out_cubic, hit_test, lerp_thumb,
-    modifier_released, moved_past, neighbor, progress, shifted, slide_at, strip, strip_offset, Dir,
-    Thumb,
+    modifier_released, moved_past, neighbor, progress, shifted, slide_at, strip, strip_offset,
+    wall, wall_hit, Dir, Thumb,
 };
 
 const SCREEN: Rect = (0, 0, 1920, 1080);
@@ -341,4 +341,38 @@ fn releasing_a_held_modifier_ends_the_switcher() {
         (false, false, false),
         (false, false, false)
     ));
+}
+
+#[test]
+fn wall_is_one_monitor_shaped_square_per_workspace_centered_at_the_bottom() {
+    let cells = wall(4, SCREEN, (1920, 1080), 90, 10, 20);
+    assert_eq!(cells.len(), 4);
+    // 90 px tall, monitor shaped (16:9).
+    assert_eq!((cells[0].2, cells[0].3), (160, 90));
+    // Same row, 10 px apart, bottom edge 20 px above the area's.
+    assert!(cells.iter().all(|c| c.1 == 1080 - 20 - 90));
+    assert_eq!(cells[1].0, cells[0].0 + 160 + 10);
+    // Centered: as much room left as right.
+    let right = SCREEN.2 - (cells[3].0 + cells[3].2);
+    assert_eq!(cells[0].0, right);
+}
+
+#[test]
+fn wall_shrinks_to_fit_and_handles_nothing() {
+    assert!(wall(0, SCREEN, (1920, 1080), 90, 10, 20).is_empty());
+    let cells = wall(30, SCREEN, (1920, 1080), 200, 10, 20);
+    let last = cells.last().unwrap();
+    assert!(cells[0].0 >= 0 && last.0 + last.2 <= SCREEN.2);
+    assert!(cells[0].3 < 200);
+}
+
+#[test]
+fn wall_hit_finds_the_square_under_the_point() {
+    let cells = wall(3, SCREEN, (1920, 1080), 90, 10, 20);
+    let c = cells[1];
+    assert_eq!(
+        wall_hit(&cells, (c.0 as f64 + 1.0, c.1 as f64 + 1.0)),
+        Some(1)
+    );
+    assert_eq!(wall_hit(&cells, (5.0, 5.0)), None);
 }

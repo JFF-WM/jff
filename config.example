@@ -7,6 +7,9 @@
 workspaces { count 9; per-output }
 //workspaces 5 { per-output } // number plus block also works
 
+// Workspace wall.
+workspace-wall { height 120 }
+
 // Maximize new windows when they open.
 maximize-new-windows #true
 

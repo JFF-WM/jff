@@ -3,9 +3,9 @@
 //! Looked up at `$JFF_CONFIG`, then `$XDG_CONFIG_HOME/jff/config.kdl`, then
 //! `~/.config/jff/config.kdl`. When none exists, the built-in [`DEFAULT_CONFIG`] is used.
 //!
-//! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9; per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
+//! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9, per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
 //! `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
-//! `keyboard { … }`, `blur { … }`, `osd { … }`, `switcher { … }`, `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`; `hot-corner 0` or no block: off; while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
+//! `keyboard { … }`, `blur { … }`, `osd { … }`, `switcher { … }`, `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
 //! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -123,6 +123,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "blur",
     "osd",
     "switcher",
+    "workspace-wall",
     "hot-corner",
     "autostart",
     "sh-autostart",
@@ -444,6 +445,20 @@ impl Default for SwitcherConfig {
     }
 }
 
+/// Default height (px) of a square of the workspace wall, and its bounds.
+pub const DEFAULT_WALL_HEIGHT: i32 = 96;
+pub const MIN_WALL_HEIGHT: i32 = 32;
+pub const MAX_WALL_HEIGHT: i32 = 400;
+
+/// The `workspace-wall` setting: while a thumbnail is dragged in the overview, a row of squares,
+/// one per workspace, appears, dropping the thumbnail on one sends the window to that workspace.
+/// `height` is the height in pixels of a square (it has the shape of the monitor). Off unless
+/// the setting is in the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkspaceWallConfig {
+    pub height: i32,
+}
+
 /// Default size (px) of a hot corner whose block gives none, and its upper bound.
 pub const DEFAULT_HOT_CORNER_SIZE: i32 = 4;
 pub const MAX_HOT_CORNER_SIZE: i32 = 64;
@@ -643,6 +658,7 @@ pub struct Config {
     blur_ignore_layers: Vec<String>,
     osd: OsdConfig,
     switcher: SwitcherConfig,
+    workspace_wall: Option<WorkspaceWallConfig>,
     hot_corner: Option<HotCorner>,
     autostart: Vec<Action>,
 }
@@ -682,6 +698,7 @@ impl Default for Config {
                 blur_ignore_layers: Vec::new(),
                 osd: OsdConfig::default(),
                 switcher: SwitcherConfig::default(),
+                workspace_wall: None,
                 hot_corner: None,
                 autostart: Vec::new(),
             }
@@ -865,6 +882,11 @@ impl Config {
             Some(node) => parse_osd(node).context("in osd")?,
         };
 
+        let workspace_wall = match doc.get("workspace-wall") {
+            None => None,
+            Some(node) => parse_workspace_wall(node).context("in workspace-wall")?,
+        };
+
         let switcher = match doc.get("switcher") {
             None => SwitcherConfig::default(),
             Some(node) => parse_switcher(node).context("in switcher")?,
@@ -902,6 +924,7 @@ impl Config {
             blur_ignore_layers,
             osd,
             switcher,
+            workspace_wall,
             hot_corner,
             autostart,
         })
@@ -965,6 +988,11 @@ impl Config {
 
     pub fn switcher(&self) -> &SwitcherConfig {
         &self.switcher
+    }
+
+    /// The workspace wall of the overview's drag, `None` when it is off (the default).
+    pub fn workspace_wall(&self) -> Option<WorkspaceWallConfig> {
+        self.workspace_wall
     }
 
     /// The hot corner, `None` when it is off (no block, `hot-corner 0`, or `size 0`).
@@ -1344,6 +1372,29 @@ fn parse_osd(node: &KdlNode) -> anyhow::Result<OsdConfig> {
         }
     }
     Ok(config)
+}
+
+/// `workspace-wall`, `workspace-wall #false`, or a block with `height N` and `off`. `None` when
+/// it is off.
+fn parse_workspace_wall(node: &KdlNode) -> anyhow::Result<Option<WorkspaceWallConfig>> {
+    let mut on = true;
+    let mut height = DEFAULT_WALL_HEIGHT;
+    if !positional(node).is_empty() {
+        on = flag_value(node)?;
+    }
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "height" => {
+                height = int_arg(child, MAX_WALL_HEIGHT)?;
+                if height < MIN_WALL_HEIGHT {
+                    bail!("height takes a number from {MIN_WALL_HEIGHT} to {MAX_WALL_HEIGHT}");
+                }
+            }
+            "off" => on = !flag_value(child)?,
+            other => bail!("unknown workspace-wall setting {other:?}"),
+        }
+    }
+    Ok(on.then_some(WorkspaceWallConfig { height }))
 }
 
 /// The `switcher { … }` block.

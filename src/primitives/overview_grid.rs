@@ -255,6 +255,46 @@ pub fn drop_pos(anchor: (f64, f64), p: (f64, f64), size: Size, target: Rect) -> 
     layout::fit_into(pos, size, target)
 }
 
+/// The squares of the workspace wall: one per workspace, in a row centered along the bottom of
+/// `area`, `bottom_gap` px above its lower edge. Every square has the shape of a monitor of
+/// `monitor` size and is `height` px tall, shrunk (all together) if the row would be wider than
+/// 90% of `area`. Empty for no workspaces.
+pub fn wall(
+    count: usize,
+    area: Rect,
+    monitor: Size,
+    height: i32,
+    gap: i32,
+    bottom_gap: i32,
+) -> Vec<Rect> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let (mw, mh) = (monitor.0.max(1) as f64, monitor.1.max(1) as f64);
+    let n = count as f64;
+    let gaps = (count as i32 - 1) * gap;
+    let mut h = height.max(1) as f64;
+    let mut w = h * mw / mh;
+    let room = area.2 as f64 * 0.9 - gaps as f64;
+    if n * w > room {
+        let shrink = (room / (n * w)).max(0.05);
+        w *= shrink;
+        h *= shrink;
+    }
+    let (w, h) = ((w.round() as i32).max(1), (h.round() as i32).max(1));
+    let total = count as i32 * w + gaps;
+    let x0 = area.0 + (area.2 - total) / 2;
+    let y = area.1 + area.3 - bottom_gap - h;
+    (0..count as i32)
+        .map(|i| (x0 + i * (w + gap), y, w, h))
+        .collect()
+}
+
+/// The square of the wall `p` is in, if any.
+pub fn wall_hit(cells: &[Rect], p: (f64, f64)) -> Option<usize> {
+    cells.iter().position(|cell| layout::contains(*cell, p))
+}
+
 /// The next (or previous) index out of `len`, wrapping around.
 pub fn cycle(len: usize, current: usize, backwards: bool) -> usize {
     if len == 0 {

@@ -943,7 +943,9 @@ fn hot_corner_is_a_known_top_level_node() {
 #[test]
 fn workspaces_are_shared_unless_per_output() {
     assert!(!Config::default().workspaces_per_output());
-    assert!(!Config::parse("workspaces 3").unwrap().workspaces_per_output());
+    assert!(!Config::parse("workspaces 3")
+        .unwrap()
+        .workspaces_per_output());
 }
 
 #[test]
@@ -969,4 +971,32 @@ fn workspaces_block_rejects_bad_values() {
     assert!(Config::parse("workspaces { count; }").is_err());
     assert!(Config::parse("workspaces { per-output 3; }").is_err());
     assert!(Config::parse("workspaces { nonsense 1; }").is_err());
+}
+
+#[test]
+fn workspace_wall_is_off_unless_asked_for() {
+    assert!(Config::default().workspace_wall().is_none());
+    assert!(Config::parse("gaps 4").unwrap().workspace_wall().is_none());
+}
+
+#[test]
+fn workspace_wall_bare_block_and_flag() {
+    assert!(Config::parse("workspace-wall")
+        .unwrap()
+        .workspace_wall()
+        .is_some());
+    assert!(Config::parse("workspace-wall #false")
+        .unwrap()
+        .workspace_wall()
+        .is_none());
+    let wall = Config::parse("workspace-wall { height 120; }")
+        .unwrap()
+        .workspace_wall();
+    assert_eq!(wall.map(|w| w.height), Some(120));
+    assert!(Config::parse("workspace-wall { height 120; off; }")
+        .unwrap()
+        .workspace_wall()
+        .is_none());
+    assert!(Config::parse("workspace-wall { height 5; }").is_err());
+    assert!(Config::parse("workspace-wall { nope; }").is_err());
 }
