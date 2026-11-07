@@ -166,6 +166,17 @@ impl Osd {
         }
     }
 
+    /// Start loading the font now, so it is there by the time something wants to draw text.
+    pub(crate) fn preload_fonts(&mut self) {
+        self.start_loading();
+    }
+
+    /// The fonts, once loaded. `None` while loading, and when none could be found.
+    pub(crate) fn fonts(&mut self) -> Option<&Fonts> {
+        self.start_loading();
+        self.fonts.get().and_then(Option::as_ref)
+    }
+
     pub fn show(&mut self, notice: Notice, timeout: Duration, now: Instant) {
         self.start_loading();
         let same = |t: &Toast| {
@@ -338,8 +349,8 @@ pub fn alpha_at(born: Instant, expires: Instant, now: Instant) -> f32 {
 }
 
 pub struct Fonts {
-    regular: Font,
-    medium: Font,
+    pub(crate) regular: Font,
+    pub(crate) medium: Font,
 }
 
 impl Fonts {
@@ -385,7 +396,7 @@ fn drawable(font: &Font, c: char) -> char {
     }
 }
 
-fn text_width(font: &Font, text: &str, px: f32) -> f32 {
+pub(crate) fn text_width(font: &Font, text: &str, px: f32) -> f32 {
     text.chars()
         .map(|c| font.metrics(drawable(font, c), px).advance_width)
         .sum()
@@ -414,9 +425,9 @@ pub struct Picture {
     pub height: i32,
 }
 
-type Pixel = [f32; 4];
+pub(crate) type Pixel = [f32; 4];
 
-fn over(dst: &mut Pixel, rgb: [f32; 3], a: f32) {
+pub(crate) fn over(dst: &mut Pixel, rgb: [f32; 3], a: f32) {
     let keep = 1.0 - a;
     dst[0] = rgb[0] * a + dst[0] * keep;
     dst[1] = rgb[1] * a + dst[1] * keep;
@@ -424,19 +435,19 @@ fn over(dst: &mut Pixel, rgb: [f32; 3], a: f32) {
     dst[3] = a + dst[3] * keep;
 }
 
-fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+pub(crate) fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
-fn sd_round_box(px: f32, py: f32, cx: f32, cy: f32, hw: f32, hh: f32, r: f32) -> f32 {
+pub(crate) fn sd_round_box(px: f32, py: f32, cx: f32, cy: f32, hw: f32, hh: f32, r: f32) -> f32 {
     let qx = (px - cx).abs() - (hw - r);
     let qy = (py - cy).abs() - (hh - r);
     let (ox, oy) = (qx.max(0.0), qy.max(0.0));
     (ox * ox + oy * oy).sqrt() + qx.max(qy).min(0.0) - r
 }
 
-fn dist(x: f32, y: f32, cx: f32, cy: f32) -> f32 {
+pub(crate) fn dist(x: f32, y: f32, cx: f32, cy: f32) -> f32 {
     ((x - cx).powi(2) + (y - cy).powi(2)).sqrt()
 }
 
@@ -632,7 +643,7 @@ pub fn paint(fonts: Option<&Fonts>, title: &str, subtitle: &str, icon: Icon) -> 
     }
 }
 
-fn half_line(font: &Font, px: f32) -> f32 {
+pub(crate) fn half_line(font: &Font, px: f32) -> f32 {
     let (ascent, descent) = font
         .horizontal_line_metrics(px)
         .map_or((px * 0.9, -px * 0.25), |m| (m.ascent, m.descent));
@@ -640,7 +651,7 @@ fn half_line(font: &Font, px: f32) -> f32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_text(
+pub(crate) fn draw_text(
     canvas: &mut [Pixel],
     cw: i32,
     ch: i32,
@@ -683,7 +694,7 @@ fn clean(text: &str) -> String {
         .to_owned()
 }
 
-fn toplevel_names(surface: &WlSurface) -> (String, String) {
+pub(crate) fn toplevel_names(surface: &WlSurface) -> (String, String) {
     with_states(surface, |states| {
         states
             .data_map

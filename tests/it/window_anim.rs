@@ -15,11 +15,19 @@ fn a_window_without_a_show_time_is_opaque() {
 #[test]
 fn the_open_fade_runs_from_clear_to_opaque() {
     let shown = Instant::now();
-    assert_eq!(open_alpha(Some(shown), shown), 0.0, OPEN);
+    assert_eq!(open_alpha(Some(shown), shown, OPEN), 0.0, "open={OPEN:?}");
     let half = open_alpha(Some(shown), shown + OPEN / 2, OPEN);
     assert!(half > 0.0 && half < 1.0, "{half}");
-    assert_eq!(open_alpha(Some(shown), shown + OPEN), 1.0, OPEN);
-    assert_eq!(open_alpha(Some(shown), shown + OPEN * 10), 1.0, OPEN);
+    assert_eq!(
+        open_alpha(Some(shown), shown + OPEN, OPEN),
+        1.0,
+        "open={OPEN:?}"
+    );
+    assert_eq!(
+        open_alpha(Some(shown), shown + OPEN * 10, OPEN),
+        1.0,
+        "open={OPEN:?}"
+    );
 }
 
 #[test]

@@ -530,8 +530,8 @@ impl JffState {
                 .screenshot_window()
                 .map(|()| "{\"ok\":true}\n".to_string()),
             Request::ToggleOverview => {
-                // Same as the key binding. It can decline (a move or resize is going on, or
-                // there is no window to show), so the reply says what state it ended in.
+                // Same as the key binding. It can decline (a move or resize is going on), so the
+                // reply says what state it ended in.
                 self.toggle_overview();
                 Ok(format!(
                     "{{\"ok\":true,\"open\":{}}}\n",

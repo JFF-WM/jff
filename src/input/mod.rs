@@ -18,9 +18,9 @@ use smithay::utils::{Logical, Point, Size, SERIAL_COUNTER};
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
 
 use crate::config::{Action, Config};
-use crate::feature::overview_mode::{overview_key, OverviewKey};
-use crate::feature::screenshot::{report_failure, screenshot_key, ScreenshotKey};
 use crate::desk::WindowMode;
+use crate::feature::overview_mode::{overview_key, typed_char, OverviewKey};
+use crate::feature::screenshot::{report_failure, screenshot_key, ScreenshotKey};
 use crate::input::grabs::r#move::{shrunk_geometry, MoveGrab};
 use crate::input::grabs::resize::ResizeGrab;
 use crate::primitives::geom;
@@ -121,10 +121,20 @@ impl JffState {
                                 let configured =
                                     sym.and_then(|sym| state.config.action_for(mods, sym));
                                 return match configured {
-                                    Some(Action::Overview) => Bind::Overview(OverviewKey::Cancel),
+                                    // Closes it, also with something typed (Escape only clears
+                                    // that first).
+                                    Some(Action::Overview) => Bind::Action(Action::Overview),
                                     Some(Action::Quit) => Bind::Action(Action::Quit),
-                                    _ => overview_key(handle.modified_sym())
-                                        .map_or(Bind::Swallow, Bind::Overview),
+                                    // Anything else that types a character goes to the search.
+                                    _ => {
+                                        let sym = handle.modified_sym();
+                                        overview_key(sym)
+                                            .or_else(|| {
+                                                typed_char(sym, mods.ctrl, mods.alt, mods.logo)
+                                                    .map(OverviewKey::Type)
+                                            })
+                                            .map_or(Bind::Swallow, Bind::Overview)
+                                    }
                                 };
                             }
                             if screenshot {
@@ -549,7 +559,12 @@ impl JffState {
         };
         if !self.desk.is_floating(|w| w == window) {
             self.desk.float_in_place_where(|w| w == window);
-            configure_mode(&toplevel, WindowMode::Floating, false, Some((size.w, size.h)));
+            configure_mode(
+                &toplevel,
+                WindowMode::Floating,
+                false,
+                Some((size.w, size.h)),
+            );
         }
         let local = (
             location.x - initial_pos.0 as f64,
@@ -596,11 +611,8 @@ impl JffState {
                 WindowMode::Snapped(_) => {
                     let restore = self.desk.float_in_place_where(|w| w == window);
                     let floating = restore.map_or((size.w, size.h), |(_, size)| size);
-                    initial_pos = geom::pointer_anchored_pos(
-                        (pos.0, pos.1, size.w, size.h),
-                        floating,
-                        at,
-                    );
+                    initial_pos =
+                        geom::pointer_anchored_pos((pos.0, pos.1, size.w, size.h), floating, at);
                     self.desk.set_pos_where(|w| w == window, initial_pos);
                     configure_mode(&toplevel, WindowMode::Floating, false, Some(floating));
                     back = Some((mode, restore));

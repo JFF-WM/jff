@@ -826,7 +826,12 @@ fn blur_rejects_bad_values() {
 #[test]
 fn snap_actions_are_parsed() {
     let config = Config::parse(
-        "binds { Alt+Left { snap-left; } Alt+Right { snap-right; } Alt+Up { snap-top; } Alt+Down { snap-bottom; } }",
+        r#"binds {
+                "Alt+Left" { snap-left; }
+                "Alt+Right" { snap-right; }
+                "Alt+Up" { snap-top; }
+                "Alt+Down" { snap-bottom; }
+            }"#,
     )
     .unwrap();
     let alt = mods(false, true, false, false);
@@ -846,7 +851,7 @@ fn snap_actions_are_parsed() {
         config.action_for(&alt, Keysym::Down),
         Some(&Action::Snap(Side::Bottom))
     );
-    assert!(Config::parse("binds { Alt+Left { snap-left 1; } }").is_err());
+    assert!(Config::parse("binds { \"Alt+Left\" { snap-left 1; } }").is_err());
 }
 
 #[test]

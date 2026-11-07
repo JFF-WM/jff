@@ -35,7 +35,8 @@ pub enum Group {
 
 impl Group {
     /// Group names as typed on the command line, for error messages.
-    pub const NAMES: &'static str = "views, focus, workspaces, outputs, modes, popups, layers, clicks";
+    pub const NAMES: &'static str =
+        "views, focus, workspaces, outputs, modes, popups, layers, clicks";
 
     pub fn parse(word: &str) -> Option<Group> {
         match word {
@@ -173,17 +174,20 @@ pub struct PopupInfo {
 
 impl PopupInfo {
     fn members(&self) -> String {
-        format!(
-            "\"id\":{},\"view\":{},\"layer\":{},\"layer_namespace\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{}",
+        let mut out = format!(
+            "\"id\":{},\"view\":{},\"layer\":{}",
             self.id,
             json_id(self.view),
             json_id(self.layer),
-            json_opt(self.layer_namespace.as_deref()),
-            self.x,
-            self.y,
-            self.width,
-            self.height
-        )
+        );
+        if let Some(namespace) = &self.layer_namespace {
+            out.push_str(&format!(",\"layer_namespace\":{}", json_str(namespace)));
+        }
+        out.push_str(&format!(
+            ",\"x\":{},\"y\":{},\"width\":{},\"height\":{}",
+            self.x, self.y, self.width, self.height
+        ));
+        out
     }
 
     pub fn to_json(&self) -> String {

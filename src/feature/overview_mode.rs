@@ -10,12 +10,25 @@
 //! - Keys come through the `input_intercept` closure in `input.rs` ([`overview_key`]).
 //! - [`overview_elements`] - turns an [`OverviewPlan`] into render elements for both backends.
 //!
+//! Search: typing while the overview is open filters the windows by title and app id and lists
+//! matching installed apps under them (see `primitives/app_search.rs`, `feature/app_index.rs`,
+//! `feature/overview_search.rs`). Enter focuses the selected window or starts the selected app.
+//! The Tab, arrow and Enter keys work on thumbnails only while nothing is typed. Not in the
+//! window switcher: letting go of Alt there picks a window.
+//!
 //! Closing runs the opening animation backwards. Input and focus release at once, only the
 //! picture lingers (`closing` is set), and the state is dropped when the animation is over.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::{ButtonState, InputTime};
+use smithay::backend::renderer::element::memory::{
+    MemoryRenderBuffer, MemoryRenderBufferRenderElement,
+};
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::{
@@ -24,7 +37,7 @@ use smithay::backend::renderer::element::utils::{
 use smithay::backend::renderer::element::{AsRenderElements, Id, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::CommitCounter;
-use smithay::desktop::Window;
+use smithay::desktop::{layer_map_for_output, Window};
 use smithay::input::keyboard::Keysym;
 use smithay::input::pointer::{
     AxisFrame, ButtonEvent, CursorImageStatus, Focus, GestureHoldBeginEvent, GestureHoldEndEvent,
@@ -35,11 +48,16 @@ use smithay::input::pointer::{
 use smithay::input::SeatHandler;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Physical, Point, Rectangle, Scale, Serial, SERIAL_COUNTER};
+use smithay::utils::{
+    Logical, Physical, Point, Rectangle, Scale, Serial, Transform, SERIAL_COUNTER,
+};
 
 use crate::config;
+use crate::feature::osd::{toplevel_names, SHADOW};
 use crate::feature::outputs::output_rect;
+use crate::feature::overview_search::{self as search_ui, Row};
 use crate::input::{BTN_LEFT, BTN_MIDDLE};
+use crate::primitives::app_search::{self as apps, DesktopEntry, Pick, Query};
 use crate::primitives::geom::Size;
 use crate::primitives::layout::{self, Rect};
 use crate::primitives::overview_grid::{self as overview, Dir, Held, Thumb};
@@ -51,7 +69,7 @@ use crate::render::elements::JffElement;
 use crate::state::JffState;
 
 /// Free space around the thumbnails so docks and panels stay visible.
-const MARGIN: i32 = 120;
+const MARGIN: i32 = 150;
 /// Space between thumbnails.
 const GAP: i32 = 24;
 /// Open and close animation length.
@@ -74,6 +92,10 @@ pub enum OverviewKey {
     Cycle {
         backwards: bool,
     },
+    /// A character typed into the search.
+    Type(char),
+    /// Delete the last character of the search.
+    Backspace,
 }
 
 /// The overview key for `sym`, if it's one. Modifiers are ignored - Shift+Tab arrives as
@@ -95,9 +117,21 @@ pub fn overview_key(sym: Keysym) -> Option<OverviewKey> {
         Some(OverviewKey::Move(Dir::Up))
     } else if sym == Keysym::Down {
         Some(OverviewKey::Move(Dir::Down))
+    } else if sym == Keysym::BackSpace {
+        Some(OverviewKey::Backspace)
     } else {
         None
     }
+}
+
+/// The character `sym` types into the search, if it types one. `sym` should be the keysym with
+/// the layout and Shift applied, so "ç" or "A" come out as the keyboard shows them. Ctrl, Alt
+/// and Super make a shortcut, not text.
+pub fn typed_char(sym: Keysym, ctrl: bool, alt: bool, logo: bool) -> Option<char> {
+    if ctrl || alt || logo {
+        return None;
+    }
+    sym.key_char().filter(|c| !c.is_control())
 }
 
 /// The sideways slide of the switcher's row: where it was, where it is headed, and since when.
@@ -127,6 +161,69 @@ impl Slide {
     }
 }
 
+/// The search part of the overview: what was typed and what it found.
+struct Search {
+    query: Query,
+    /// The list of apps `apps` points into, and the version it had when it was taken.
+    entries: Arc<Vec<DesktopEntry>>,
+    version: u64,
+    /// Indices into `entries`, best match first.
+    apps: Vec<usize>,
+    /// Row of `apps` that is selected. While it is set the selected window is not shown as
+    /// selected and Enter starts the app.
+    app_selected: Option<usize>,
+    /// Where the app list is drawn (shared space), for the pointer. Set when drawing.
+    list_rect: Option<Rect>,
+    /// The painted search box and app list, and what they were painted for.
+    box_paint: Option<(u64, MemoryRenderBuffer)>,
+    list_paint: Option<(u64, MemoryRenderBuffer)>,
+}
+
+impl Search {
+    fn new(entries: Arc<Vec<DesktopEntry>>, version: u64) -> Self {
+        Self {
+            query: Query::default(),
+            entries,
+            version,
+            apps: Vec::new(),
+            app_selected: None,
+            list_rect: None,
+            box_paint: None,
+            list_paint: None,
+        }
+    }
+
+    /// Something is typed, so the overview shows results rather than every window.
+    fn active(&self) -> bool {
+        !self.query.is_empty()
+    }
+
+    /// The app Enter would start.
+    fn selected_entry(&self) -> Option<DesktopEntry> {
+        if !self.active() {
+            return None;
+        }
+        let row = self.app_selected?;
+        let index = *self.apps.get(row)?;
+        self.entries.get(index).cloned()
+    }
+}
+
+/// Whether `window`'s title or app id matches `query`.
+fn window_matches_query(window: &Window, query: &str) -> bool {
+    let (app_id, title) = window
+        .toplevel()
+        .map(|toplevel| toplevel_names(toplevel.wl_surface()))
+        .unwrap_or_default();
+    apps::window_matches(query, &title, &app_id)
+}
+
+fn hash_of(value: impl Hash) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// A thumbnail being carried by the pointer.
 struct Drag {
     window: Window,
@@ -141,6 +238,9 @@ pub struct Overview {
     /// go are appended or dropped, the rest never reshuffles, so raising a window on exit
     /// doesn't move thumbnails around during the closing animation.
     windows: Vec<Window>,
+    /// The windows shown: all of `windows`, or with something typed the ones matching it. Same
+    /// order as `windows`.
+    visible: Vec<Window>,
     selected: Option<Window>,
     /// Focus before opening, restored on cancel.
     previous_focus: Option<Window>,
@@ -166,12 +266,28 @@ pub struct Overview {
     switcher: Option<Held>,
     /// How far the switcher's row is slid sideways. Unused outside the switcher.
     slide: Slide,
+    /// Typed text and its results. Stays empty in the switcher.
+    search: Search,
 }
 
 impl Overview {
     /// Whether this overview is on `output`.
     pub fn shows(&self, output: &Output) -> bool {
         self.output == *output
+    }
+
+    /// Work out `visible` again, after the query or the windows changed.
+    fn update_visible(&mut self) {
+        self.visible = if self.search.active() {
+            let query = self.search.query.as_str();
+            self.windows
+                .iter()
+                .filter(|window| window_matches_query(window, query))
+                .cloned()
+                .collect()
+        } else {
+            self.windows.clone()
+        };
     }
 
     /// 0.0 = windows at their real spot, 1.0 = windows in the grid.
@@ -200,7 +316,18 @@ pub struct OverviewPlan {
     pub dragged: Option<usize>,
     /// Corner radius of windows (the `radius` setting), thumbnails get it shrunk with them.
     pub radius: i32,
+    /// The search box and the app list. Not in the switcher.
+    pub search: Option<SearchPlan>,
     highlight: Id,
+}
+
+/// The painted search box and app list, placed in the shared space (shadow margin included).
+pub struct SearchPlan {
+    box_buffer: MemoryRenderBuffer,
+    box_pos: Point<i32, Logical>,
+    list: Option<(MemoryRenderBuffer, Point<i32, Logical>)>,
+    /// Fades in and out with the overview.
+    alpha: f32,
 }
 
 /// Push the render elements for one thumbnail, placed relative to `origin`.
@@ -287,6 +414,28 @@ pub fn overview_elements(
     snapshot: Option<&WallpaperSnapshot>,
 ) -> Vec<JffElement> {
     let mut out: Vec<JffElement> = Vec::new();
+
+    // The search box and the app list are in front of everything.
+    if let Some(search) = &plan.search {
+        let panels = std::iter::once((&search.box_buffer, search.box_pos))
+            .chain(search.list.as_ref().map(|(buffer, pos)| (buffer, *pos)));
+        for (buffer, pos) in panels {
+            let loc: Point<f64, Physical> =
+                (f64::from(pos.x - origin.x), f64::from(pos.y - origin.y)).into();
+            match MemoryRenderBufferRenderElement::from_buffer(
+                &mut *renderer,
+                loc,
+                buffer,
+                Some(search.alpha),
+                None,
+                None,
+                Kind::Unspecified,
+            ) {
+                Ok(element) => out.push(JffElement::Memory(element)),
+                Err(err) => tracing::warn!("error drawing the overview search: {err:?}"),
+            }
+        }
+    }
 
     // The dragged thumbnail sits in front of the rest.
     let order = plan
@@ -417,7 +566,8 @@ impl JffState {
         if self.overview_active() {
             return;
         }
-        self.open_overview();
+        // Nothing to switch between without windows.
+        self.open_overview_with(false);
         if !self.overview_active() {
             return;
         }
@@ -490,9 +640,14 @@ impl JffState {
             .collect()
     }
 
-    /// Open the overview. No-op while a move or resize is going on, or when there's no window to
-    /// show.
+    /// Open the overview. No-op while a move or resize is going on. With no windows it still
+    /// opens: it is where you start an app from.
     pub fn open_overview(&mut self) {
+        self.open_overview_with(true);
+    }
+
+    /// [`JffState::open_overview`], `allow_empty` says whether it opens without windows.
+    fn open_overview_with(&mut self, allow_empty: bool) {
         if self.overview_active() {
             return;
         }
@@ -522,9 +677,15 @@ impl JffState {
         };
         let rect = output_rect(&output);
         let windows = self.windows_on(rect);
-        if windows.is_empty() {
+        if windows.is_empty() && !allow_empty {
             return;
         }
+
+        // Read the installed apps again if they changed, and get the font ready: both take a
+        // moment and are wanted by the time the first letter is typed.
+        self.app_index.refresh();
+        self.osd.preload_fonts();
+        let (entries, version) = self.app_index.snapshot();
 
         let keyboard = self.seat.get_keyboard();
         let focused = keyboard
@@ -559,6 +720,7 @@ impl JffState {
         let grab_serial = SERIAL_COUNTER.next_serial();
         self.overview = Some(Overview {
             output,
+            visible: windows.clone(),
             windows,
             selected,
             previous_focus: focused,
@@ -572,6 +734,7 @@ impl JffState {
             highlight: Id::new(),
             switcher: None,
             slide: Slide::still(0),
+            search: Search::new(entries, version),
         });
 
         let start_data = GrabStartData {
@@ -614,6 +777,11 @@ impl JffState {
 
         let target = select.or_else(|| ov.previous_focus.clone());
         ov.selected = target.clone().filter(|w| ov.windows.contains(w));
+        // Every window travels back, not only the ones that matched.
+        ov.search.query.clear();
+        ov.search.apps.clear();
+        ov.search.app_selected = None;
+        ov.update_visible();
 
         ov.closing = Some(Instant::now());
         ov.drag = None;
@@ -686,7 +854,7 @@ impl JffState {
                 .map(|t| overview::shifted(t, dx))
                 .collect();
         }
-        ov.windows.iter().cloned().zip(thumbs).collect()
+        ov.visible.iter().cloned().zip(thumbs).collect()
     }
 
     /// Aim the switcher's row at the selected window. Does nothing while it is already headed
@@ -750,11 +918,32 @@ impl JffState {
         {
             return;
         }
+        if let Some(row) = self.overview_app_at(p) {
+            if let Some(ov) = self.overview.as_mut() {
+                ov.search.app_selected = Some(row);
+            }
+            return;
+        }
         if let Some(window) = self.overview_hit(p) {
             if let Some(ov) = self.overview.as_mut() {
                 ov.selected = Some(window);
+                ov.search.app_selected = None;
             }
         }
+    }
+
+    /// The row of the app list under `p`.
+    fn overview_app_at(&self, p: Point<f64, Logical>) -> Option<usize> {
+        let ov = self.overview.as_ref()?;
+        if !ov.search.active() {
+            return None;
+        }
+        let (x, y, w, h) = ov.search.list_rect?;
+        let (px, py) = (p.x.floor() as i32, p.y.floor() as i32);
+        if px < x || px >= x + w || py < y || py >= y + h {
+            return None;
+        }
+        search_ui::tile_at(px - x, py - y, w, ov.search.apps.len())
     }
 
     /// Start dragging the thumbnail the left button went down on, once the pointer at `p` has
@@ -902,6 +1091,7 @@ impl JffState {
                     // this thumbnail.
                     if let Some(window) = &hit {
                         ov.selected = Some(window.clone());
+                        ov.search.app_selected = None;
                     }
                     ov.press_origin = hit.map(|window| (window, at));
                 }
@@ -921,6 +1111,13 @@ impl JffState {
                     self.overview_drop();
                     return;
                 }
+                if button == BTN_LEFT {
+                    if let Some(row) = self.overview_app_at(pointer.current_location()) {
+                        self.set_pick(Pick::App(row));
+                        self.select_result();
+                        return;
+                    }
+                }
                 match self.overview_hit(pointer.current_location()) {
                     Some(window) if button == BTN_LEFT => self.end_overview(Some(window)),
                     Some(window) if button == BTN_MIDDLE => {
@@ -938,17 +1135,171 @@ impl JffState {
     /// Carry out a key pressed while the overview is open.
     pub fn handle_overview_key(&mut self, key: OverviewKey) {
         match key {
-            OverviewKey::Cancel => self.end_overview(None),
-            OverviewKey::Select => {
-                let selected = self.overview.as_ref().and_then(|ov| ov.selected.clone());
-                self.end_overview(selected);
+            // Escape first empties the search, then closes.
+            OverviewKey::Cancel => {
+                if self.overview.as_ref().is_some_and(|ov| ov.search.active()) {
+                    self.edit_query(|query| {
+                        query.clear();
+                        true
+                    });
+                } else {
+                    self.end_overview(None);
+                }
             }
-            OverviewKey::Move(dir) => {
-                self.select_with(|thumbs, i| overview::neighbor(thumbs, i, dir))
+            OverviewKey::Select => self.select_result(),
+            OverviewKey::Move(dir) => self.move_selection(dir),
+            OverviewKey::Cycle { backwards } => self.cycle_selection(backwards),
+            OverviewKey::Type(c) => self.edit_query(|query| query.push(c)),
+            OverviewKey::Backspace => self.edit_query(Query::backspace),
+        }
+    }
+
+    /// Enter: start the selected app, or leave and focus the selected window. With text typed
+    /// and nothing found it does nothing.
+    fn select_result(&mut self) {
+        let app = self
+            .overview
+            .as_ref()
+            .and_then(|ov| ov.search.selected_entry());
+        if let Some(entry) = app {
+            self.launch_app(&entry);
+            self.end_overview(None);
+            return;
+        }
+        if self
+            .overview
+            .as_ref()
+            .is_some_and(|ov| ov.search.active() && ov.visible.is_empty())
+        {
+            return;
+        }
+        let selected = self.overview.as_ref().and_then(|ov| ov.selected.clone());
+        self.end_overview(selected);
+    }
+
+    fn launch_app(&mut self, entry: &DesktopEntry) {
+        if let Err(why) = self.app_index.launch(entry) {
+            tracing::warn!("could not start {}: {why}", entry.name);
+            self.show_error(&format!("Could not start {}", entry.name), &why);
+        }
+    }
+
+    /// Change the search text with `edit` (which says whether it changed anything), and show
+    /// the new results with the first one selected. Not in the switcher.
+    fn edit_query(&mut self, edit: impl FnOnce(&mut Query) -> bool) {
+        let changed = self
+            .overview
+            .as_mut()
+            .filter(|ov| ov.switcher.is_none() && ov.closing.is_none())
+            .is_some_and(|ov| edit(&mut ov.search.query));
+        if changed {
+            self.refresh_search(true, true);
+        }
+    }
+
+    /// Bring the results up to date: the matching windows and apps, and the selection.
+    ///
+    /// `reset`: select the first result (the query just changed), else only fix a selection
+    /// that points at something gone. `recompute_apps`: look the apps up again (the query or
+    /// the app list changed).
+    fn refresh_search(&mut self, reset: bool, recompute_apps: bool) {
+        let (entries, version) = if recompute_apps {
+            self.app_index.snapshot()
+        } else {
+            (Arc::new(Vec::new()), 0)
+        };
+        let Some(ov) = self.overview.as_mut() else {
+            return;
+        };
+        if recompute_apps {
+            ov.search.entries = entries;
+            ov.search.version = version;
+            ov.search.apps = apps::search_apps(
+                &ov.search.entries,
+                ov.search.query.as_str(),
+                self.app_index.launches(),
+                apps::MAX_RESULTS,
+            );
+        }
+        ov.update_visible();
+
+        if !ov.search.active() {
+            ov.search.app_selected = None;
+            let shown = ov.selected.as_ref().is_some_and(|s| ov.visible.contains(s));
+            if !shown {
+                ov.selected = ov.visible.first().cloned();
             }
-            OverviewKey::Cycle { backwards } => {
-                self.select_with(|thumbs, i| Some(overview::cycle(thumbs.len(), i, backwards)));
+            return;
+        }
+        let (windows, apps_len) = (ov.visible.len(), ov.search.apps.len());
+        let pick = if reset {
+            apps::first_pick(windows, apps_len)
+        } else {
+            apps::valid_pick(current_pick(ov), windows, apps_len)
+        };
+        apply_pick(ov, pick);
+    }
+
+    /// Select `pick`: a window among the visible ones, or an app row.
+    fn set_pick(&mut self, pick: Pick) {
+        if let Some(ov) = self.overview.as_mut() {
+            apply_pick(ov, Some(pick));
+        }
+    }
+
+    /// Tab: the next result, over the windows and then the apps. Without a search, over the
+    /// windows.
+    fn cycle_selection(&mut self, backwards: bool) {
+        let search = self
+            .overview
+            .as_ref()
+            .filter(|ov| ov.search.active())
+            .map(|ov| (current_pick(ov), ov.visible.len(), ov.search.apps.len()));
+        match search {
+            None => self.select_with(|thumbs, i| Some(overview::cycle(thumbs.len(), i, backwards))),
+            Some((current, windows, apps_len)) => {
+                if let Some(pick) = apps::step_pick(current, windows, apps_len, !backwards) {
+                    self.set_pick(pick);
+                }
             }
+        }
+    }
+
+    /// An arrow key. Without a search it moves between thumbnails. With one it moves between
+    /// thumbnails too, and down from the bottom row goes on into the app list, where up and
+    /// down walk the rows.
+    fn move_selection(&mut self, dir: Dir) {
+        let searching = self.overview.as_ref().is_some_and(|ov| ov.search.active());
+        if !searching {
+            self.select_with(|thumbs, i| overview::neighbor(thumbs, i, dir));
+            return;
+        }
+        let Some((windows, apps_len, row, before)) = self.overview.as_ref().map(|ov| {
+            (
+                ov.visible.len(),
+                ov.search.apps.len(),
+                ov.search.app_selected,
+                ov.selected.clone(),
+            )
+        }) else {
+            return;
+        };
+        if let Some(row) = row {
+            let columns = self
+                .overview
+                .as_ref()
+                .and_then(|ov| ov.search.list_rect)
+                .map_or(1, |(_, _, w, _)| search_ui::columns_for_width(w))
+                as usize;
+            if let Some(pick) = apps::step_in_app_grid(row, windows, apps_len, columns, dir) {
+                self.set_pick(pick);
+            }
+            return;
+        }
+        self.select_with(|thumbs, i| overview::neighbor(thumbs, i, dir));
+        let stayed = self.overview.as_ref().map(|ov| ov.selected.clone()) == Some(before);
+        if stayed && dir == Dir::Down && apps_len > 0 {
+            self.set_pick(Pick::App(0));
         }
     }
 
@@ -1010,9 +1361,26 @@ impl JffState {
             let last = ov.windows.len().saturating_sub(1);
             ov.selected = ov.windows.get(old_index.unwrap_or(0).min(last)).cloned();
         }
-        let nothing_left = ov.windows.is_empty() && ov.closing.is_none();
+        ov.update_visible();
+        // The switcher has nothing to show without windows. The overview stays, you may be
+        // here to start an app.
+        let nothing_left = ov.windows.is_empty() && ov.switcher.is_some() && ov.closing.is_none();
         if nothing_left {
             self.abort_overview();
+            return;
+        }
+        // Follow the results: a finished scan of the apps, a title that changed.
+        if self
+            .overview
+            .as_ref()
+            .is_some_and(|ov| ov.closing.is_none())
+        {
+            let version = self.app_index.version();
+            let apps_changed = self
+                .overview
+                .as_ref()
+                .is_some_and(|ov| ov.search.version != version);
+            self.refresh_search(false, apps_changed);
         }
     }
 
@@ -1078,25 +1446,105 @@ impl JffState {
         let selected = ov
             .selected
             .as_ref()
+            .filter(|_| ov.search.app_selected.is_none())
             .and_then(|s| thumbs.iter().position(|(w, _)| w == s));
 
+        let output = ov.output.clone();
+        let highlight = ov.highlight.clone();
+        let radius = self.config.radius();
         Some(OverviewPlan {
-            output: ov.output.clone(),
+            output,
             thumbs,
             selected,
             dragged,
-            radius: self.config.radius(),
-            highlight: ov.highlight.clone(),
+            radius,
+            search: self.search_plan(),
+            highlight,
         })
     }
+
+    /// The search box and the app list, painted again only when what they show changed.
+    fn search_plan(&mut self) -> Option<SearchPlan> {
+        let ov = self.overview.as_mut().filter(|ov| ov.switcher.is_none())?;
+        let alpha = ov.progress() as f32;
+        let layout = search_layout(ov);
+        ov.search.list_rect = layout.list_rect;
+        // `None` while the font loads: the shapes are drawn now and the text follows.
+        let fonts = self.osd.fonts();
+        let has_fonts = fonts.is_some();
+
+        let (x, y, width, _) = layout.box_rect;
+        let key = hash_of((ov.search.query.as_str(), width, has_fonts));
+        if ov.search.box_paint.as_ref().map(|(k, _)| *k) != Some(key) {
+            let picture = search_ui::paint_box(fonts, ov.search.query.as_str(), width);
+            ov.search.box_paint = Some((key, buffer_of(&picture)));
+        }
+        let box_buffer = ov.search.box_paint.as_ref().map(|(_, b)| b.clone())?;
+
+        let list = match layout.list_rect {
+            Some((lx, ly, lw, _)) => {
+                let rows: Vec<Row> = ov
+                    .search
+                    .apps
+                    .iter()
+                    .filter_map(|&i| ov.search.entries.get(i))
+                    .map(|entry| Row {
+                        name: entry.name.clone(),
+                        detail: entry.generic_name.clone(),
+                        icon: crate::feature::app_icons::icon_for(&entry.icon),
+                    })
+                    .collect();
+                let selected = ov.search.app_selected;
+                let key = hash_of((&rows, selected, lw, has_fonts));
+                if ov.search.list_paint.as_ref().map(|(k, _)| *k) != Some(key) {
+                    let picture = search_ui::paint_list(fonts, &rows, selected, lw);
+                    ov.search.list_paint = Some((key, buffer_of(&picture)));
+                }
+                ov.search
+                    .list_paint
+                    .as_ref()
+                    .map(|(_, b)| (b.clone(), Point::from((lx - SHADOW, ly - SHADOW))))
+            }
+            None => None,
+        };
+        Some(SearchPlan {
+            box_buffer,
+            box_pos: Point::from((x - SHADOW, y - SHADOW)),
+            list,
+            alpha,
+        })
+    }
+}
+
+/// A painted picture as a buffer to draw.
+fn buffer_of(picture: &crate::feature::osd::Picture) -> MemoryRenderBuffer {
+    MemoryRenderBuffer::from_slice(
+        &picture.rgba,
+        Fourcc::Abgr8888,
+        (picture.width, picture.height),
+        1,
+        Transform::Normal,
+        None,
+    )
 }
 
 /// Where the overview puts its windows, before the switcher's slide: the grid, or in the
 /// switcher a row of fixed-size thumbnails that starts at the left edge.
 fn overview_layout(ov: &Overview, thumbnail_height: Option<i32>) -> Vec<Thumb> {
-    let area = layout::grow(output_rect(&ov.output), -MARGIN);
+    let rect = output_rect(&ov.output);
+    let mut area = layout::grow(rect, -MARGIN);
+    if ov.switcher.is_none() && ov.search.active() {
+        // Room for the search box above the thumbnails and the app list below them.
+        let wanted = search_layout(ov);
+        let push_down = (rect.1 + wanted.top) - area.1;
+        if push_down > 0 {
+            area.1 += push_down;
+            area.3 -= push_down;
+        }
+        area.3 = (area.3 - wanted.bottom).max(1);
+    }
     let sizes: Vec<Size> = ov
-        .windows
+        .visible
         .iter()
         .map(|w| {
             let size = w.geometry().size;
@@ -1110,13 +1558,87 @@ fn overview_layout(ov: &Overview, thumbnail_height: Option<i32>) -> Vec<Thumb> {
     }
 }
 
+/// What is selected now, as a position in the lists as shown.
+fn current_pick(ov: &Overview) -> Option<Pick> {
+    if let Some(row) = ov.search.app_selected {
+        return Some(Pick::App(row));
+    }
+    let selected = ov.selected.as_ref()?;
+    ov.visible
+        .iter()
+        .position(|w| w == selected)
+        .map(Pick::Window)
+}
+
+/// Select `pick`. A window pick leaves the app list, an app pick leaves the window selection
+/// as it is (it is just not shown).
+fn apply_pick(ov: &mut Overview, pick: Option<Pick>) {
+    match pick {
+        Some(Pick::Window(i)) => {
+            if let Some(window) = ov.visible.get(i) {
+                ov.selected = Some(window.clone());
+            }
+            ov.search.app_selected = None;
+        }
+        Some(Pick::App(row)) => ov.search.app_selected = Some(row),
+        None => ov.search.app_selected = None,
+    }
+}
+
+/// Where the search box and the app list go, and how much room they take from the thumbnails.
+struct SearchLayout {
+    /// The box, in the shared space.
+    box_rect: Rect,
+    /// The app list, when there are apps to list.
+    list_rect: Option<Rect>,
+    /// How far down from the top of the monitor the thumbnails may start.
+    top: i32,
+    /// How much of the thumbnails' area the app list takes from the bottom.
+    bottom: i32,
+}
+
+fn search_layout(ov: &Overview) -> SearchLayout {
+    let rect = output_rect(&ov.output);
+    // Below any panel, like the toasts.
+    let zone = layer_map_for_output(&ov.output).non_exclusive_zone();
+    let (zone_x, zone_y, zone_w) = if zone.size.w > 0 && zone.size.h > 0 {
+        (zone.loc.x, zone.loc.y, zone.size.w)
+    } else {
+        (0, 0, rect.2)
+    };
+    let width = search_ui::BOX_WIDTH.min(zone_w - 80).max(200);
+    let x = rect.0 + zone_x + (zone_w - width) / 2;
+    let y = rect.1 + zone_y + search_ui::TOP_OFFSET;
+    let box_rect = (x, y, width, search_ui::BOX_HEIGHT);
+
+    let count = ov.search.apps.len().min(apps::MAX_RESULTS);
+    let (list_width, list_height) = search_ui::grid_size(count, zone_w - 80);
+    let rows = count;
+    let list_rect = (rows > 0).then(|| {
+        // Under the box when there are no thumbnails, else under the thumbnails.
+        let top = if ov.visible.is_empty() {
+            y + search_ui::BOX_HEIGHT + search_ui::GAP
+        } else {
+            rect.1 + rect.3 - MARGIN - list_height
+        };
+        let list_x = rect.0 + zone_x + (zone_w - list_width) / 2;
+        (list_x, top, list_width, list_height)
+    });
+    SearchLayout {
+        box_rect,
+        list_rect,
+        top: zone_y + search_ui::TOP_OFFSET + search_ui::BOX_HEIGHT + 16,
+        bottom: if rows > 0 { list_height + 16 } else { 0 },
+    }
+}
+
 /// The slide that puts the switcher's selected window in the middle of the screen.
 fn switcher_target(ov: &Overview, thumbnail_height: Option<i32>) -> i32 {
     let area = layout::grow(output_rect(&ov.output), -MARGIN);
     let selected = ov
         .selected
         .as_ref()
-        .and_then(|s| ov.windows.iter().position(|w| w == s))
+        .and_then(|s| ov.visible.iter().position(|w| w == s))
         .unwrap_or(0);
     overview::strip_offset(&overview_layout(ov, thumbnail_height), selected, area)
 }

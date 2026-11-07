@@ -1,5 +1,6 @@
 //! Pure code: no dependency on anything else in the crate.
 
+pub mod app_search;
 pub mod geom;
 pub mod json;
 pub mod layout;

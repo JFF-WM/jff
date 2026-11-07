@@ -142,6 +142,8 @@ pub struct JffState {
     /// The picture the dragging client attached to the drag in progress (see `dnd.rs`).
     pub dnd_icon: Option<WlSurface>,
     pub osd: crate::feature::osd::Osd,
+    /// Installed applications, for the overview search.
+    pub app_index: crate::feature::app_index::AppIndex,
     /// xdg-foreign: lets a portal dialog say which window it belongs to.
     #[allow(dead_code)]
     pub xdg_foreign_state: XdgForeignState,
@@ -454,6 +456,7 @@ impl JffState {
             ext_data_control_state,
             dnd_icon: None,
             osd: crate::feature::osd::Osd::new(config.osd().font.clone()),
+            app_index: crate::feature::app_index::AppIndex::new(),
             xdg_foreign_state,
             xdg_activation_state,
             xdg_system_bell_state,
@@ -1461,8 +1464,8 @@ pub fn configure_mode(
     size: Option<(i32, i32)>,
 ) {
     use xdg_toplevel::State as S;
-    let maximized = mode == WindowMode::Maximized
-        || (mode == WindowMode::Fullscreen && keep_maximized);
+    let maximized =
+        mode == WindowMode::Maximized || (mode == WindowMode::Fullscreen && keep_maximized);
     let flags = [
         (S::Maximized, maximized),
         (S::Fullscreen, mode == WindowMode::Fullscreen),

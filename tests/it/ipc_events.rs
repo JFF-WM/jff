@@ -714,7 +714,8 @@ fn the_snapshot_has_every_group_by_default() {
         json,
         format!(
             "{{\"event\":\"snapshot\",\"views\":[{},{}],\"workspace\":2,\"count\":9,\
-                 \"focused\":2,\"outputs\":[{},{}],\"overview\":false,\"screenshot\":false}}",
+                 \"focused\":2,\"outputs\":[{},{}],\"overview\":false,\"screenshot\":false,\
+                 \"locked\":false,\"popups\":[],\"layers\":[]}}",
             s.views[0].to_json(),
             s.views[1].to_json(),
             s.outputs[0].to_json(),
