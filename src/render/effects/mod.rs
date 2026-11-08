@@ -9,6 +9,9 @@
 //! * `rounded`: rounded window corners (`radius` setting) - a texture shader masking the
 //!   window's surface. Also opt-in: nothing runs with `radius 0`.
 //!
+//! * `yuv`: which surfaces need their YUV colors fixed (`color-representation { yuv }`), applied
+//!   by the same shader as `rounded`.
+//!
 //! Blur itself is opt-in: nothing runs unless the config has a `blur { … }` block - the
 //! renderer hands these functions `None` otherwise (see `render_for_surface`).
 //!
@@ -23,3 +26,4 @@ pub mod border;
 pub mod framebuffer_effect;
 pub mod rounded;
 pub mod surface_alpha;
+pub mod yuv;

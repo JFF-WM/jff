@@ -7,3 +7,4 @@ pub mod json;
 pub mod layout;
 pub mod overview_grid;
 pub mod region;
+pub mod yuv;

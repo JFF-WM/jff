@@ -1197,3 +1197,16 @@ fn check_config_warns_about_rules_that_do_nothing() {
         Config::check_text(r#"window-rule { match restored=#true; open-workspace 1; }"#).unwrap();
     assert!(warnings.is_empty(), "{warnings:?}");
 }
+
+#[test]
+fn color_representation_yuv_is_off_unless_asked_for() {
+    assert!(!Config::default().color_representation_yuv());
+    assert!(TOP_LEVEL_NODES.contains(&"color-representation"));
+    let on = Config::parse("color-representation { yuv; }").unwrap();
+    assert!(on.color_representation_yuv());
+    let on = Config::parse("color-representation { yuv #true; }").unwrap();
+    assert!(on.color_representation_yuv());
+    let off = Config::parse("color-representation { yuv #false; }").unwrap();
+    assert!(!off.color_representation_yuv());
+    assert!(Config::parse("color-representation { hdr; }").is_err());
+}

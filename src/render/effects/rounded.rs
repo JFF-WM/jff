@@ -37,6 +37,7 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Transform};
 
+use crate::primitives::yuv::Correction;
 use crate::render::elements::JffElement;
 
 const SHADER: &str = include_str!("shaders/rounded.frag");
@@ -59,6 +60,11 @@ fn program(renderer: &mut GlesRenderer) -> Option<GlesTexProgram> {
                 UniformName::new("geo_min", UniformType::_2f),
                 UniformName::new("geo_max", UniformType::_2f),
                 UniformName::new("radius", UniformType::_1f),
+                UniformName::new("ycc_r", UniformType::_3f),
+                UniformName::new("ycc_g", UniformType::_3f),
+                UniformName::new("ycc_b", UniformType::_3f),
+                UniformName::new("ycc_off", UniformType::_3f),
+                UniformName::new("ycc_on", UniformType::_1f),
             ],
         )
         .map_err(|err| tracing::warn!("error compiling the rounded corner shader: {err:#}"))
@@ -110,9 +116,28 @@ pub struct Rounding {
     /// frame pixels.
     geo: Rectangle<i32, Physical>,
     radius: i32,
+    /// Fixes the colors of a YUV buffer the driver converted with another matrix or range.
+    correction: Option<Correction>,
 }
 
 impl Rounding {
+    /// A mask that lets everything through, for a surface that only needs its colors fixed
+    /// (a video on a square window). `None` if the shader is unavailable.
+    pub fn passthrough(renderer: &mut GlesRenderer) -> Option<Self> {
+        Some(Self {
+            program: program(renderer)?,
+            geo: Rectangle::new((-100_000, -100_000).into(), (200_000, 200_000).into()),
+            radius: 0,
+            correction: None,
+        })
+    }
+
+    /// The same, and also fix the colors of a YUV buffer with `correction`.
+    pub fn with_correction(mut self, correction: Correction) -> Self {
+        self.correction = Some(correction);
+        self
+    }
+
     /// `geo` is the window geometry in frame coordinates, `radius` in pixels. `None` when
     /// there's nothing to round (no radius, empty window) or the shader is unavailable.
     pub fn new(
@@ -133,6 +158,7 @@ impl Rounding {
             program,
             geo,
             radius,
+            correction: None,
         })
     }
 
@@ -141,7 +167,13 @@ impl Rounding {
         E: Element + RenderElement<GlesRenderer>,
     {
         RoundedElement {
-            id: element_id(element.id(), thumb, self.radius),
+            // A new correction is a new id, like a new radius: the window is repainted.
+            id: element_id(
+                element.id(),
+                thumb,
+                self.radius
+                    .wrapping_add(self.correction.map_or(0, |fix| fix.tag())),
+            ),
             inner: element,
             rounding: self.clone(),
         }
@@ -156,7 +188,7 @@ impl Rounding {
         let geo = frame
             .transformation()
             .transform_rect_in(self.geo, &output_size);
-        let uniforms = vec![
+        let mut uniforms = vec![
             Uniform::new("geo_min", [geo.loc.x as f32, geo.loc.y as f32]),
             Uniform::new(
                 "geo_max",
@@ -167,6 +199,16 @@ impl Rounding {
             ),
             Uniform::new("radius", self.radius as f32),
         ];
+        match self.correction {
+            Some(fix) => uniforms.extend([
+                Uniform::new("ycc_r", fix.rows[0]),
+                Uniform::new("ycc_g", fix.rows[1]),
+                Uniform::new("ycc_b", fix.rows[2]),
+                Uniform::new("ycc_off", fix.offset),
+                Uniform::new("ycc_on", 1.0f32),
+            ]),
+            None => uniforms.push(Uniform::new("ycc_on", 0.0f32)),
+        }
         frame.override_default_tex_program(self.program.clone(), uniforms);
     }
 

@@ -130,6 +130,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "sh-autostart",
     "outputs",
     "window-rule",
+    "color-representation",
     "binds",
 ];
 
@@ -743,6 +744,9 @@ pub struct Config {
     autostart: Vec<Action>,
     /// `window-rule` blocks, in file order.
     window_rules: Vec<WindowRule>,
+    /// `color-representation { yuv }`: draw YUV buffers with the matrix and range the client
+    /// declared (wp-color-representation).
+    color_representation_yuv: bool,
 }
 
 /// Held while dragging with the mouse, moves or resizes a window.
@@ -784,6 +788,7 @@ impl Default for Config {
                 hot_corner: None,
                 autostart: Vec::new(),
                 window_rules: Vec::new(),
+                color_representation_yuv: false,
             }
         })
     }
@@ -1003,6 +1008,15 @@ impl Config {
             }
         }
 
+        let mut color_representation_yuv = false;
+        if let Some(node) = doc.get("color-representation") {
+            for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+                match child.name().value() {
+                    "yuv" => color_representation_yuv = flag_value(child)?,
+                    other => bail!("unknown color-representation setting {other:?}"),
+                }
+            }
+        }
         let mut window_rules = Vec::new();
         for node in doc.nodes() {
             if node.name().value() == "window-rule" {
@@ -1035,6 +1049,7 @@ impl Config {
             hot_corner,
             autostart,
             window_rules,
+            color_representation_yuv,
         })
     }
 
@@ -1106,6 +1121,11 @@ impl Config {
     /// The hot corner, `None` when it is off (no block, `hot-corner 0`, or `size 0`).
     pub fn hot_corner(&self) -> Option<HotCorner> {
         self.hot_corner.clone()
+    }
+
+    /// Whether `color-representation { yuv }` is on.
+    pub fn color_representation_yuv(&self) -> bool {
+        self.color_representation_yuv
     }
 
     /// The `window-rule` blocks, in file order.

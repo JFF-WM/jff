@@ -99,6 +99,7 @@ use crate::focus::{KeyboardFocus, PopupGrabState};
 use crate::input::grabs::resize::ResizeGrab;
 use crate::primitives::geom;
 use crate::primitives::layout;
+use crate::protocol::color_representation::ColorRepresentationManager;
 use crate::protocol::ext_foreign_toplevel::ExtForeignToplevel;
 use crate::protocol::foreign_toplevel::ForeignToplevel;
 use crate::protocol::image_copy::ImageCopy;
@@ -263,6 +264,9 @@ pub struct JffState {
     pub pointer_warp: PointerWarp,
     /// xdg-toplevel-tag: window tags for `window-rule` (`protocol/toplevel_tag.rs`).
     pub toplevel_tag_manager: ToplevelTagManager,
+    /// wp-color-representation: how a surface's buffer values are encoded, stored only so far
+    /// (`protocol/color_representation.rs`).
+    pub color_representation_manager: ColorRepresentationManager,
     /// State of the `wlr-layer-shell` protocol (panels, launchers, wallpapers).
     pub layer_shell_state: WlrLayerShellState,
     /// The id the next window gets (see `ipc.rs`).
@@ -464,6 +468,7 @@ impl JffState {
         let output_power = OutputPower::new(&display_handle, backend.is_tty());
         let pointer_warp = PointerWarp::new(&display_handle);
         let toplevel_tag_manager = ToplevelTagManager::new(&display_handle);
+        let color_representation_manager = ColorRepresentationManager::new(&display_handle);
 
         // wlr-layer-shell: lets bars, launchers, wallpapers, and notification daemons place
         // themselves on a monitor.
@@ -553,6 +558,7 @@ impl JffState {
             output_power,
             pointer_warp,
             toplevel_tag_manager,
+            color_representation_manager,
             layer_shell_state,
             next_view_id: 1,
             subscribers: Vec::new(),

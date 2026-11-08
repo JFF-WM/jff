@@ -231,6 +231,12 @@ window-rule {
     open-workspace 1
 }
 
+// Color representation (wp-color-representation). Off by default. With `yuv`, video that says
+// which YUV matrix and range it uses (BT.709 limited range, say) is drawn with exactly those,
+// instead of whatever the graphics driver assumes (BT.601 limited). Such a surface is drawn
+// by the renderer, so it does not get direct scanout.
+// color-representation { yuv }
+
 keyboard {
     // Keyboard layout (XKB). Examples: layout "us", layout "br" + variant "abnt2".
     xkb {

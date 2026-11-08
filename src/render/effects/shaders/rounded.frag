@@ -28,6 +28,16 @@ uniform vec2 geo_min;
 uniform vec2 geo_max;
 uniform float radius;
 
+// YUV correction (wp-color-representation): the driver turned the YUV buffer into RGB with its
+// own matrix and range, this maps that RGB to what the client declared:
+// rgb_out = (dot(ycc_r, rgb), dot(ycc_g, rgb), dot(ycc_b, rgb)) + ycc_off. Off when
+// ycc_on is 0, and only meaningful for external (YUV) textures.
+uniform vec3 ycc_r;
+uniform vec3 ycc_g;
+uniform vec3 ycc_b;
+uniform vec3 ycc_off;
+uniform float ycc_on;
+
 // How much of the pixel at `p` lies inside the rounded rectangle: 1 inside, 0 outside, and a
 // one-pixel soft edge in between.
 float rounded_coverage(vec2 p) {
@@ -43,6 +53,12 @@ void main() {
     vec4 color = texture2D(tex, v_coords);
 #if defined(NO_ALPHA)
     color = vec4(color.rgb, 1.0);
+#endif
+#if defined(EXTERNAL)
+    if (ycc_on > 0.5) {
+        vec3 c = color.rgb;
+        color.rgb = clamp(vec3(dot(ycc_r, c), dot(ycc_g, c), dot(ycc_b, c)) + ycc_off, 0.0, 1.0);
+    }
 #endif
 
     // Only the window's own rectangle is shaped; what a client draws outside it (a shadow) is

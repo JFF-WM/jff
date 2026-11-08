@@ -14,7 +14,7 @@ use smithay::backend::renderer::element::surface::{
 use smithay::backend::renderer::element::utils::{
     Relocate, RelocateRenderElement, RescaleRenderElement,
 };
-use smithay::backend::renderer::element::{AsRenderElements, Kind};
+use smithay::backend::renderer::element::{AsRenderElements, Element, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::desktop::{PopupManager, Window};
@@ -27,6 +27,7 @@ use super::border::{border_element, BorderPaint};
 use super::framebuffer_effect::{FramebufferEffect, FramebufferEffectElement, WallpaperSnapshot};
 use super::rounded::{is_fullscreen, Rounding};
 use super::surface_alpha::multiplier_of;
+use super::yuv;
 use crate::config;
 use crate::feature::window_anim::OpenFrame;
 use crate::primitives::alpha;
@@ -331,8 +332,16 @@ pub fn window_elements(
         border,
     );
 
-    // Without blur and rounding (or for an X11 window) there's nothing to interleave.
-    let (Some(toplevel), true) = (toplevel, blur.is_some() || rounding.is_some()) else {
+    // Surfaces that declared a YUV matrix or range the driver doesn't use (a video in a
+    // subsurface, say) are drawn through the shader too, even on a square or fullscreen window.
+    let fixes = toplevel
+        .map(|toplevel| yuv::corrections(toplevel.wl_surface()))
+        .unwrap_or_default();
+    let fixing = !fixes.is_empty();
+
+    // Without blur, rounding and color fixes (or for an X11 window) there's nothing to
+    // interleave.
+    let (Some(toplevel), true) = (toplevel, blur.is_some() || rounding.is_some() || fixing) else {
         let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
             window.render_elements(&mut *renderer, loc, scale, alpha);
         out.extend(surfaces.into_iter().map(JffElement::from));
@@ -359,9 +368,22 @@ pub fn window_elements(
             Kind::Unspecified,
         );
     // Popups above stay square: only the window's own surfaces go through the mask.
-    out.extend(surfaces.into_iter().map(|element| match &rounding {
-        Some(rounding) => rounding.wrap(element),
-        None => JffElement::from(element),
+    let passthrough = if fixing && rounding.is_none() {
+        Rounding::passthrough(renderer)
+    } else {
+        None
+    };
+    out.extend(surfaces.into_iter().map(|element| {
+        let fix = fixes
+            .iter()
+            .find(|(id, _)| id == element.id())
+            .map(|(_, fix)| *fix);
+        match (&rounding, &passthrough, fix) {
+            (Some(rounding), _, Some(fix)) => rounding.clone().with_correction(fix).wrap(element),
+            (Some(rounding), _, None) => rounding.wrap(element),
+            (None, Some(mask), Some(fix)) => mask.clone().with_correction(fix).wrap(element),
+            (None, _, _) => JffElement::from(element),
+        }
     }));
     if let Some(blur) = blur {
         render_for_surface_zoomed(
