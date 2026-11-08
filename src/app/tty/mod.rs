@@ -1342,6 +1342,7 @@ impl JffState {
                 above,
                 blur,
                 self.config.blur_ignore_layers(),
+                self.config.popup_radius(),
             ));
             // popups of layers below the windows draw above them, except over a fullscreen
             // window: only the overlay layer is in front of that
@@ -1352,6 +1353,7 @@ impl JffState {
                     &BELOW_WINDOWS,
                     blur,
                     self.config.blur_ignore_layers(),
+                    self.config.popup_radius(),
                 ));
             }
             if let Some(plan) = overview_here {

@@ -188,7 +188,7 @@ impl JffState {
                 ));
             } else {
                 if let Some(output) = &layer_output {
-                    elements.extend(layer_elements(&mut *renderer, output, above, blur, self.config.blur_ignore_layers()));
+                    elements.extend(layer_elements(&mut *renderer, output, above, blur, self.config.blur_ignore_layers(), self.config.popup_radius()));
                     // popups of layers below the windows still draw above them
                     elements.extend(layer_popup_elements(
                         &mut *renderer,
@@ -196,6 +196,7 @@ impl JffState {
                         &BELOW_WINDOWS,
                         blur,
                         self.config.blur_ignore_layers(),
+                        self.config.popup_radius(),
                     ));
                 }
                 if let Some(plan) = &overview {

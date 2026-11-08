@@ -153,6 +153,7 @@ pub fn layer_elements(
     layers: &[Layer],
     blur: Option<config::Blur>,
     ignore: &[String],
+    popup_radius: i32,
 ) -> Vec<JffElement> {
     let scale = Scale::from(1.0f64);
     let map = layer_map_for_output(output);
@@ -175,7 +176,7 @@ pub fn layer_elements(
                 (0, 0).into(),
                 blur,
                 blur.is_some_and(|b| b.all_layers),
-                0,
+                popup_radius,
                 &mut out,
             );
             let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
@@ -255,7 +256,8 @@ pub fn layer_body_elements(
     out
 }
 
-/// Only the menus (popovers) of the layer surfaces on `layers`. A menu belongs in front of
+/// Only the menus (popovers) of the layer surfaces on `layers`, their blur shaped with
+/// `popup_radius` (the config's `popup-radius`). A menu belongs in front of
 /// everything, even when its panel sits behind the windows or the overview.
 pub fn layer_popup_elements(
     renderer: &mut GlesRenderer,
@@ -263,6 +265,7 @@ pub fn layer_popup_elements(
     layers: &[Layer],
     blur: Option<config::Blur>,
     ignore: &[String],
+    popup_radius: i32,
 ) -> Vec<JffElement> {
     let map = layer_map_for_output(output);
     let mut out: Vec<JffElement> = Vec::new();
@@ -279,7 +282,7 @@ pub fn layer_popup_elements(
                 (0, 0).into(),
                 blur,
                 blur.is_some_and(|b| b.all_layers),
-                0,
+                popup_radius,
                 &mut out,
             );
         }

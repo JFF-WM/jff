@@ -20,7 +20,7 @@ use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::desktop::{PopupManager, Window};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Scale};
-use smithay::wayland::compositor::{with_states, SurfaceData};
+use smithay::wayland::compositor::{with_states, SurfaceAttributes, SurfaceData};
 
 use super::blur::BlurOptions;
 use super::border::{border_element, BorderPaint};
@@ -31,6 +31,7 @@ use super::yuv;
 use crate::config;
 use crate::feature::window_anim::OpenFrame;
 use crate::primitives::alpha;
+use crate::primitives::region::region_to_non_overlapping_rects;
 use crate::primitives::region::TransformedRegion;
 use crate::protocol::background_effect::get_cached_blur_region;
 use crate::render::elements::JffElement;
@@ -104,6 +105,36 @@ fn surface_view_geo(states: &SurfaceData) -> Option<Rectangle<i32, Logical>> {
     let data = states.data_map.get::<RendererSurfaceStateUserData>()?;
     let view = data.lock().unwrap().view()?;
     Some(Rectangle::new(view.offset, view.dst))
+}
+
+/// The part of a popup's `geometry` (surface coordinates) that the client really draws. GTK
+/// popovers reserve a transparent margin for their shadow, so the geometry can be bigger than
+/// the visible popover, and blurring it all shows a rectangle behind the rounded corners. GTK
+/// leaves that margin out of the input region, so when the input region is smaller than the
+/// geometry it is the better guess. A client with no input region (the whole surface) or one
+/// that covers the geometry keeps the geometry.
+fn visible_rect(surface: &WlSurface, geometry: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+    let input = with_states(surface, |states| {
+        states
+            .cached_state
+            .get::<SurfaceAttributes>()
+            .current()
+            .input_region
+            .clone()
+    });
+    let Some(input) = input else {
+        return geometry;
+    };
+    let mut rects = Vec::new();
+    region_to_non_overlapping_rects(&input, &mut rects);
+    let Some(bounds) = rects.into_iter().reduce(|a, b| a.merge(b)) else {
+        return geometry;
+    };
+    let Some(visible) = bounds.intersection(geometry) else {
+        return geometry;
+    };
+    tracing::trace!("popup geometry {geometry:?}, input region {bounds:?}, blurred {visible:?}");
+    visible
 }
 
 /// Push the blur element for `surface`, if it should have one.
@@ -244,7 +275,9 @@ pub fn popup_elements(
     let scale = Scale::from(1.0f64);
     for (popup, popup_offset) in PopupManager::popups_for_surface(parent) {
         let origin = parent_loc + parent_geo_loc + popup_offset - popup.geometry().loc;
-        let popup_geo = Rectangle::new(origin + popup.geometry().loc, popup.geometry().size);
+        // Only the popover itself, not the transparent margin around it (see `visible_rect`).
+        let visible = visible_rect(popup.wl_surface(), popup.geometry());
+        let popup_geo = Rectangle::new(origin + visible.loc, visible.size);
         let loc: Point<i32, Physical> = origin.to_physical_precise_round(scale);
         let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
             render_elements_from_surface_tree(
@@ -262,7 +295,7 @@ pub fn popup_elements(
                 popup.wl_surface(),
                 origin.to_f64(),
                 1.0,
-                blur_whole.then_some(popup.geometry()),
+                blur_whole.then_some(visible),
                 1.0,
                 blur,
                 mask.as_ref(),

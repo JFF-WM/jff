@@ -359,6 +359,7 @@ impl JffState {
             above,
             blur_config,
             self.config.blur_ignore_layers(),
+            self.config.popup_radius(),
         ));
         elements.extend(layer_popup_elements(
             &mut *renderer,
@@ -366,6 +367,7 @@ impl JffState {
             &BELOW_WINDOWS,
             blur_config,
             self.config.blur_ignore_layers(),
+            self.config.popup_radius(),
         ));
         let radius = self.config.radius();
         let popup_radius = self.config.popup_radius();
