@@ -49,7 +49,9 @@ use smithay::utils::{DeviceFd, Logical, Monotonic, Physical, Point, Scale, Trans
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::compositor::SurfaceData;
 use smithay::wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder};
+use smithay::wayland::drm_lease::{DrmLease, DrmLeaseBuilder, DrmLeaseState, LeaseRejected};
 use smithay::wayland::presentation::Refresh;
+use smithay::reexports::wayland_server::DisplayHandle;
 
 use crate::app::{Backend, BACKGROUND};
 use crate::config::{Config, ModeRequest, Vrr};
@@ -254,6 +256,13 @@ pub struct Tty {
     // Field order is drop order: everything that uses the GPU goes before the devices.
     pub renderer: GlesRenderer,
     outputs: HashMap<crtc::Handle, TtyOutput>,
+    /// Leases clients hold right now. They go before `drm` so they are revoked first.
+    active_leases: Vec<DrmLease>,
+    /// wp_drm_lease_device_v1, `None` until [`Tty::init_leasing`] or if it could not be set up.
+    lease_state: Option<DrmLeaseState>,
+    /// Connected non-desktop connectors (VR headsets) with the CRTC kept for each. They are
+    /// offered as leases and never become outputs.
+    non_desktop: HashMap<connector::Handle, crtc::Handle>,
     /// All connected monitors, lit or not.
     monitors: Vec<Monitor>,
     libinput: Libinput,
@@ -416,6 +425,23 @@ fn set_gamma(
 const CONTENT_TYPE_NO_DATA: u64 = 0;
 const CONTENT_TYPE_GAME: u64 = 4;
 
+fn lease_description(name: &str) -> String {
+    format!("Non-desktop display on {name}")
+}
+
+/// The connector's `non-desktop` property is set: a VR headset or similar, not a monitor.
+fn is_non_desktop(drm: &DrmDevice, connector: connector::Handle) -> bool {
+    let Ok(props) = drm.get_properties(connector) else {
+        return false;
+    };
+    let (handles, values) = props.as_props_and_values();
+    handles.iter().zip(values).any(|(&handle, &value)| {
+        drm.get_property(handle)
+            .is_ok_and(|info| info.name().to_bytes() == b"non-desktop")
+            && value != 0
+    })
+}
+
 /// Set the connector's `content type` property to Game, or back to no data.
 fn set_connector_content_type(
     drm: &DrmDevice,
@@ -508,6 +534,125 @@ impl Tty {
         &self.monitors
     }
 
+    /// Offer the non-desktop connectors as leases. Runs once the Wayland display exists.
+    pub fn init_leasing(&mut self, display: &DisplayHandle) {
+        let node = match DrmNode::from_file(self.drm.device_fd()) {
+            Ok(node) => node,
+            Err(err) => {
+                tracing::warn!("no DRM leasing, cannot identify the GPU: {err}");
+                return;
+            }
+        };
+        let mut state = match DrmLeaseState::new::<JffState>(display, &node) {
+            Ok(state) => state,
+            Err(err) => {
+                tracing::warn!("no DRM leasing: {err}");
+                return;
+            }
+        };
+        // headsets found by the first scan, before there was a global to tell
+        for &conn in self.non_desktop.keys() {
+            if let Ok(info) = self.drm.get_connector(conn, false) {
+                let name = connector_name(&info);
+                state.add_connector::<JffState>(conn, name.clone(), lease_description(&name));
+            }
+        }
+        self.lease_state = Some(state);
+    }
+
+    pub fn lease_state_mut(&mut self) -> Option<&mut DrmLeaseState> {
+        self.lease_state.as_mut()
+    }
+
+    /// Claim what a lease on `connectors` needs: the connector, the CRTC kept for it and its
+    /// primary (and cursor) plane.
+    pub fn build_lease(
+        &mut self,
+        connectors: &[connector::Handle],
+    ) -> Result<DrmLeaseBuilder, LeaseRejected> {
+        if !self.drm.is_active() {
+            return Err(LeaseRejected::default());
+        }
+        let mut builder = DrmLeaseBuilder::new(&self.drm);
+        for &conn in connectors {
+            let Some(&crtc) = self.non_desktop.get(&conn) else {
+                tracing::warn!("lease request for {conn:?}, which is not a non-desktop connector");
+                return Err(LeaseRejected::default());
+            };
+            builder.add_connector(conn);
+            builder.add_crtc(crtc);
+            let planes = self.drm.planes(&crtc).map_err(LeaseRejected::with_cause)?;
+            let (primary, claim) = planes
+                .primary
+                .iter()
+                .find_map(|plane| {
+                    self.drm
+                        .claim_plane(plane.handle, crtc)
+                        .map(|claim| (plane, claim))
+                })
+                .ok_or_else(LeaseRejected::default)?;
+            builder.add_plane(primary.handle, claim);
+            if let Some((cursor, claim)) = planes.cursor.iter().find_map(|plane| {
+                self.drm
+                    .claim_plane(plane.handle, crtc)
+                    .map(|claim| (plane, claim))
+            }) {
+                builder.add_plane(cursor.handle, claim);
+            }
+        }
+        Ok(builder)
+    }
+
+    pub fn add_active_lease(&mut self, lease: DrmLease) {
+        self.active_leases.push(lease);
+    }
+
+    pub fn remove_active_lease(&mut self, id: u32) {
+        self.active_leases.retain(|lease| lease.id() != id);
+    }
+
+    /// Bring the leasable connectors in line with the ones just found: withdraw unplugged
+    /// ones, keep a CRTC for new ones and announce them. Their CRTCs go into `used`.
+    fn sync_leasable(
+        &mut self,
+        resources: &ResourceHandles,
+        found: Vec<(connector::Handle, String)>,
+        used: &mut HashSet<crtc::Handle>,
+    ) {
+        let gone: Vec<connector::Handle> = self
+            .non_desktop
+            .keys()
+            .filter(|conn| !found.iter().any(|(f, _)| f == *conn))
+            .copied()
+            .collect();
+        for conn in gone {
+            self.non_desktop.remove(&conn);
+            if let Some(state) = self.lease_state.as_mut() {
+                state.withdraw_connector(conn);
+            }
+            tracing::info!("non-desktop connector {conn:?} removed");
+        }
+        for (conn, name) in found {
+            if let Some(&crtc) = self.non_desktop.get(&conn) {
+                used.insert(crtc);
+                continue;
+            }
+            let Ok(info) = self.drm.get_connector(conn, false) else {
+                continue;
+            };
+            let Some(crtc) = pick_crtc(&self.drm, resources, &info, used) else {
+                tracing::warn!("no free CRTC to lease {name}");
+                continue;
+            };
+            used.insert(crtc);
+            self.non_desktop.insert(conn, crtc);
+            tracing::info!("non-desktop connector {name} offered for leasing");
+            if let Some(state) = self.lease_state.as_mut() {
+                state.add_connector::<JffState>(conn, name.clone(), lease_description(&name));
+            }
+        }
+    }
+
     /// Bring lit monitors in line with what's connected and the config: light new ones, drop
     /// unplugged or disabled ones, redo those whose mode changed. Returns (removed, added).
     fn reconcile(&mut self, config: &Config) -> anyhow::Result<(Vec<Output>, Vec<Output>)> {
@@ -519,11 +664,20 @@ impl Tty {
         let mut used: HashSet<crtc::Handle> = HashSet::new();
         let mut candidates = Vec::new();
         let mut monitors = Vec::new();
+        let mut leasable: Vec<(connector::Handle, String)> = Vec::new();
         for &conn in resources.connectors() {
             let Ok(info) = self.drm.get_connector(conn, true) else {
                 continue;
             };
-            if info.state() != connector::State::Connected || info.modes().is_empty() {
+            if info.state() != connector::State::Connected {
+                continue;
+            }
+            // A VR headset is no monitor: it is offered as a lease instead.
+            if is_non_desktop(&self.drm, conn) {
+                leasable.push((conn, connector_name(&info)));
+                continue;
+            }
+            if info.modes().is_empty() {
                 continue;
             }
             let name = connector_name(&info);
@@ -556,6 +710,9 @@ impl Tty {
             .filter_map(|crtc| self.outputs.remove(&crtc))
             .map(|lit| lit.output)
             .collect();
+
+        // Before lighting new monitors, so a headset's CRTC isn't taken from under it.
+        self.sync_leasable(&resources, leasable, &mut used);
 
         let mut added = Vec::new();
         for (info, name, mode) in candidates {
@@ -830,6 +987,9 @@ pub fn init(
     let mut tty = Tty {
         renderer,
         outputs: HashMap::new(),
+        active_leases: Vec::new(),
+        lease_state: None,
+        non_desktop: HashMap::new(),
         monitors: Vec::new(),
         libinput,
         session,
@@ -1138,7 +1298,13 @@ impl JffState {
             // blur needs the frame composited.
             let blur = (!direct_scanout && !self.config.blur().off).then(|| self.config.blur());
             let above = layers_above(&fullscreen, rect, overview_here.is_some());
-            elements.extend(layer_elements(&mut *renderer, &lit.output, above, blur, self.config.blur_ignore_layers()));
+            elements.extend(layer_elements(
+                &mut *renderer,
+                &lit.output,
+                above,
+                blur,
+                self.config.blur_ignore_layers(),
+            ));
             // popups of layers below the windows draw above them, except over a fullscreen
             // window: only the overlay layer is in front of that
             if !direct_scanout {
@@ -1442,6 +1608,11 @@ impl JffState {
                 tracing::info!("session paused");
                 tty.libinput.suspend();
                 tty.drm.pause();
+                // the kernel took the leases back with the device
+                tty.active_leases.clear();
+                if let Some(state) = tty.lease_state.as_mut() {
+                    state.suspend();
+                }
                 for lit in tty.outputs.values_mut() {
                     lit.waiting_for_vblank = false;
                 }
@@ -1453,6 +1624,9 @@ impl JffState {
                 }
                 if let Err(err) = tty.drm.activate(false) {
                     tracing::warn!("error activating the DRM device: {err:?}");
+                }
+                if let Some(state) = tty.lease_state.as_mut() {
+                    state.resume::<JffState>();
                 }
                 for lit in tty.outputs.values_mut() {
                     if let Err(err) = lit.compositor.reset_state() {

@@ -2,6 +2,7 @@
 
 pub mod background_effect;
 pub mod content_type;
+pub mod drm_lease;
 pub mod ext_foreign_toplevel;
 pub mod foreign_toplevel;
 pub mod idle;

@@ -56,6 +56,10 @@ pub fn run() -> anyhow::Result<()> {
         outputs,
         config,
     );
+    // wp_drm_lease_device_v1 needs the display, which the backend was made without
+    if let super::Backend::Tty(tty) = &mut state.backend {
+        tty.init_leasing(&state.display_handle);
+    }
     if let Some(why) = startup_error {
         state.show_error("Config error, using defaults", &why);
     }
