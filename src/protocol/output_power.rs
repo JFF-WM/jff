@@ -43,6 +43,11 @@ fn to_mode(on: bool) -> Mode {
 }
 
 impl GlobalDispatch<ZwlrOutputPowerManagerV1, ()> for JffState {
+    // Sandboxed apps must not see this.
+    fn can_view(client: smithay::reexports::wayland_server::Client, _: &()) -> bool {
+        !crate::state::is_sandboxed(&client)
+    }
+
     fn bind(
         _state: &mut JffState,
         _display: &DisplayHandle,

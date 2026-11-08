@@ -45,8 +45,8 @@ impl TextInput {
     pub fn new(display: &DisplayHandle) -> Self {
         Self {
             text_input_manager: TextInputManagerState::new::<JffState>(display),
-            input_method_manager: InputMethodManagerState::new::<JffState, _>(display, |_client| {
-                true
+            input_method_manager: InputMethodManagerState::new::<JffState, _>(display, |client| {
+                !crate::state::is_sandboxed(client)
             }),
             popups: Vec::new(),
         }

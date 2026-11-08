@@ -73,6 +73,9 @@ use smithay::wayland::selection::ext_data_control::{
     DataControlHandler as ExtDataControlHandler, DataControlState as ExtDataControlState,
 };
 use smithay::wayland::selection::wlr_data_control::{DataControlHandler, DataControlState};
+use smithay::wayland::security_context::{
+    SecurityContext, SecurityContextHandler, SecurityContextListenerSource, SecurityContextState,
+};
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
@@ -178,6 +181,8 @@ pub struct JffState {
     pub cursor_shape_manager_state: CursorShapeManagerState,
     /// zwp_tablet_manager_v2: pens and tablets (pressure, tilt, eraser) for clients that ask.
     pub tablet_manager_state: TabletManagerState,
+    /// wp_security_context_v1: sockets for sandboxed apps.
+    pub security_context_state: SecurityContextState,
     pub relative_pointer_manager_state: RelativePointerManagerState,
     /// wp_presentation: the global needs no handler, feedback is answered in the backends (see
     /// `presentation.rs`).
@@ -327,16 +332,22 @@ impl JffState {
         // keyboard input at all) when this global is missing.
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&display_handle);
+        // Clipboard managers can read every selection: not for sandboxed apps.
         let data_control_state = DataControlState::new::<Self, _>(
             &display_handle,
             Some(&primary_selection_state),
-            |_| true,
+            |client| !is_sandboxed(client),
         );
         let ext_data_control_state = ExtDataControlState::new::<Self, _>(
             &display_handle,
             Some(&primary_selection_state),
-            |_| true,
+            |client| !is_sandboxed(client),
         );
+        // wp_security_context_v1: Flatpak and friends ask for a socket of their own for one
+        // app. Clients on such a socket are sandboxed (see `is_sandboxed`), and don't see
+        // the global that makes more of them.
+        let security_context_state =
+            SecurityContextState::new::<Self, _>(&display_handle, |client| !is_sandboxed(client));
 
         // Portals: a file chooser opened for a window asks for that window as its parent (so
         // it's shown as its dialog, not as a window of its own), and asks to be activated.
@@ -505,6 +516,7 @@ impl JffState {
             pointer_constraints_state,
             cursor_shape_manager_state,
             tablet_manager_state,
+            security_context_state,
             relative_pointer_manager_state,
             presentation_state,
             fifo_manager_state,
@@ -580,6 +592,18 @@ impl JffState {
 #[derive(Default)]
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
+    /// Set when the client connected through a socket made by wp_security_context_v1, that is
+    /// from inside a sandbox. Such clients don't see the privileged globals.
+    pub security_context: Option<SecurityContext>,
+}
+
+/// Did this client connect from inside a sandbox (a wp_security_context_v1 socket)?
+/// Privileged globals (screen capture, session lock, clipboard managers, output control,
+/// window lists) use this to hide themselves.
+pub fn is_sandboxed(client: &Client) -> bool {
+    client
+        .get_data::<ClientState>()
+        .is_some_and(|state| state.security_context.is_some())
 }
 
 impl ClientData for ClientState {
@@ -703,6 +727,30 @@ impl DmabufHandler for JffState {
             let _ = notifier.successful::<JffState>();
         } else {
             notifier.failed();
+        }
+    }
+}
+
+impl SecurityContextHandler for JffState {
+    fn context_created(
+        &mut self,
+        source: SecurityContextListenerSource,
+        security_context: SecurityContext,
+    ) {
+        // Every connection on the new socket is a sandboxed client.
+        let inserted = self
+            .loop_handle
+            .insert_source(source, move |stream, _, state| {
+                let data = ClientState {
+                    security_context: Some(security_context.clone()),
+                    ..ClientState::default()
+                };
+                if let Err(err) = state.display_handle.insert_client(stream, Arc::new(data)) {
+                    tracing::warn!("error inserting sandboxed client: {err}");
+                }
+            });
+        if let Err(err) = inserted {
+            tracing::warn!("error listening on a security context socket: {err}");
         }
     }
 }

@@ -303,6 +303,11 @@ impl JffState {
 }
 
 impl GlobalDispatch<ZwlrOutputManagerV1, ()> for JffState {
+    // Sandboxed apps must not see this.
+    fn can_view(client: smithay::reexports::wayland_server::Client, _: &()) -> bool {
+        !crate::state::is_sandboxed(&client)
+    }
+
     fn bind(
         state: &mut JffState,
         display: &DisplayHandle,

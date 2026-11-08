@@ -113,12 +113,7 @@ fn remove_group(group: Group) {
 
 /// Bring what the client knows up to date. Returns whether anything was sent (the caller ends
 /// with `done` then).
-fn sync(
-    display: &DisplayHandle,
-    binding: &mut Binding,
-    view: &View,
-    outputs: &[Output],
-) -> bool {
+fn sync(display: &DisplayHandle, binding: &mut Binding, view: &View, outputs: &[Output]) -> bool {
     let Some(client) = binding.manager.client() else {
         return false;
     };
@@ -160,9 +155,11 @@ fn sync(
         let index = match binding.groups.iter().position(|g| g.output == *output) {
             Some(index) => index,
             None => {
-                let Ok(handle) = client
-                    .create_resource::<ExtWorkspaceGroupHandleV1, (), JffState>(display, version, ())
-                else {
+                let Ok(handle) = client.create_resource::<ExtWorkspaceGroupHandleV1, (), JffState>(
+                    display,
+                    version,
+                    (),
+                ) else {
                     continue;
                 };
                 binding.manager.workspace_group(&handle);
@@ -206,11 +203,13 @@ fn sync(
         // Workspaces that were added.
         while group.workspaces.len() < view.count {
             let at = group.workspaces.len();
-            let Ok(handle) = client.create_resource::<ExtWorkspaceHandleV1, (GroupKey, usize), JffState>(
-                display,
-                version,
-                (key.clone(), at),
-            ) else {
+            let Ok(handle) = client
+                .create_resource::<ExtWorkspaceHandleV1, (GroupKey, usize), JffState>(
+                    display,
+                    version,
+                    (key.clone(), at),
+                )
+            else {
                 break;
             };
             binding.manager.workspace(&handle);
@@ -295,6 +294,11 @@ impl JffState {
 }
 
 impl GlobalDispatch<ExtWorkspaceManagerV1, ()> for JffState {
+    // Sandboxed apps must not see this.
+    fn can_view(client: smithay::reexports::wayland_server::Client, _: &()) -> bool {
+        !crate::state::is_sandboxed(&client)
+    }
+
     fn bind(
         state: &mut JffState,
         display: &DisplayHandle,

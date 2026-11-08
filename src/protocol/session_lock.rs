@@ -59,7 +59,9 @@ impl SessionLock {
     /// Create the protocol global.
     pub fn new(display: &DisplayHandle) -> Self {
         Self {
-            manager: SessionLockManagerState::new::<JffState, _>(display, |_client| true),
+            manager: SessionLockManagerState::new::<JffState, _>(display, |client| {
+                !crate::state::is_sandboxed(client)
+            }),
             locked: false,
             confirmation: None,
             surfaces: Vec::new(),
