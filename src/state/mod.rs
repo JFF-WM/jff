@@ -102,6 +102,7 @@ use crate::protocol::output_management::OutputManagement;
 use crate::protocol::output_power::OutputPower;
 use crate::protocol::pointer_warp::PointerWarp;
 use crate::protocol::session_lock::SessionLock;
+use crate::protocol::session_management::SessionManagement;
 use crate::protocol::tearing_control::TearingControlState;
 use crate::protocol::text_input::TextInput;
 use crate::protocol::workspace::ExtWorkspace;
@@ -198,6 +199,8 @@ pub struct JffState {
     pub ext_workspace: ExtWorkspace,
     /// ext-session-lock-v1 (screen lockers).
     pub session_lock: SessionLock,
+    /// xdg-session-management-v1 (apps get their windows back where they were).
+    pub session_management: SessionManagement,
     /// wp_single_pixel_buffer_v1: solid-colour surfaces without a real buffer. Only keeps the
     /// global alive, the renderer draws the buffers.
     #[allow(dead_code)]
@@ -417,6 +420,7 @@ impl JffState {
         let foreign_toplevel = ForeignToplevel::new(&display_handle);
         let ext_workspace = ExtWorkspace::new(&display_handle);
         let session_lock = SessionLock::new(&display_handle);
+        let session_management = SessionManagement::new(&display_handle);
         let single_pixel_buffer_state = SinglePixelBufferState::new::<Self>(&display_handle);
         let alpha_modifier_state = AlphaModifierState::new::<Self>(&display_handle);
         let text_input = TextInput::new(&display_handle);
@@ -505,6 +509,7 @@ impl JffState {
             foreign_toplevel,
             ext_workspace,
             session_lock,
+            session_management,
             single_pixel_buffer_state,
             alpha_modifier_state,
             text_input,
@@ -644,6 +649,16 @@ impl CompositorHandler for JffState {
         let mut root = surface.clone();
         while let Some(parent) = get_parent(&root) {
             root = parent;
+        }
+
+        // A window's first commit is the answer to nothing yet: now it gets its first configure.
+        let first_commit = self
+            .desk
+            .find_by(|w| is_window_for(w, &root))
+            .and_then(|entry| entry.window.toplevel().cloned())
+            .filter(|toplevel| !toplevel.is_initial_configure_sent());
+        if let Some(toplevel) = first_commit {
+            self.send_initial_configure(&toplevel);
         }
 
         if let Some(entry) = self.desk.find_by(|w| is_window_for(w, &root)) {
@@ -921,7 +936,7 @@ impl JffState {
         let mode = self.decoration_mode();
         tracing::info!("xdg-decoration: telling a window to use {mode:?}");
         toplevel.with_pending_state(|state| state.decoration_mode = Some(mode));
-        // Before the initial configure `new_toplevel` sends it, and this state goes along.
+        // Before the initial configure (sent on the first commit) the state just goes along.
         if toplevel.is_initial_configure_sent() {
             toplevel.send_pending_configure();
         }
@@ -1019,17 +1034,26 @@ impl XdgShellHandler for JffState {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         // Let the client pick its own size, but hint how much room there is (toolkits that
         // understand bounds, like GTK4 and Qt, pick a size that fits).
-        let area = self.output_size();
+        // Which monitor it opens on: the pointer's, unless a window fills that one already.
+        let placement = self.placement_output_index();
+        let placed_rect = placement
+            .and_then(|i| self.output_rects().get(i).copied())
+            .unwrap_or_else(|| self.rect_at_pointer());
+        let area = (placed_rect.2, placed_rect.3);
         let (bw, bh) = geom::fit_size((i32::MAX, i32::MAX), area, WINDOW_MARGIN);
         surface.with_pending_state(|state| state.bounds = Some((bw, bh).into()));
-        surface.send_configure();
+        // The first configure waits for the app's first commit (`send_initial_configure`): an
+        // app that asks for its window to be restored does so before that, and the restored
+        // state has to be in the first configure.
         let window = Window::new_wayland_window(surface);
         self.assign_view_id(&window);
         // New windows open on the monitor the pointer is on, on the workspace it shows.
-        let output = self.active_output_name();
+        let output = placement
+            .and_then(|i| self.outputs.get(i))
+            .map(|output| output.name())
+            .unwrap_or_else(|| self.active_output_name());
         let cascade = self.desk.add_on(window.clone(), &output);
-        let area = self.rect_at_pointer();
-        let pos = (cascade.0 + area.0, cascade.1 + area.1);
+        let pos = (cascade.0 + placed_rect.0, cascade.1 + placed_rect.1);
         self.desk.set_pos_where(|w| *w == window, pos);
         tracing::info!("new toplevel at {pos:?}");
         // New windows take focus so you can type into them straight away. With the overview
@@ -1044,6 +1068,8 @@ impl XdgShellHandler for JffState {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        // Save it as it was, while it is still on the desk.
+        self.session_toplevel_gone(surface.wl_surface());
         // Take the last picture of the window while it can still be drawn.
         let closing = self
             .desk
@@ -1288,12 +1314,6 @@ impl JffState {
         }
     }
 
-    /// Size of the monitor the pointer is on.
-    fn output_size(&self) -> (i32, i32) {
-        let area = self.rect_at_pointer();
-        (area.2, area.3)
-    }
-
     /// Some apps open bigger than the screen (gedit asks for ~900x700). The first time a window
     /// shows real content, shrink it with a configure so its buttons and edges are reachable.
     fn fit_to_output_once(&mut self, root: &WlSurface) {
@@ -1316,15 +1336,24 @@ impl JffState {
         }
         // A dialog is a window that belongs to another one, or says it is a dialog. It keeps the
         // size it asks for (shrunk to fit) and is centred over its parent.
+        // A window its app had put back (xdg-session-management) is where and how it was, not
+        // maximized or centred like a new one. If it was maximized or the like, it is again.
+        let restored = self.session_take_restored(root);
+        if let Some(saved) = restored.as_ref() {
+            if saved.mode != WindowMode::Floating {
+                self.session_finish_restore(&toplevel, saved);
+                return;
+            }
+        }
         let parent = toplevel.parent();
         let dialog = parent.is_some() || self.dialog_toplevels.contains(root);
         // `maximize-new-windows` (on by default). Done now rather than in `new_toplevel` so the
         // window's own size is known and remembered for when it's restored.
-        if self.config.maximize_new_windows() && !dialog {
+        if self.config.maximize_new_windows() && !dialog && restored.is_none() {
             self.set_maximized(&toplevel, true);
             return;
         }
-        if dialog {
+        if dialog && restored.is_none() {
             self.center_dialog(root, parent.as_ref(), (size.w, size.h));
             return;
         }

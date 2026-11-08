@@ -3,6 +3,8 @@
 //! No Smithay/Wayland types in here, on purpose, the stacking policy can be tested
 //! without a compositor. `W` is whatever handle the caller uses for a window.
 
+pub mod session_store;
+
 use std::collections::HashMap;
 
 pub type Pos = (i32, i32);
@@ -259,7 +261,10 @@ impl<W> Desk<W> {
     /// Windows of the current workspace, topmost first - the order renderers want. Windows on
     /// other workspaces are skipped, use [`Desk::all_top_down`] for those.
     pub fn top_down(&self) -> impl Iterator<Item = &Entry<W>> {
-        self.entries.iter().rev().filter(move |e| self.is_visible(e))
+        self.entries
+            .iter()
+            .rev()
+            .filter(move |e| self.is_visible(e))
     }
 
     /// Every window of every workspace, topmost first.
@@ -348,10 +353,7 @@ impl<W> Desk<W> {
         Some(size)
     }
 
-    pub fn float_in_place_where(
-        &mut self,
-        pred: impl Fn(&W) -> bool,
-    ) -> Option<(Pos, (i32, i32))> {
+    pub fn float_in_place_where(&mut self, pred: impl Fn(&W) -> bool) -> Option<(Pos, (i32, i32))> {
         let e = self.entries.iter_mut().find(|e| pred(&e.window))?;
         e.mode = WindowMode::Floating;
         e.before_fullscreen = WindowMode::Floating;

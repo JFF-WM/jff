@@ -875,6 +875,8 @@ dependencies = [
  "smithay",
  "tracing",
  "tracing-subscriber",
+ "wayland-protocols-experimental",
+ "wayland-scanner",
  "xcursor",
 ]
 
@@ -2415,6 +2417,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-scanner",
+ "wayland-server",
 ]
 
 [[package]]

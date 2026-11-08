@@ -19,6 +19,10 @@ png = "0.18.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 fontdue = "0.9"
 resvg = "0.49.0"
+# xdg-session-management-v1. Smithay does not carry it, and the xdg- version is not in a
+# published wayland-protocols yet.
+wayland-protocols-experimental = { version = "20251230.0.3", features = ["server"] }
+wayland-scanner = "0.31.11"
 
 [dependencies.smithay]
 git = "https://github.com/Smithay/smithay.git"

@@ -55,6 +55,8 @@ impl JffState {
     /// workspace that monitor shows, so it follows the drag instead of disappearing. Called
     /// before every frame and when monitors change. Does nothing otherwise.
     pub fn reconcile_window_workspaces(&mut self) {
+        // The windows of apps with a session are saved as they are, before every frame.
+        self.session_flush();
         if !self.desk.per_output() {
             return;
         }

@@ -90,6 +90,59 @@ impl JffState {
             .unwrap_or(NO_OUTPUT)
     }
 
+    /// The monitor a new window should open on, as an index into `outputs`.
+    ///
+    /// The monitor the pointer is on, unless a window already fills it (there is no free room
+    /// there). Then the closest monitor with room is used, so a second window doesn't open on
+    /// top of a maximized first one. A window that isn't shown yet counts
+    /// as filling its monitor when new windows are maximized, since that is what it will do.
+    pub fn placement_output_index(&self) -> Option<usize> {
+        let rects = self.output_rects();
+        if rects.is_empty() {
+            return None;
+        }
+        let pointer = self
+            .seat
+            .get_pointer()
+            .map(|p| p.current_location())
+            .unwrap_or_default();
+        let pointer = (pointer.x, pointer.y);
+        let home = layout::nearest(pointer, &rects)?;
+
+        let auto_maximize = self.config.maximize_new_windows();
+        let mut filled = vec![false; rects.len()];
+        for entry in self.desk.all_top_down() {
+            if !self.desk.is_visible(entry) {
+                continue;
+            }
+            let fills = match entry.mode {
+                WindowMode::Maximized | WindowMode::Fullscreen => true,
+                WindowMode::Floating => auto_maximize && !entry.fitted,
+                WindowMode::Snapped(_) => false,
+            };
+            if !fills {
+                continue;
+            }
+            let size = entry.window.geometry().size;
+            let at = layout::center(entry.pos, (size.w, size.h));
+            if let Some(i) = layout::nearest(at, &rects) {
+                filled[i] = true;
+            }
+        }
+        if !filled[home] {
+            return Some(home);
+        }
+        let distance = |i: usize| {
+            let r = rects[i];
+            let c = layout::center((r.0, r.1), (r.2, r.3));
+            (c.0 - pointer.0).powi(2) + (c.1 - pointer.1).powi(2)
+        };
+        (0..rects.len())
+            .filter(|&i| !filled[i])
+            .min_by(|&a, &b| distance(a).total_cmp(&distance(b)))
+            .or(Some(home))
+    }
+
     pub fn edge_drop_mode(&self, at: Point<f64, Logical>) -> Option<WindowMode> {
         let rects = self.output_rects();
         let i = layout::nearest((at.x, at.y), &rects)?;
