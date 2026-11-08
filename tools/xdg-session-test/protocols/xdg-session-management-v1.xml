@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  xdg-session-management-v1, reconstructed from the interface description the jff
+  compositor implements (the zip had no protocols/ directory).
+
+  REPLACE THIS FILE with the copy jff uses (protocols/xdg-session-management-v1.xml in
+  the jff tree). Opcodes follow the order of the requests/events in the XML, so the
+  order has to be identical to the compositor's copy or the two sides will disagree.
+-->
+<protocol name="xdg_session_management_v1">
+  <description summary="save and restore application sessions">
+    Lets a client ask the compositor to remember its toplevel windows under stable
+    names and put them back on the next run.
+  </description>
+
+  <interface name="xdg_session_manager_v1" version="1">
+    <description summary="session manager"/>
+
+    <request name="destroy" type="destructor"/>
+
+    <enum name="error">
+      <entry name="in_use" value="1" summary="the session id is already in use by this client"/>
+    </enum>
+
+    <enum name="reason">
+      <entry name="launch" value="1" summary="normal launch"/>
+      <entry name="recover" value="2" summary="recovering after a crash"/>
+      <entry name="session_restore" value="3" summary="restoring a saved session"/>
+    </enum>
+
+    <request name="get_session">
+      <arg name="id" type="new_id" interface="xdg_session_v1"/>
+      <arg name="reason" type="uint" enum="reason"/>
+      <arg name="session_id" type="string" allow-null="true"/>
+    </request>
+  </interface>
+
+  <interface name="xdg_session_v1" version="1">
+    <description summary="a session"/>
+
+    <request name="destroy" type="destructor"/>
+    <request name="remove" type="destructor"/>
+
+    <enum name="error">
+      <entry name="name_in_use" value="1" summary="the name is already used in this session"/>
+      <entry name="already_mapped" value="2" summary="restore_toplevel after the first commit"/>
+    </enum>
+
+    <event name="created">
+      <arg name="session_id" type="string"/>
+    </event>
+    <event name="restored"/>
+    <event name="replaced"/>
+
+    <request name="add_toplevel">
+      <arg name="id" type="new_id" interface="xdg_toplevel_session_v1"/>
+      <arg name="toplevel" type="object" interface="xdg_toplevel"/>
+      <arg name="name" type="string"/>
+    </request>
+
+    <request name="restore_toplevel">
+      <arg name="id" type="new_id" interface="xdg_toplevel_session_v1"/>
+      <arg name="toplevel" type="object" interface="xdg_toplevel"/>
+      <arg name="name" type="string"/>
+    </request>
+
+    <request name="remove_toplevel">
+      <arg name="name" type="string"/>
+    </request>
+  </interface>
+
+  <interface name="xdg_toplevel_session_v1" version="1">
+    <description summary="a toplevel in a session"/>
+
+    <request name="destroy" type="destructor"/>
+
+    <event name="restored"/>
+
+    <request name="rename">
+      <arg name="name" type="string"/>
+    </request>
+  </interface>
+</protocol>
