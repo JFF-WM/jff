@@ -98,6 +98,24 @@ pub fn fullscreen_says_game(desk: &Desk<Window>, rect: Rect) -> bool {
         .is_some_and(|toplevel| crate::protocol::content_type::says_game(toplevel.wl_surface()))
 }
 
+/// Whether the fullscreen window covering the monitor at `rect` (see `fullscreen_covers`) asked
+/// to be shown with tearing (wp_tearing_control_v1). False without a covering window, and for
+/// windows that never asked, like X11 ones.
+pub fn fullscreen_wants_tearing(desk: &Desk<Window>, rect: Rect) -> bool {
+    if !fullscreen_covers(desk, rect) {
+        return false;
+    }
+    let Some(entry) = desk.top_down().find(|entry| {
+        let size = entry.window.geometry().size;
+        layout::intersects((entry.pos.0, entry.pos.1, size.w, size.h), rect)
+    }) else {
+        return false;
+    };
+    entry.window.toplevel().is_some_and(|toplevel| {
+        crate::protocol::tearing_control::wants_tearing(toplevel.wl_surface())
+    })
+}
+
 /// Layers to draw in front of the windows on the monitor at `rect`. With a fullscreen window on
 /// top there (`fullscreen` is `JffState::fullscreen_rects`), only the overlay layer, so panels
 /// don't cover the game. The overview always shows everything.

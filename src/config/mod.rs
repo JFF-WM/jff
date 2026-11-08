@@ -112,6 +112,7 @@ binds {
 pub const TOP_LEVEL_NODES: &[&str] = &[
     "workspaces",
     "maximize-new-windows",
+    "allow-tearing",
     "window-animations",
     "no-client-decorations",
     "drag-modifier",
@@ -722,6 +723,9 @@ pub struct Config {
     /// Every monitor has its own shown workspace, `workspaces { per-output }`.
     workspaces_per_output: bool,
     maximize_new_windows: bool,
+    /// `allow-tearing`: a fullscreen window that asked for it (wp_tearing_control_v1) is shown
+    /// with async page flips. Off by default.
+    allow_tearing: bool,
     window_animations: WindowAnimations,
     no_client_decorations: bool,
     drag_modifier: DragModifier,
@@ -772,6 +776,7 @@ impl Default for Config {
                 workspaces: DEFAULT_WORKSPACES,
                 workspaces_per_output: false,
                 maximize_new_windows: true,
+                allow_tearing: false,
                 window_animations: WindowAnimations::default(),
                 no_client_decorations: false,
                 drag_modifier: DragModifier::Alt,
@@ -928,6 +933,7 @@ impl Config {
         };
 
         let maximize_new_windows = parse_flag(&doc, "maximize-new-windows", true)?;
+        let allow_tearing = parse_flag(&doc, "allow-tearing", false)?;
         let window_animations = match doc.get("window-animations") {
             None => WindowAnimations::default(),
             Some(node) => parse_window_animations(node).context("in window-animations")?,
@@ -1033,6 +1039,7 @@ impl Config {
             workspaces,
             workspaces_per_output,
             maximize_new_windows,
+            allow_tearing,
             window_animations,
             no_client_decorations,
             drag_modifier,
@@ -1146,6 +1153,11 @@ impl Config {
     /// Keyboard layout and key repeat.
     pub fn keyboard(&self) -> &KeyboardConfig {
         &self.keyboard
+    }
+
+    /// Whether a fullscreen window may be shown with tearing when it asks for it.
+    pub fn allow_tearing(&self) -> bool {
+        self.allow_tearing
     }
 
     /// Whether new windows start maximized.

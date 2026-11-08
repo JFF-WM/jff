@@ -25,8 +25,8 @@ wayland-protocols-experimental = { version = "20251230.0.3", features = ["server
 wayland-scanner = "0.31.11"
 
 [dependencies.smithay]
-git = "https://github.com/Smithay/smithay.git"
-rev = "8a270232f1bfc416c781273c98a3f52a812a0bba"
+git = "https://github.com/alexparlett/smithay.git"
+branch = "isle"
 default-features = false
 features = [
   "backend_egl",

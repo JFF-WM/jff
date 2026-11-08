@@ -9,6 +9,7 @@ use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags, PrimaryPlaneElement};
+use smithay::backend::renderer::PresentationMode;
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::{
     DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata, DrmEventTime, DrmNode, VrrSupport,
@@ -1429,6 +1430,17 @@ impl JffState {
             FrameFlags::empty()
         };
 
+        // Tearing: a fullscreen window covering the monitor that asked for it. The compositor
+        // falls back to a vsync flip when the frame can't be flipped async.
+        let presentation = if direct_scanout
+            && self.config.allow_tearing()
+            && crate::protocol::layer_shell::fullscreen_wants_tearing(&self.desk, rect)
+        {
+            PresentationMode::Async
+        } else {
+            PresentationMode::VSync
+        };
+
         let mut queued = false;
         match lit.compositor.render_frame(
             &mut *renderer,
@@ -1439,6 +1451,7 @@ impl JffState {
                 BACKGROUND
             },
             frame_flags,
+            presentation,
         ) {
             Ok(res) => {
                 let is_empty = res.is_empty;
@@ -1526,7 +1539,7 @@ impl JffState {
         lit.last_vblank =
             Some(hw_time.unwrap_or_else(crate::protocol::presentation::monotonic_now));
         match lit.compositor.frame_submitted() {
-            Ok(Some(mut feedback)) => {
+            Ok(mut feedback) => {
                 let refresh = crate::protocol::presentation::refresh_interval(&lit.output)
                     .map_or(Refresh::Unknown, Refresh::Fixed);
                 let mut flags = wp_presentation_feedback::Kind::Vsync
@@ -1541,7 +1554,6 @@ impl JffState {
                     flags,
                 );
             }
-            Ok(None) => {}
             Err(err) => tracing::warn!("error marking frame as submitted: {err}"),
         }
         let output = lit.output.clone();

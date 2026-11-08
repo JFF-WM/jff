@@ -16,6 +16,12 @@ maximize-new-windows #true
 // Draw windows without client-side decorations (titlebars) where the app allows it.
 no-client-decorations #true
 
+// Tearing. Off by default. With it on, a fullscreen window that covers the monitor and asked
+// for tearing (wp_tearing_control_v1, which games use) is shown with async page flips: lower
+// input lag, visible tearing. Anything else, and any frame the hardware can't flip this way,
+// is shown normally. Needs a Smithay with async page flips.
+// allow-tearing #true
+
 // Hold this key and drag with the mouse to move/resize windows.
 drag-modifier "Super"
 

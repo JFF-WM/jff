@@ -1210,3 +1210,15 @@ fn color_representation_yuv_is_off_unless_asked_for() {
     assert!(!off.color_representation_yuv());
     assert!(Config::parse("color-representation { hdr; }").is_err());
 }
+
+#[test]
+fn allow_tearing_is_off_unless_asked_for() {
+    assert!(!Config::default().allow_tearing());
+    assert!(TOP_LEVEL_NODES.contains(&"allow-tearing"));
+    assert!(Config::parse("allow-tearing #true")
+        .unwrap()
+        .allow_tearing());
+    assert!(!Config::parse("allow-tearing #false")
+        .unwrap()
+        .allow_tearing());
+}

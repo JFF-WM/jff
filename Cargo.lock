@@ -1802,7 +1802,7 @@ checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 [[package]]
 name = "smithay"
 version = "0.7.0"
-source = "git+https://github.com/Smithay/smithay.git?rev=8a270232f1bfc416c781273c98a3f52a812a0bba#8a270232f1bfc416c781273c98a3f52a812a0bba"
+source = "git+https://github.com/alexparlett/smithay.git?branch=isle#1d78177e8a8cbf50e4b02c3978d572135b79f147"
 dependencies = [
  "appendlist",
  "bitflags",

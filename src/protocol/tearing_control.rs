@@ -1,8 +1,10 @@
 //! wp_tearing_control_v1: a client says whether a surface may be shown with tearing (as soon as
 //! possible, not at the next vblank), which games use to cut input lag.
 //!
-//! The protocol is only a hint, and jff doesn't act on it yet: the TTY backend always flips in
-//! sync with the display. This module advertises the global, enforces the rules (one object per
+//! The protocol is only a hint. The TTY backend flips in sync with the display, except with
+//! `allow-tearing` set and a fullscreen window covering the monitor that asked for tearing:
+//! that frame is queued as an async page flip (`PresentationMode::Async`), and falls back to
+//! a normal flip when the hardware or the frame can't do it. This module advertises the global, enforces the rules (one object per
 //! surface), and remembers the hint (see `wants_tearing`). The hint is stored the moment it's
 //! set, not on the next commit, that only matters once something uses it.
 
@@ -54,8 +56,8 @@ impl TearingControlState {
     }
 }
 
-/// Whether the client asked for `surface` to be shown with tearing. Nothing acts on it yet.
-#[allow(dead_code)]
+/// Whether the client asked for `surface` to be shown with tearing. The TTY backend acts on it
+/// for a fullscreen window covering the monitor, with `allow-tearing` set.
 pub fn wants_tearing(surface: &WlSurface) -> bool {
     with_states(surface, |states| {
         states
