@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use smithay::backend::renderer::ImportMemWl;
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
@@ -56,6 +57,13 @@ pub fn run() -> anyhow::Result<()> {
         outputs,
         config,
     );
+
+    // wl_shm offers the formats the renderer can upload (the likes of ABGR8888 and
+    // XRGB2101010 besides the two every client has), so clients that draw in them need no
+    // conversion first.
+    let shm_formats: Vec<_> = state.backend.renderer().shm_formats().collect();
+    state.shm_state.update_formats(shm_formats);
+
     // wp_drm_lease_device_v1 needs the display, which the backend was made without
     if let super::Backend::Tty(tty) = &mut state.backend {
         tty.init_leasing(&state.display_handle);
