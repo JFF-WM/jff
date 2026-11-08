@@ -55,12 +55,17 @@ use crate::feature::screenshot::area::{
     crop_rgba, flip_rows, physical_rect, screenshot_dir, Selector,
 };
 use crate::feature::screenshot::save::{notify, spawn_save, SaveJob};
+use crate::feature::window_anim::OpenFrame;
 use crate::input::BTN_LEFT;
 use crate::primitives::layout::{self, Rect};
 use crate::protocol::layer_shell::{
     layer_body_elements, layer_elements, layer_popup_elements, layers_above, BELOW_WINDOWS,
 };
 use crate::render::cursor::RenderCursor;
+use crate::render::effects::background_effect::window_elements;
+use crate::render::effects::border::BorderPaint;
+use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
+use crate::render::effects::rounded::is_fullscreen;
 use crate::render::elements::JffElement;
 use crate::state::JffState;
 
@@ -160,6 +165,37 @@ pub struct Captured {
     pub rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
+}
+
+/// Make the corners of a `width` by `height` premultiplied RGBA picture transparent, with a
+/// quarter circle of `radius` pixels and a soft edge.
+fn round_corners(rgba: &mut [u8], width: i32, height: i32, radius: i32) {
+    let radius = radius.min(width / 2).min(height / 2);
+    if radius <= 0 || rgba.len() < (width as usize) * (height as usize) * 4 {
+        return;
+    }
+    let r = f64::from(radius);
+    for y in 0..radius {
+        for x in 0..radius {
+            // Distance of the pixel's centre from the corner circle's centre.
+            let (dx, dy) = (r - (f64::from(x) + 0.5), r - (f64::from(y) + 0.5));
+            let coverage = (r - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0);
+            if coverage >= 1.0 {
+                continue;
+            }
+            for (cx, cy) in [
+                (x, y),
+                (width - 1 - x, y),
+                (x, height - 1 - y),
+                (width - 1 - x, height - 1 - y),
+            ] {
+                let at = (cy as usize * width as usize + cx as usize) * 4;
+                for byte in &mut rgba[at..at + 4] {
+                    *byte = (f64::from(*byte) * coverage).round() as u8;
+                }
+            }
+        }
+    }
 }
 
 /// Render `elements` (front to back, in picture pixels) into an offscreen texture of `size` and
@@ -310,15 +346,30 @@ impl JffState {
                 millis,
             ));
         }
+        // The same pieces in the same order as `render_crtc`, so the picture has what the screen
+        // has: blur behind translucent windows and panels, rounded corners, borders.
+        let blur_config = (!self.config.blur().off).then(|| self.config.blur());
+        let snapshot = blur_config
+            .filter(|b| !b.behind_windows)
+            .map(|_| WallpaperSnapshot::for_output(&output.name()));
         let above = layers_above(&fullscreen, rect, false);
-        elements.extend(layer_elements(&mut *renderer, output, above, None, &[]));
+        elements.extend(layer_elements(
+            &mut *renderer,
+            output,
+            above,
+            blur_config,
+            self.config.blur_ignore_layers(),
+        ));
         elements.extend(layer_popup_elements(
             &mut *renderer,
             output,
             &BELOW_WINDOWS,
-            None,
-            &[],
+            blur_config,
+            self.config.blur_ignore_layers(),
         ));
+        let radius = self.config.radius();
+        let popup_radius = self.config.popup_radius();
+        let border = self.config.border();
         for entry in self.desk.top_down() {
             let geo = entry.window.geometry();
             let window_origin: Point<i32, Logical> = Point::from(entry.pos) - geo.loc;
@@ -333,19 +384,30 @@ impl JffState {
             if !layout::intersects(area, rect) {
                 continue;
             }
-            let loc: Point<i32, Physical> =
-                (window_origin - origin).to_physical_precise_round(scale);
-            let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = entry
-                .window
-                .render_elements(&mut *renderer, loc, scale, 1.0);
-            elements.extend(surfaces.into_iter().map(JffElement::from));
+            // A window is a picture of itself as it is now: no opening animation.
+            window_elements(
+                &mut *renderer,
+                &entry.window,
+                window_origin - origin,
+                blur_config,
+                snapshot.as_ref(),
+                radius,
+                popup_radius,
+                BorderPaint::of(border, &entry.window, self.focused_window.as_ref()),
+                OpenFrame::DONE,
+                &mut elements,
+            );
+        }
+        // Fills the wallpaper copy the window blurs read: right after the background layers.
+        if let Some(snapshot) = &snapshot {
+            elements.push(JffElement::from(snapshot.element((rect.2, rect.3).into())));
         }
         elements.extend(layer_body_elements(
             &mut *renderer,
             output,
             &BELOW_WINDOWS,
-            None,
-            &[],
+            blur_config,
+            self.config.blur_ignore_layers(),
         ));
 
         render_to_rgba(
@@ -409,6 +471,96 @@ impl JffState {
         )
     }
 
+    /// A picture of `window` as it looks on screen: with the blurred wallpaper behind it where
+    /// it is translucent, rounded corners cut out. Other windows are left out. Pixels are
+    /// premultiplied. Without blur it is `capture_window`: there is nothing behind to show.
+    pub(crate) fn capture_window_as_shown(&mut self, window: &Window) -> Result<Captured, String> {
+        if self.config.blur().off {
+            return self.capture_window(window);
+        }
+        let geo = window.geometry();
+        let (scale_factor, size) = self.window_capture_size(window)?;
+        let pos = self
+            .desk
+            .pos_of(|w| w == window)
+            .ok_or("the window is gone")?;
+        let on = self.rect_for_window(pos, (geo.size.w, geo.size.h));
+        let output = self
+            .outputs
+            .iter()
+            .find(|output| output_rect(output) == on)
+            .cloned()
+            .ok_or("the window is on no monitor")?;
+        let mode = output
+            .current_mode()
+            .ok_or("the monitor has no mode (it is off)")?;
+        let origin: Point<i32, Logical> = (on.0, on.1).into();
+        let window_origin: Point<i32, Logical> = Point::from(pos) - geo.loc;
+
+        // The window and the wallpaper under it, drawn like `render_crtc` draws them: the window
+        // blur reads a copy of the frame taken once the background layers are in.
+        let blur = self.config.blur();
+        let snapshot =
+            (!blur.behind_windows).then(|| WallpaperSnapshot::for_output(&output.name()));
+        let radius = self.config.radius();
+        let popup_radius = self.config.popup_radius();
+        let renderer = self.backend.renderer();
+        let mut elements: Vec<JffElement> = Vec::new();
+        window_elements(
+            &mut *renderer,
+            window,
+            window_origin - origin,
+            Some(blur),
+            snapshot.as_ref(),
+            radius,
+            popup_radius,
+            None,
+            OpenFrame::DONE,
+            &mut elements,
+        );
+        if let Some(snapshot) = &snapshot {
+            elements.push(JffElement::from(snapshot.element((on.2, on.3).into())));
+        }
+        elements.extend(layer_body_elements(
+            &mut *renderer,
+            &output,
+            &BELOW_WINDOWS,
+            None,
+            &[],
+        ));
+        let monitor = render_to_rgba(
+            renderer,
+            (mode.size.w, mode.size.h),
+            scale_factor,
+            &elements,
+            BACKGROUND,
+        )?;
+
+        // Cut the window out of the monitor's picture.
+        let area = physical_rect(
+            (pos.0, pos.1, geo.size.w, geo.size.h),
+            (on.0, on.1),
+            scale_factor,
+        );
+        let (mut rgba, width, height) = crop_rgba(
+            &monitor.rgba,
+            monitor.width as i32,
+            monitor.height as i32,
+            area,
+        )
+        .ok_or("the window is outside the monitor")?;
+        // Square corners, wallpaper in them, is not the window: cut them like the screen does.
+        if (width, height) == (size.w, size.h) && !is_fullscreen(window) {
+            let radius = (f64::from(radius) * scale_factor).round() as i32;
+            round_corners(&mut rgba, width, height, radius);
+        }
+        Ok(Captured {
+            rgba,
+            width: width as u32,
+            height: height as u32,
+        })
+    }
+
     /// Hand a finished picture to the worker thread that writes it.
     fn queue_save(&self, picture: Captured, unpremultiply: bool) {
         let config = self.config.screenshot();
@@ -446,7 +598,7 @@ impl JffState {
                     .map(|entry| entry.window.clone())
             })
             .ok_or("there is no window to take a picture of")?;
-        let picture = self.capture_window(&window)?;
+        let picture = self.capture_window_as_shown(&window)?;
         self.queue_save(picture, true);
         Ok(())
     }
