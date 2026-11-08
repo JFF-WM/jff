@@ -5,7 +5,8 @@
 //!
 //! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9, per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
 //! `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
-//! `keyboard { … }`, `blur { … }`, `osd { … }`, `switcher { … }`, `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`, and
+//! `keyboard { … }`, `blur { … }`, `osd { … }`, `switcher { … }`, `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
+//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -128,6 +129,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "autostart",
     "sh-autostart",
     "outputs",
+    "window-rule",
     "binds",
 ];
 
@@ -631,6 +633,84 @@ impl ConfigWatch {
     }
 }
 
+/// Where a window rule opens a window: on the monitor with this name, or on the monitor the
+/// pointer is on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuleOutput {
+    Pointer,
+    Named(String),
+}
+
+/// One `match` condition of a `window-rule`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WindowMatch {
+    /// The app id is exactly this.
+    AppId(String),
+    /// The title contains this text.
+    Title(String),
+    /// The tag the app set with xdg-toplevel-tag is exactly this.
+    Tag(String),
+    /// The window is a dialog (it has a parent, or said so with xdg-dialog) or is not.
+    Dialog(bool),
+    /// The app's session put the window back (xdg-session-management) or did not.
+    Restored(bool),
+}
+
+/// What a window rule is asked about a window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowFacts<'a> {
+    pub app_id: &'a str,
+    pub title: &'a str,
+    pub tag: Option<&'a str>,
+    pub dialog: bool,
+    pub restored: bool,
+}
+
+/// A `window-rule { match …, action … }` block. A window gets the first rule whose `match`
+/// lines all hold. A rule without `match` lines holds for every window.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WindowRule {
+    pub matches: Vec<WindowMatch>,
+    /// `open-on-output`.
+    pub output: Option<RuleOutput>,
+    /// `open-workspace`, 0-based here (1-based in the file).
+    pub workspace: Option<usize>,
+    /// `open-maximized`: `Some(false)` keeps the window floating even though new windows are
+    /// maximized.
+    pub maximized: Option<bool>,
+    /// `open-size`: width and height.
+    pub size: Option<(i32, i32)>,
+    /// `floating #true`: the window stays floating, whatever `maximize-new-windows` says.
+    pub floating: bool,
+}
+
+impl WindowRule {
+    /// Whether every `match` line holds for `window`.
+    pub fn matches(&self, window: &WindowFacts<'_>) -> bool {
+        self.matches.iter().all(|condition| match condition {
+            WindowMatch::AppId(id) => window.app_id == id.as_str(),
+            WindowMatch::Title(text) => window.title.contains(text.as_str()),
+            WindowMatch::Tag(tag) => window.tag == Some(tag.as_str()),
+            WindowMatch::Dialog(want) => window.dialog == *want,
+            WindowMatch::Restored(want) => window.restored == *want,
+        })
+    }
+
+    /// Whether the rule says how the window's mode or size starts: then the window is not
+    /// maximized like a new window is by default.
+    pub fn places_window(&self) -> bool {
+        self.floating || self.maximized.is_some() || self.size.is_some()
+    }
+
+    /// Whether the rule has any action at all.
+    pub fn has_actions(&self) -> bool {
+        self.output.is_some() || self.workspace.is_some() || self.places_window()
+    }
+}
+
+/// The largest side `open-size` takes.
+pub const MAX_RULE_SIZE: i32 = 16384;
+
 /// The parsed configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -661,6 +741,8 @@ pub struct Config {
     workspace_wall: Option<WorkspaceWallConfig>,
     hot_corner: Option<HotCorner>,
     autostart: Vec<Action>,
+    /// `window-rule` blocks, in file order.
+    window_rules: Vec<WindowRule>,
 }
 
 /// Held while dragging with the mouse, moves or resizes a window.
@@ -701,6 +783,7 @@ impl Default for Config {
                 workspace_wall: None,
                 hot_corner: None,
                 autostart: Vec::new(),
+                window_rules: Vec::new(),
             }
         })
     }
@@ -776,6 +859,21 @@ impl Config {
             warnings.push(format!(
                 "border animate is set but nothing will move: {why}"
             ));
+        }
+        for (i, rule) in config.window_rules().iter().enumerate() {
+            let n = i + 1;
+            if !rule.has_actions() {
+                warnings.push(format!("window-rule {n} has no actions, it does nothing"));
+            }
+            // A restored window keeps the monitor, size and mode its session saved, only
+            // `open-workspace` applies to it.
+            let restored = rule.matches.contains(&WindowMatch::Restored(true));
+            if restored && (rule.output.is_some() || rule.places_window()) {
+                warnings.push(format!(
+                    "window-rule {n} matches restored windows, which keep their saved monitor, \
+                     size and mode: only open-workspace applies"
+                ));
+            }
         }
         Ok(warnings)
     }
@@ -905,6 +1003,15 @@ impl Config {
             }
         }
 
+        let mut window_rules = Vec::new();
+        for node in doc.nodes() {
+            if node.name().value() == "window-rule" {
+                let n = window_rules.len() + 1;
+                window_rules
+                    .push(parse_window_rule(node).with_context(|| format!("in window-rule {n}"))?);
+            }
+        }
+
         Ok(Self {
             keyboard,
             binds,
@@ -927,6 +1034,7 @@ impl Config {
             workspace_wall,
             hot_corner,
             autostart,
+            window_rules,
         })
     }
 
@@ -998,6 +1106,16 @@ impl Config {
     /// The hot corner, `None` when it is off (no block, `hot-corner 0`, or `size 0`).
     pub fn hot_corner(&self) -> Option<HotCorner> {
         self.hot_corner.clone()
+    }
+
+    /// The `window-rule` blocks, in file order.
+    pub fn window_rules(&self) -> &[WindowRule] {
+        &self.window_rules
+    }
+
+    /// The rule a window gets: the first one whose `match` lines all hold.
+    pub fn window_rule_for(&self, window: &WindowFacts<'_>) -> Option<&WindowRule> {
+        self.window_rules.iter().find(|rule| rule.matches(window))
     }
 
     /// The screenshot block.
@@ -1395,6 +1513,103 @@ fn parse_workspace_wall(node: &KdlNode) -> anyhow::Result<Option<WorkspaceWallCo
         }
     }
     Ok(on.then_some(WorkspaceWallConfig { height }))
+}
+
+/// A `window-rule` block: `match` lines, then actions.
+fn parse_window_rule(node: &KdlNode) -> anyhow::Result<WindowRule> {
+    if !positional(node).is_empty() {
+        bail!("window-rule takes a block, not arguments");
+    }
+    let mut rule = WindowRule::default();
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "match" => parse_window_match(child, &mut rule.matches)?,
+            "open-on-output" => {
+                let name = string_arg(child)?;
+                if name.is_empty() {
+                    bail!("open-on-output takes a monitor name or \"pointer\"");
+                }
+                rule.output = Some(if name == "pointer" {
+                    RuleOutput::Pointer
+                } else {
+                    RuleOutput::Named(name)
+                });
+            }
+            "open-workspace" => {
+                let max = i32::try_from(MAX_WORKSPACES).unwrap_or(i32::MAX);
+                let number = int_arg(child, max)?;
+                if number < 1 {
+                    bail!("open-workspace takes a number from 1 to {MAX_WORKSPACES}");
+                }
+                rule.workspace = Some(usize::try_from(number - 1)?);
+            }
+            "open-maximized" => rule.maximized = Some(flag_value(child)?),
+            "open-size" => {
+                let sides = positional(child)
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_integer()
+                            .and_then(|n| i32::try_from(n).ok())
+                            .filter(|n| (1..=MAX_RULE_SIZE).contains(n))
+                    })
+                    .collect::<Option<Vec<i32>>>();
+                match sides.as_deref() {
+                    Some(&[width, height]) => rule.size = Some((width, height)),
+                    _ => bail!("open-size takes width and height, each from 1 to {MAX_RULE_SIZE}"),
+                }
+            }
+            "floating" => rule.floating = flag_value(child)?,
+            other => bail!("unknown window-rule setting {other:?}"),
+        }
+    }
+    if rule.floating && rule.maximized == Some(true) {
+        bail!("floating and open-maximized #true ask for opposite things");
+    }
+    Ok(rule)
+}
+
+/// One `match` line: `key=value` pairs, all of which have to hold.
+fn parse_window_match(node: &KdlNode, out: &mut Vec<WindowMatch>) -> anyhow::Result<()> {
+    if !positional(node).is_empty() {
+        bail!("match takes name=value pairs, like match app-id=\"firefox\"");
+    }
+    let mut any = false;
+    for entry in node.entries() {
+        let Some(key) = entry.name().map(|key| key.value()) else {
+            continue;
+        };
+        any = true;
+        let value = entry.value();
+        let text = || {
+            value
+                .as_string()
+                .map(str::to_owned)
+                .with_context(|| format!("match {key} takes a string"))
+        };
+        let flag = || {
+            value
+                .as_bool()
+                .or_else(|| match value.as_string() {
+                    Some("true" | "yes") => Some(true),
+                    Some("false" | "no") => Some(false),
+                    _ => None,
+                })
+                .with_context(|| format!("match {key} takes true or false"))
+        };
+        out.push(match key {
+            "app-id" => WindowMatch::AppId(text()?),
+            "title" => WindowMatch::Title(text()?),
+            "tag" => WindowMatch::Tag(text()?),
+            "dialog" => WindowMatch::Dialog(flag()?),
+            "restored" => WindowMatch::Restored(flag()?),
+            other => bail!("unknown match {other:?}: use app-id, title, tag, dialog or restored"),
+        });
+    }
+    if !any {
+        bail!("match needs a name=value pair, like match tag=\"browser\"");
+    }
+    Ok(())
 }
 
 /// The `switcher { … }` block.

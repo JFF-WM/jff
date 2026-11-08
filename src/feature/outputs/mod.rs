@@ -10,7 +10,7 @@ use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size, SERIAL_COUNTER};
 use smithay::wayland::fractional_scale::with_fractional_scale;
 
-use crate::config::ModeRequest;
+use crate::config::{ModeRequest, RuleOutput, WindowRule};
 use crate::desk::{Side, WindowMode};
 use crate::primitives::geom;
 use crate::primitives::layout::{self, Rect};
@@ -141,6 +141,34 @@ impl JffState {
             .filter(|&i| !filled[i])
             .min_by(|&a, &b| distance(a).total_cmp(&distance(b)))
             .or(Some(home))
+    }
+
+    /// [`JffState::placement_output_index`], except that the monitor a window rule names comes
+    /// first: `open-on-output "DP-1"` is the monitor with that name, `"pointer"` the one the
+    /// pointer is on. A monitor that isn't connected (the rule is for a setup that isn't
+    /// plugged in) is skipped with a warning, and the usual choice stands.
+    pub fn placement_output_index_for(&self, rule: Option<&WindowRule>) -> Option<usize> {
+        match rule.and_then(|rule| rule.output.as_ref()) {
+            Some(RuleOutput::Pointer) => {
+                let rects = self.output_rects();
+                let pointer = self
+                    .seat
+                    .get_pointer()
+                    .map(|p| p.current_location())
+                    .unwrap_or_default();
+                if let Some(i) = layout::nearest((pointer.x, pointer.y), &rects) {
+                    return Some(i);
+                }
+            }
+            Some(RuleOutput::Named(name)) => {
+                if let Some(i) = self.outputs.iter().position(|o| o.name() == *name) {
+                    return Some(i);
+                }
+                tracing::warn!("window rule: output {name:?} is not connected");
+            }
+            None => {}
+        }
+        self.placement_output_index()
     }
 
     pub fn edge_drop_mode(&self, at: Point<f64, Logical>) -> Option<WindowMode> {

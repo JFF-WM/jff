@@ -368,6 +368,22 @@ impl<W> Desk<W> {
         }
     }
 
+    /// Put the first window matching `pred` on the monitor `output`. With per-output
+    /// workspaces it lands on the workspace that monitor shows, so it stays in view. Returns
+    /// false when there's no such window.
+    pub fn set_output_where(&mut self, pred: impl Fn(&W) -> bool, output: &str) -> bool {
+        let shown = self.current_on(output);
+        let per_output = self.per_output;
+        let Some(e) = self.entries.iter_mut().find(|e| pred(&e.window)) else {
+            return false;
+        };
+        e.output = output.to_owned();
+        if per_output {
+            e.workspace = shown;
+        }
+        true
+    }
+
     /// Place the first window matching `pred` at `pos`.
     pub fn set_pos_where(&mut self, pred: impl Fn(&W) -> bool, pos: Pos) {
         if let Some(e) = self.entries.iter_mut().find(|e| pred(&e.window)) {

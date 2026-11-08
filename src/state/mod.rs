@@ -93,7 +93,7 @@ use smithay::wayland::xdg_activation::{
 use smithay::wayland::xdg_foreign::{XdgForeignHandler, XdgForeignState};
 
 use crate::app::Backend;
-use crate::config::{Config, KeyboardConfig};
+use crate::config::{Config, KeyboardConfig, WindowFacts, WindowRule};
 use crate::desk::{Desk, Side, WindowMode};
 use crate::focus::{KeyboardFocus, PopupGrabState};
 use crate::input::grabs::resize::ResizeGrab;
@@ -109,6 +109,7 @@ use crate::protocol::session_lock::SessionLock;
 use crate::protocol::session_management::SessionManagement;
 use crate::protocol::tearing_control::TearingControlState;
 use crate::protocol::text_input::TextInput;
+use crate::protocol::toplevel_tag::ToplevelTagManager;
 use crate::protocol::workspace::ExtWorkspace;
 use crate::render::cursor::CursorManager;
 
@@ -260,6 +261,8 @@ pub struct JffState {
     pub output_management: OutputManagement,
     pub output_power: OutputPower,
     pub pointer_warp: PointerWarp,
+    /// xdg-toplevel-tag: window tags for `window-rule` (`protocol/toplevel_tag.rs`).
+    pub toplevel_tag_manager: ToplevelTagManager,
     /// State of the `wlr-layer-shell` protocol (panels, launchers, wallpapers).
     pub layer_shell_state: WlrLayerShellState,
     /// The id the next window gets (see `ipc.rs`).
@@ -460,6 +463,7 @@ impl JffState {
         let output_management = OutputManagement::new(&display_handle);
         let output_power = OutputPower::new(&display_handle, backend.is_tty());
         let pointer_warp = PointerWarp::new(&display_handle);
+        let toplevel_tag_manager = ToplevelTagManager::new(&display_handle);
 
         // wlr-layer-shell: lets bars, launchers, wallpapers, and notification daemons place
         // themselves on a monitor.
@@ -548,6 +552,7 @@ impl JffState {
             output_management,
             output_power,
             pointer_warp,
+            toplevel_tag_manager,
             layer_shell_state,
             next_view_id: 1,
             subscribers: Vec::new(),
@@ -1318,6 +1323,17 @@ impl XdgShellHandler for JffState {
 
 /// Space kept free around a freshly mapped window that was too big for the output.
 const WINDOW_MARGIN: i32 = 40;
+
+/// What `apply_window_rule` leaves for `fit_to_output_once` to do.
+enum RulePlacement {
+    /// The rule maximized the window, sized it, or centred a dialog: nothing more to do.
+    Done,
+    /// The rule keeps the window floating: skip `maximize-new-windows`, but still fit it to the
+    /// monitor and centre a dialog like any other.
+    Floating,
+    /// The rule says nothing about mode or size: carry on as without a rule.
+    Untouched,
+}
 /// How long after a dialog first shows it is still centred again when its size changes.
 const DIALOG_SETTLE: std::time::Duration = std::time::Duration::from_millis(2000);
 
@@ -1392,22 +1408,42 @@ impl JffState {
         // A window its app had put back (xdg-session-management) is where and how it was, not
         // maximized or centred like a new one. If it was maximized or the like, it is again.
         let restored = self.session_take_restored(root);
+        let parent = toplevel.parent();
+        let dialog = parent.is_some() || self.dialog_toplevels.contains(root);
+        // `window-rule`: the first rule that fits. Matched here, not in `new_toplevel`: the app
+        // id, the title, the tag and the dialog hint arrive after the toplevel is created, and
+        // are all there by the first commit that has a buffer.
+        let rule = self.matching_window_rule(root, dialog, restored.is_some());
         if let Some(saved) = restored.as_ref() {
+            // A restored window keeps the monitor, size and mode its session saved. A rule only
+            // chooses its workspace.
+            if let Some(workspace) = rule.as_ref().and_then(|rule| rule.workspace) {
+                self.send_window_to_workspace(root, workspace);
+            }
             if saved.mode != WindowMode::Floating {
                 self.session_finish_restore(&toplevel, saved);
                 return;
             }
         }
-        let parent = toplevel.parent();
-        let dialog = parent.is_some() || self.dialog_toplevels.contains(root);
+        let mut ruled_floating = false;
+        if let (None, Some(rule)) = (restored.as_ref(), rule.as_ref()) {
+            match self.apply_window_rule(root, &toplevel, rule, parent.as_ref(), dialog) {
+                RulePlacement::Done => return,
+                RulePlacement::Floating => ruled_floating = true,
+                RulePlacement::Untouched => {}
+            }
+        }
+        // The rule may have moved the window to another monitor.
+        let pos = self.desk.pos_of(|w| is_window_for(w, root)).unwrap_or(pos);
         // `maximize-new-windows` (on by default). Done now rather than in `new_toplevel` so the
-        // window's own size is known and remembered for when it's restored.
-        if self.config.maximize_new_windows() && !dialog && restored.is_none() {
+        // window's own size is known and remembered for when it's restored. A window a rule
+        // keeps floating stays that way.
+        if self.config.maximize_new_windows() && !dialog && restored.is_none() && !ruled_floating {
             self.set_maximized(&toplevel, true);
             return;
         }
         if dialog && restored.is_none() {
-            self.center_dialog(root, parent.as_ref(), (size.w, size.h));
+            self.center_dialog(root, parent.as_ref(), (size.w, size.h), None);
             return;
         }
         // Only windows that overflow the output are touched, one that exactly fills it (a game
@@ -1429,19 +1465,151 @@ impl JffState {
         }
     }
 
+    /// The `window-rule` a window gets, `None` when there is none. `dialog` and `restored` are
+    /// what the window is when it first shows (see `fit_to_output_once`).
+    fn matching_window_rule(
+        &self,
+        root: &WlSurface,
+        dialog: bool,
+        restored: bool,
+    ) -> Option<WindowRule> {
+        if self.config.window_rules().is_empty() {
+            return None;
+        }
+        let (app_id, title) = crate::feature::osd::toplevel_names(root);
+        let tag = crate::protocol::toplevel_tag::tag_of(root);
+        let facts = WindowFacts {
+            app_id: &app_id,
+            title: &title,
+            tag: tag.as_deref(),
+            dialog,
+            restored,
+        };
+        let rule = self.config.window_rule_for(&facts).cloned();
+        if rule.is_some() {
+            tracing::info!(
+                "window rule applies: app-id={app_id:?} tag={tag:?} dialog={dialog} restored={restored}"
+            );
+        }
+        rule
+    }
+
+    /// Send the window of `root` to workspace `workspace` (0-based, clamped).
+    fn send_window_to_workspace(&mut self, root: &WlSurface, workspace: usize) {
+        let window = self
+            .desk
+            .find_by(|w| is_window_for(w, root))
+            .map(|entry| entry.window.clone());
+        if let Some(window) = window {
+            self.send_to_workspace(&window, workspace);
+        }
+    }
+
+    /// Do what `rule` says about a window that shows for the first time and isn't restored:
+    /// the monitor, then the workspace on it, then maximized or its size. What the rule leaves
+    /// out stays as it is. Says what is left to do for the caller, see [`RulePlacement`].
+    fn apply_window_rule(
+        &mut self,
+        root: &WlSurface,
+        toplevel: &ToplevelSurface,
+        rule: &WindowRule,
+        parent: Option<&WlSurface>,
+        dialog: bool,
+    ) -> RulePlacement {
+        let is_this = |w: &Window| is_window_for(w, root);
+        let size = self
+            .desk
+            .find_by(is_this)
+            .map(|entry| entry.window.geometry().size)
+            .map_or((0, 0), |size| (size.w, size.h));
+
+        // The monitor: the window moves there with the offset it had on the one it opened on.
+        let mut monitor = None;
+        if rule.output.is_some() {
+            let rects = self.output_rects();
+            let target = self.placement_output_index_for(Some(rule));
+            if let Some((i, name)) = target.and_then(|i| Some((i, self.outputs.get(i)?.name()))) {
+                let to = rects[i];
+                let from = self
+                    .desk
+                    .find_by(is_this)
+                    .and_then(|entry| self.outputs.iter().position(|o| o.name() == entry.output))
+                    .map_or(to, |j| rects[j]);
+                if let Some(pos) = self.desk.pos_of(is_this) {
+                    let moved = (pos.0 - from.0 + to.0, pos.1 - from.1 + to.1);
+                    self.desk
+                        .set_pos_where(is_this, layout::fit_into(moved, size, to));
+                }
+                self.desk.set_output_where(is_this, &name);
+                monitor = Some(to);
+            }
+        }
+
+        // The workspace, on that monitor.
+        if let Some(workspace) = rule.workspace {
+            self.send_window_to_workspace(root, workspace);
+        }
+
+        // Maximized wins over a size.
+        if rule.maximized == Some(true) {
+            self.set_maximized(toplevel, true);
+            return RulePlacement::Done;
+        }
+
+        // The size, kept inside the monitor it is on.
+        let mut sized = None;
+        if let Some((width, height)) = rule.size {
+            let pos = self.desk.pos_of(is_this).unwrap_or_default();
+            let area = monitor.unwrap_or_else(|| self.rect_for_window(pos, size));
+            let fitted = geom::fit_size((width, height), (area.2, area.3), WINDOW_MARGIN);
+            toplevel.with_pending_state(|state| state.size = Some(fitted.into()));
+            toplevel.send_pending_configure();
+            if !dialog {
+                // Still inside the monitor with the new size.
+                self.desk
+                    .set_pos_where(is_this, layout::fit_into(pos, fitted, area));
+            }
+            sized = Some(fitted);
+        }
+
+        // A dialog the rule gave a monitor or a size is centred there, over its parent when
+        // that is on the same monitor.
+        if dialog && (sized.is_some() || monitor.is_some()) {
+            self.center_dialog(root, parent, sized.unwrap_or(size), monitor);
+            return RulePlacement::Done;
+        }
+        if sized.is_some() {
+            return RulePlacement::Done;
+        }
+        if rule.places_window() {
+            return RulePlacement::Floating;
+        }
+        RulePlacement::Untouched
+    }
+
     /// Put a dialog of `size` in the middle of the window it belongs to (the monitor the pointer
     /// is on when it has none), keeping it on that monitor. One too big for the monitor is
     /// shrunk to fit first.
-    fn center_dialog(&mut self, root: &WlSurface, parent: Option<&WlSurface>, size: (i32, i32)) {
+    ///
+    /// `monitor` puts it on that monitor (a window rule asked for one) instead of the parent's,
+    /// or the pointer's when it has no parent.
+    fn center_dialog(
+        &mut self,
+        root: &WlSurface,
+        parent: Option<&WlSurface>,
+        size: (i32, i32),
+        monitor: Option<layout::Rect>,
+    ) {
         let parent_rect = parent
             .and_then(|parent| self.desk.find_by(|w| is_window_for(w, parent)))
             .map(|entry| {
                 let size = entry.window.geometry().size;
                 (entry.pos.0, entry.pos.1, size.w, size.h)
             });
-        let monitor = match parent_rect {
-            Some((x, y, w, h)) => self.rect_for_window((x, y), (w, h)),
-            None => self.rect_at_pointer(),
+        let monitor = match (monitor, parent_rect) {
+            (Some(monitor), _) => monitor,
+            (None, Some((x, y, w, h))) => self.rect_for_window((x, y), (w, h)),
+            (None, None) => self.rect_at_pointer(),
         };
         let fitted = geom::fit_size(size, (monitor.2, monitor.3), WINDOW_MARGIN);
         let pos = layout::dialog_pos(fitted, parent_rect, monitor, WINDOW_MARGIN);
@@ -1488,7 +1656,7 @@ impl JffState {
             .window
             .toplevel()
             .and_then(|toplevel| toplevel.parent());
-        self.center_dialog(root, parent.as_ref(), size);
+        self.center_dialog(root, parent.as_ref(), size, None);
     }
 
     pub fn set_maximized(&mut self, surface: &ToplevelSurface, on: bool) {

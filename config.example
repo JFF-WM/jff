@@ -38,10 +38,12 @@ window-animations {
     close-ms 80
 }
 
-window-animations {
-    open-ms 100
-    close-ms 80
-}
+// A second window-animations block is ignored (only the first one counts), so this one is
+// kept as a commented alternative:
+// window-animations {
+//     open-ms 100
+//     close-ms 80
+// }
 
 hot-corner {
     size 10
@@ -148,6 +150,86 @@ binds {
 //         mode "1920x1080@144"
 //     }
 // }
+
+// Window rules. Any number of blocks.
+//
+// A window gets the FIRST rule whose `match` lines all hold, top to bottom, so put specific
+// rules above general ones. Rules are checked when a window first shows something.
+//
+//   match app-id="..."     the app id, exactly
+//   match title="..."      the title contains this text
+//   match tag="..."        the tag the app set (xdg-toplevel-tag), exactly
+//   match dialog=#true     a dialog (has a parent, or said so), #false: not a dialog
+//   match restored=#true   put back by the app's session, #false: a new window
+//   (several match lines, or several key=value pairs on one line, must all hold,
+//    a rule with no match line fits every window)
+//
+//   open-on-output "NAME"  a monitor by name (as in the outputs block above)
+//   open-on-output "pointer"   the monitor the pointer is on
+//   open-workspace N       1 to 64
+//   open-maximized #true   #false keeps the window floating
+//   open-size W H          pixels, kept inside the monitor
+//   floating               keep the window floating (no auto-maximize)
+//
+// Change DP-1 and HDMI-A-2 below to your monitor names.
+
+// A tagged browser window: first monitor, workspace 1, maximized.
+window-rule {
+    match app-id="firefox-developer-edition"
+    match tag="browser"
+
+    open-on-output "DP-1"
+    open-workspace 1
+    open-maximized #true
+}
+
+// Picture-in-picture: a small floating window on the second monitor.
+window-rule {
+    match app-id="firefox-developer-edition"
+    match tag="picture-in-picture"
+
+    floating
+    open-size 480 270
+    open-on-output "HDMI-A-2"
+}
+
+// Dialogs: on the monitor the pointer is on, 900x700, centred as usual.
+window-rule {
+    match dialog=#true
+
+    open-on-output "pointer"
+    open-size 900 700
+}
+
+// A window that should stay small and floating instead of opening maximized.
+window-rule {
+    match app-id="org.pulseaudio.pavucontrol"
+
+    open-maximized #false
+    open-size 800 500
+}
+
+// Match by title, and only for plain windows: workspace 3.
+window-rule {
+    match title="Meet - " dialog=#false
+
+    open-workspace 3
+}
+
+// A VR runtime: open on whichever monitor the pointer is on.
+window-rule {
+    match app-id="monado-service"
+
+    open-on-output "pointer"
+}
+
+// Keep last. Windows an app's session put back go to workspace 1. They keep the monitor,
+// size and mode that were saved, so only open-workspace applies to them.
+window-rule {
+    match restored=#true
+
+    open-workspace 1
+}
 
 keyboard {
     // Keyboard layout (XKB). Examples: layout "us", layout "br" + variant "abnt2".

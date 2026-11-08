@@ -71,7 +71,10 @@ fn fullscreen_goes_back_to_the_mode_before_it() {
     assert!(d.set_mode_where(|w| *w == "a", WindowMode::Maximized, (0, 0), (300, 200)));
     assert!(d.set_mode_where(|w| *w == "a", WindowMode::Fullscreen, (0, 0), (900, 900)));
     assert!(!d.is_maximized(|w| *w == "a"));
-    assert_eq!(d.mode_after_fullscreen(|w| *w == "a"), WindowMode::Maximized);
+    assert_eq!(
+        d.mode_after_fullscreen(|w| *w == "a"),
+        WindowMode::Maximized
+    );
     assert!(d.set_mode_where(|w| *w == "a", WindowMode::Maximized, (0, 0), (900, 900)));
     assert_eq!(d.float_where(|w| *w == "a"), Some((300, 200)));
     assert_eq!(d.mode_after_fullscreen(|w| *w == "a"), WindowMode::Floating);
@@ -296,4 +299,25 @@ fn fewer_workspaces_fold_every_monitors_workspace() {
     d.clamp_workspaces(3);
     assert_eq!(d.current_on("left"), 2);
     assert_eq!(d.current_on("right"), 2);
+}
+
+#[test]
+fn set_output_where_moves_a_window_to_the_workspace_that_monitor_shows() {
+    let mut d = per_output_desk();
+    d.set_current_on("DP-1", 0);
+    d.set_current_on("HDMI-A-2", 3);
+    d.add_on("a", "DP-1");
+    assert!(d.set_output_where(|w| *w == "a", "HDMI-A-2"));
+    let (output, workspace) = d.home_of(|w| *w == "a").unwrap();
+    assert_eq!((output.as_str(), workspace), ("HDMI-A-2", 3));
+    assert!(!d.set_output_where(|w| *w == "zzz", "DP-1"));
+}
+
+#[test]
+fn set_output_where_keeps_the_workspace_when_shared() {
+    let mut d = Desk::default();
+    d.set_current(2);
+    d.add("a");
+    d.set_output_where(|w| *w == "a", "DP-1");
+    assert_eq!(d.workspace_of(|w| *w == "a"), Some(2));
 }

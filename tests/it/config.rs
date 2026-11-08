@@ -14,6 +14,7 @@ use jff_wm::config::{
     DEFAULT_REPEAT_RATE, DEFAULT_SWITCHER_SLIDE_MS, DEFAULT_WORKSPACES, MAX_BORDER_PERIOD_MS,
     MAX_BORDER_WIDTH, MAX_GAPS, MAX_RADIUS, TOP_LEVEL_NODES,
 };
+use jff_wm::config::{RuleOutput, WindowFacts, WindowMatch};
 use jff_wm::desk::{Goto, Side};
 
 fn mods(ctrl: bool, alt: bool, shift: bool, logo: bool) -> ModifiersState {
@@ -999,4 +1000,200 @@ fn workspace_wall_bare_block_and_flag() {
         .is_none());
     assert!(Config::parse("workspace-wall { height 5; }").is_err());
     assert!(Config::parse("workspace-wall { nope; }").is_err());
+}
+
+fn facts<'a>(app_id: &'a str, tag: Option<&'a str>) -> WindowFacts<'a> {
+    WindowFacts {
+        app_id,
+        title: "",
+        tag,
+        dialog: false,
+        restored: false,
+    }
+}
+
+#[test]
+fn window_rule_is_a_known_top_level_node() {
+    assert!(TOP_LEVEL_NODES.contains(&"window-rule"));
+    assert!(Config::default().window_rules().is_empty());
+}
+
+#[test]
+fn window_rule_reads_matches_and_actions() {
+    let config = Config::parse(
+        r#"
+window-rule {
+    match app-id="firefox-developer-edition"
+    match tag="browser"
+
+    open-on-output "DP-1"
+    open-workspace 1
+    open-maximized #true
+}
+"#,
+    )
+    .unwrap();
+    let rule = &config.window_rules()[0];
+    assert_eq!(
+        rule.matches,
+        [
+            WindowMatch::AppId("firefox-developer-edition".into()),
+            WindowMatch::Tag("browser".into())
+        ]
+    );
+    assert_eq!(rule.output, Some(RuleOutput::Named("DP-1".into())));
+    assert_eq!(rule.workspace, Some(0));
+    assert_eq!(rule.maximized, Some(true));
+    assert_eq!(rule.size, None);
+}
+
+#[test]
+fn window_rule_needs_every_match_line_to_hold() {
+    let config = Config::parse(
+        r#"window-rule { match app-id="ff"; match tag="browser"; open-workspace 2; }"#,
+    )
+    .unwrap();
+    assert!(config
+        .window_rule_for(&facts("ff", Some("browser")))
+        .is_some());
+    assert!(config
+        .window_rule_for(&facts("ff", Some("other")))
+        .is_none());
+    assert!(config.window_rule_for(&facts("ff", None)).is_none());
+    assert!(config
+        .window_rule_for(&facts("other", Some("browser")))
+        .is_none());
+}
+
+#[test]
+fn window_rule_first_match_wins() {
+    let config = Config::parse(
+        r#"
+window-rule { match app-id="ff"; open-workspace 3; }
+window-rule { match app-id="ff"; open-workspace 4; }
+window-rule { open-workspace 5; }
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config
+            .window_rule_for(&facts("ff", None))
+            .unwrap()
+            .workspace,
+        Some(2)
+    );
+    // A rule without match lines fits everything that no earlier rule took.
+    assert_eq!(
+        config
+            .window_rule_for(&facts("zzz", None))
+            .unwrap()
+            .workspace,
+        Some(4)
+    );
+}
+
+#[test]
+fn window_rule_matches_dialog_restored_and_title() {
+    let config = Config::parse(
+        r#"
+window-rule { match dialog=#true; open-on-output "pointer"; open-size 900 700; }
+window-rule { match restored=#true; open-workspace 1; }
+window-rule { match title="Picture-in-Picture"; floating; }
+"#,
+    )
+    .unwrap();
+    let rules = config.window_rules();
+    assert_eq!(rules[0].output, Some(RuleOutput::Pointer));
+    assert_eq!(rules[0].size, Some((900, 700)));
+    assert!(rules[2].floating);
+
+    let dialog = WindowFacts {
+        dialog: true,
+        ..facts("x", None)
+    };
+    let restored = WindowFacts {
+        restored: true,
+        ..facts("x", None)
+    };
+    let pip = WindowFacts {
+        title: "Firefox - Picture-in-Picture",
+        ..facts("x", None)
+    };
+    assert_eq!(config.window_rule_for(&dialog), Some(&rules[0]));
+    assert_eq!(config.window_rule_for(&restored), Some(&rules[1]));
+    assert_eq!(config.window_rule_for(&pip), Some(&rules[2]));
+    assert!(config.window_rule_for(&facts("x", None)).is_none());
+}
+
+#[test]
+fn window_rule_dialog_false_matches_plain_windows() {
+    let config = Config::parse(r#"window-rule { match dialog=#false; floating; }"#).unwrap();
+    assert!(config.window_rule_for(&facts("x", None)).is_some());
+    let dialog = WindowFacts {
+        dialog: true,
+        ..facts("x", None)
+    };
+    assert!(config.window_rule_for(&dialog).is_none());
+}
+
+#[test]
+fn window_rule_says_when_it_places_the_window() {
+    let config = Config::parse(
+        r#"
+window-rule { open-workspace 2; }
+window-rule { open-size 480 270; }
+window-rule { open-maximized #false; }
+"#,
+    )
+    .unwrap();
+    let rules = config.window_rules();
+    assert!(!rules[0].places_window());
+    assert!(rules[1].places_window());
+    assert!(rules[2].places_window());
+}
+
+#[test]
+fn window_rule_rejects_bad_input() {
+    for bad in [
+        r#"window-rule { match; }"#,
+        r#"window-rule { match "firefox"; }"#,
+        r#"window-rule { match colour="red"; }"#,
+        r#"window-rule { match dialog="maybe"; }"#,
+        r#"window-rule { match app-id=3; }"#,
+        r#"window-rule { open-workspace 0; }"#,
+        r#"window-rule { open-workspace 65; }"#,
+        r#"window-rule { open-size 480; }"#,
+        r#"window-rule { open-size 0 270; }"#,
+        r#"window-rule { open-size 480 270 3; }"#,
+        r#"window-rule { open-on-output; }"#,
+        r#"window-rule { open-on-output ""; }"#,
+        r#"window-rule { open-maximized 3; }"#,
+        r#"window-rule { teleport 1; }"#,
+        r#"window-rule { floating; open-maximized #true; }"#,
+        r#"window-rule "firefox""#,
+    ] {
+        assert!(Config::parse(bad).is_err(), "{bad} should not parse");
+    }
+}
+
+#[test]
+fn check_config_warns_about_rules_that_do_nothing() {
+    let warnings = Config::check_text(r#"window-rule { match app-id="x"; }"#).unwrap();
+    assert!(
+        warnings.iter().any(|w| w.contains("no actions")),
+        "{warnings:?}"
+    );
+
+    let warnings = Config::check_text(
+        r#"window-rule { match restored=#true; open-workspace 1; open-size 10 10; }"#,
+    )
+    .unwrap();
+    assert!(
+        warnings.iter().any(|w| w.contains("restored")),
+        "{warnings:?}"
+    );
+
+    let warnings =
+        Config::check_text(r#"window-rule { match restored=#true; open-workspace 1; }"#).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
