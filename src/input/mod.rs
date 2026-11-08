@@ -5,7 +5,7 @@ mod tablet;
 
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-    InputTime, KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+    InputTime, KeyState, KeyboardKeyEvent, Keycode, PointerAxisEvent, PointerButtonEvent,
     PointerMotionEvent,
 };
 use smithay::desktop::{Window, WindowSurfaceType};
@@ -71,153 +71,14 @@ impl JffState {
         self.idle_notifier_state.notify_activity(&self.seat);
         match event {
             InputEvent::Keyboard { event } => {
-                let Some(keyboard) = self.seat.get_keyboard() else {
-                    return;
-                };
-                let serial = SERIAL_COUNTER.next_serial();
-                let time = Event::time(&event);
-                let key_code = event.key_code();
-
-                // Step 1: update xkb state and catch compositor keybinds. Bindings come from
-                // config.kdl (see config.rs). Ctrl+Alt+F1..F12 switch VT (TTY backend only).
-                let pressed = event.state() == KeyState::Pressed;
-                // A client that asked for the shortcuts (a game) has the keyboard: only the way
-                // out of the bindings is left. Queried here, not in the closure, because the
-                // keyboard is in use there.
-                let inhibited = self.shortcuts_inhibited();
-                let Some((bind, mods_changed)) = keyboard.input_intercept(
+                // A real key while a virtual keyboard's keymap is on the seat: back to the
+                // configured one first.
+                self.restore_seat_keymap();
+                self.keyboard_key(
                     KeyboardSource::MAIN,
-                    self,
-                    key_code,
-                    event.state(),
-                    |state, mods, handle| {
-                        // While the overview is open it gets first pick, and keeps releases
-                        // (and every key it doesn't use) from reaching anyone.
-                        let overview = state.overview_active();
-                        let screenshot = state.screenshot.is_some();
-                        if !pressed {
-                            // A key whose press no client saw keeps its release hidden too, or
-                            // they'd get a release with no press.
-                            let suppressed = state.suppressed_keys.remove(&key_code);
-                            // Letting go of Alt picks the window the switcher is on.
-                            if state.switcher_released((mods.alt, mods.ctrl, mods.logo)) {
-                                return Bind::Overview(OverviewKey::Select);
-                            }
-                            return if overview || screenshot || suppressed {
-                                Bind::Swallow
-                            } else {
-                                Bind::None
-                            };
-                        }
-                        let bind = (|| {
-                            let raw = handle.modified_sym().raw();
-                            // XF86Switch_VT_1 ..= XF86Switch_VT_12
-                            if (0x1008FE01..=0x1008FE0C).contains(&raw) {
-                                return Bind::Vt((raw - 0x1008FE01 + 1) as i32);
-                            }
-                            // Locked session: no bindings, only the VT keys above.
-                            if state.session_locked() {
-                                return Bind::None;
-                            }
-                            let sym = handle.raw_latin_sym_or_raw_current_sym();
-                            if overview {
-                                // The overview key again closes it. Quitting still works.
-                                let configured =
-                                    sym.and_then(|sym| state.config.action_for(mods, sym));
-                                return match configured {
-                                    // Closes it, also with something typed (Escape only clears
-                                    // that first).
-                                    Some(Action::Overview) => Bind::Action(Action::Overview),
-                                    Some(Action::Quit) => Bind::Action(Action::Quit),
-                                    // Anything else that types a character goes to the search.
-                                    _ => {
-                                        let sym = handle.modified_sym();
-                                        overview_key(sym)
-                                            .or_else(|| {
-                                                typed_char(sym, mods.ctrl, mods.alt, mods.logo)
-                                                    .map(OverviewKey::Type)
-                                            })
-                                            .map_or(Bind::Swallow, Bind::Overview)
-                                    }
-                                };
-                            }
-                            if screenshot {
-                                // Quitting and the overview still work (opening the overview
-                                // cancels the selection). The screenshot key cancels.
-                                let configured =
-                                    sym.and_then(|sym| state.config.action_for(mods, sym));
-                                return match configured {
-                                    Some(Action::Quit) => Bind::Action(Action::Quit),
-                                    Some(Action::Overview) => Bind::Action(Action::Overview),
-                                    Some(Action::ScreenshotArea) => {
-                                        Bind::Screenshot(ScreenshotKey::Cancel)
-                                    }
-                                    _ => screenshot_key(handle.modified_sym())
-                                        .map_or(Bind::Swallow, Bind::Screenshot),
-                                };
-                            }
-                            sym.and_then(|sym| state.config.action_for(mods, sym))
-                                .filter(|action| {
-                                    !inhibited || matches!(action, Action::ToggleShortcutsInhibit)
-                                })
-                                .map_or(Bind::None, |action| Bind::Action(action.clone()))
-                        })();
-                        // Every press kept from the client is remembered, so its release is
-                        // kept too. A press that goes to the client clears the mark instead: an
-                        // old one would swallow the release of a key the client sees held down,
-                        // and a client repeats a held key until it is released.
-                        if matches!(bind, Bind::None) {
-                            if state.suppressed_keys.remove(&key_code) {
-                                tracing::warn!(
-                                    "key {key_code:?} was still marked as kept from clients"
-                                );
-                            }
-                        } else {
-                            state.suppressed_keys.insert(key_code);
-                        }
-                        bind
-                    },
-                ) else {
-                    return;
-                };
-
-                // A key kept from the client may still have changed a modifier (a binding on
-                // Super itself, say). Clients need to know, or their view of the modifiers
-                // drifts from ours.
-                if mods_changed && !matches!(bind, Bind::None) {
-                    keyboard.advertise_modifier_state(self);
-                }
-
-                // A compositor shortcut: the focused client never sees it.
-                match bind {
-                    Bind::Action(action) => {
-                        self.run_action(action);
-                        return;
-                    }
-                    Bind::Vt(vt) => {
-                        self.change_vt(vt);
-                        return;
-                    }
-                    Bind::Overview(key) => {
-                        self.handle_overview_key(key);
-                        return;
-                    }
-                    Bind::Screenshot(key) => {
-                        self.handle_screenshot_key(key);
-                        return;
-                    }
-                    Bind::Swallow => return,
-                    Bind::None => {}
-                }
-
-                // Step 2: forward the key to the focused client.
-                keyboard.input_forward(
-                    self,
                     event.key_code(),
                     event.state(),
-                    serial,
-                    time,
-                    mods_changed,
+                    Event::time(&event),
                 );
             }
 
@@ -276,6 +137,147 @@ impl JffState {
 
             _ => {}
         }
+    }
+
+    /// A key went down or up on `source`: compositor bindings, the overview and screenshot
+    /// keys, then the focused client. Real keyboards use [`KeyboardSource::MAIN`], each
+    /// virtual keyboard its own source (see `protocol/virtual_keyboard.rs`).
+    pub(crate) fn keyboard_key(
+        &mut self,
+        source: KeyboardSource,
+        key_code: Keycode,
+        key_state: KeyState,
+        time: InputTime,
+    ) {
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        let serial = SERIAL_COUNTER.next_serial();
+
+        // Step 1: update xkb state and catch compositor keybinds. Bindings come from
+        // config.kdl (see config.rs). Ctrl+Alt+F1..F12 switch VT (TTY backend only).
+        let pressed = key_state == KeyState::Pressed;
+        // A client that asked for the shortcuts (a game) has the keyboard: only the way
+        // out of the bindings is left. Queried here, not in the closure, because the
+        // keyboard is in use there.
+        let inhibited = self.shortcuts_inhibited();
+        let Some((bind, mods_changed)) =
+            keyboard.input_intercept(source, self, key_code, key_state, |state, mods, handle| {
+                // While the overview is open it gets first pick, and keeps releases
+                // (and every key it doesn't use) from reaching anyone.
+                let overview = state.overview_active();
+                let screenshot = state.screenshot.is_some();
+                if !pressed {
+                    // A key whose press no client saw keeps its release hidden too, or
+                    // they'd get a release with no press.
+                    let suppressed = state.suppressed_keys.remove(&key_code);
+                    // Letting go of Alt picks the window the switcher is on.
+                    if state.switcher_released((mods.alt, mods.ctrl, mods.logo)) {
+                        return Bind::Overview(OverviewKey::Select);
+                    }
+                    return if overview || screenshot || suppressed {
+                        Bind::Swallow
+                    } else {
+                        Bind::None
+                    };
+                }
+                let bind = (|| {
+                    let raw = handle.modified_sym().raw();
+                    // XF86Switch_VT_1 ..= XF86Switch_VT_12
+                    if (0x1008FE01..=0x1008FE0C).contains(&raw) {
+                        return Bind::Vt((raw - 0x1008FE01 + 1) as i32);
+                    }
+                    // Locked session: no bindings, only the VT keys above.
+                    if state.session_locked() {
+                        return Bind::None;
+                    }
+                    let sym = handle.raw_latin_sym_or_raw_current_sym();
+                    if overview {
+                        // The overview key again closes it. Quitting still works.
+                        let configured = sym.and_then(|sym| state.config.action_for(mods, sym));
+                        return match configured {
+                            // Closes it, also with something typed (Escape only clears
+                            // that first).
+                            Some(Action::Overview) => Bind::Action(Action::Overview),
+                            Some(Action::Quit) => Bind::Action(Action::Quit),
+                            // Anything else that types a character goes to the search.
+                            _ => {
+                                let sym = handle.modified_sym();
+                                overview_key(sym)
+                                    .or_else(|| {
+                                        typed_char(sym, mods.ctrl, mods.alt, mods.logo)
+                                            .map(OverviewKey::Type)
+                                    })
+                                    .map_or(Bind::Swallow, Bind::Overview)
+                            }
+                        };
+                    }
+                    if screenshot {
+                        // Quitting and the overview still work (opening the overview
+                        // cancels the selection). The screenshot key cancels.
+                        let configured = sym.and_then(|sym| state.config.action_for(mods, sym));
+                        return match configured {
+                            Some(Action::Quit) => Bind::Action(Action::Quit),
+                            Some(Action::Overview) => Bind::Action(Action::Overview),
+                            Some(Action::ScreenshotArea) => Bind::Screenshot(ScreenshotKey::Cancel),
+                            _ => screenshot_key(handle.modified_sym())
+                                .map_or(Bind::Swallow, Bind::Screenshot),
+                        };
+                    }
+                    sym.and_then(|sym| state.config.action_for(mods, sym))
+                        .filter(|action| {
+                            !inhibited || matches!(action, Action::ToggleShortcutsInhibit)
+                        })
+                        .map_or(Bind::None, |action| Bind::Action(action.clone()))
+                })();
+                // Every press kept from the client is remembered, so its release is
+                // kept too. A press that goes to the client clears the mark instead: an
+                // old one would swallow the release of a key the client sees held down,
+                // and a client repeats a held key until it is released.
+                if matches!(bind, Bind::None) {
+                    if state.suppressed_keys.remove(&key_code) {
+                        tracing::warn!("key {key_code:?} was still marked as kept from clients");
+                    }
+                } else {
+                    state.suppressed_keys.insert(key_code);
+                }
+                bind
+            })
+        else {
+            return;
+        };
+
+        // A key kept from the client may still have changed a modifier (a binding on
+        // Super itself, say). Clients need to know, or their view of the modifiers
+        // drifts from ours.
+        if mods_changed && !matches!(bind, Bind::None) {
+            keyboard.advertise_modifier_state(self);
+        }
+
+        // A compositor shortcut: the focused client never sees it.
+        match bind {
+            Bind::Action(action) => {
+                self.run_action(action);
+                return;
+            }
+            Bind::Vt(vt) => {
+                self.change_vt(vt);
+                return;
+            }
+            Bind::Overview(key) => {
+                self.handle_overview_key(key);
+                return;
+            }
+            Bind::Screenshot(key) => {
+                self.handle_screenshot_key(key);
+                return;
+            }
+            Bind::Swallow => return,
+            Bind::None => {}
+        }
+
+        // Step 2: forward the key to the focused client.
+        keyboard.input_forward(self, key_code, key_state, serial, time, mods_changed);
     }
 
     /// The pointer moved by `delta`, as a mouse or touchpad reports it (and as a

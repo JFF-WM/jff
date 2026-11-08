@@ -51,6 +51,7 @@ use smithay::wayland::fifo::FifoManagerState;
 use smithay::wayland::idle_inhibit::IdleInhibitManagerState;
 use smithay::wayland::idle_notify::IdleNotifierState;
 use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState;
+use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
 use smithay::wayland::fractional_scale::{
     with_fractional_scale, FractionalScaleHandler, FractionalScaleManagerState,
 };
@@ -267,6 +268,10 @@ pub struct JffState {
     pub toplevel_tag_manager: ToplevelTagManager,
     /// wlr-virtual-pointer: clients that move the pointer and click (`protocol/virtual_pointer.rs`).
     pub virtual_pointer_manager: VirtualPointerManager,
+    /// zwp-virtual-keyboard: clients that type for the user (wtype, wayvnc). Smithay does the
+    /// work, jff only decides who may see the global.
+    #[allow(dead_code)]
+    pub virtual_keyboard_state: VirtualKeyboardManagerState,
     /// wp-color-representation: how a surface's buffer values are encoded, stored only so far
     /// (`protocol/color_representation.rs`).
     pub color_representation_manager: ColorRepresentationManager,
@@ -306,6 +311,9 @@ pub struct JffState {
     /// Keys whose press was kept from clients (a binding, the overview): their release is kept
     /// from clients too.
     pub suppressed_keys: std::collections::HashSet<Keycode>,
+    /// The keymap of a virtual keyboard that is on the seat right now, `None` while the seat
+    /// has the configured one (`protocol/virtual_keyboard.rs`).
+    pub active_virtual_keymap: Option<Arc<str>>,
     /// Who the seat's keyboard was given to last (see `focus.rs`).
     pub keyboard_focus: KeyboardFocus,
     /// The window the user works in, as picked by a click, a new window, or a request. The
@@ -472,6 +480,11 @@ impl JffState {
         let pointer_warp = PointerWarp::new(&display_handle);
         let toplevel_tag_manager = ToplevelTagManager::new(&display_handle);
         let virtual_pointer_manager = VirtualPointerManager::new(&display_handle);
+        // A client that can type can do anything the user can: not for sandboxed apps.
+        let virtual_keyboard_state =
+            VirtualKeyboardManagerState::new::<Self, _>(&display_handle, |client| {
+                !is_sandboxed(client)
+            });
         let color_representation_manager = ColorRepresentationManager::new(&display_handle);
 
         // wlr-layer-shell: lets bars, launchers, wallpapers, and notification daemons place
@@ -563,6 +576,7 @@ impl JffState {
             pointer_warp,
             toplevel_tag_manager,
             virtual_pointer_manager,
+            virtual_keyboard_state,
             color_representation_manager,
             layer_shell_state,
             next_view_id: 1,
@@ -581,6 +595,7 @@ impl JffState {
             screenshot: None,
             swallowed_buttons: Default::default(),
             suppressed_keys: Default::default(),
+            active_virtual_keymap: None,
             keyboard_focus: KeyboardFocus::Nobody,
             focused_window: None,
             layer_on_demand_focus: None,
