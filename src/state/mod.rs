@@ -111,6 +111,7 @@ use crate::protocol::session_lock::SessionLock;
 use crate::protocol::session_management::SessionManagement;
 use crate::protocol::tearing_control::TearingControlState;
 use crate::protocol::text_input::TextInput;
+use crate::protocol::toplevel_drag::ToplevelDrags;
 use crate::protocol::toplevel_tag::ToplevelTagManager;
 use crate::protocol::transient_seat::TransientSeats;
 use crate::protocol::virtual_pointer::VirtualPointerManager;
@@ -265,6 +266,8 @@ pub struct JffState {
     pub output_management: OutputManagement,
     pub output_power: OutputPower,
     pub pointer_warp: PointerWarp,
+    /// xdg-toplevel-drag: a drag-and-drop that carries a window (`protocol/toplevel_drag.rs`).
+    pub toplevel_drags: ToplevelDrags,
     /// xdg-toplevel-tag: window tags for `window-rule` (`protocol/toplevel_tag.rs`).
     pub toplevel_tag_manager: ToplevelTagManager,
     /// wlr-virtual-pointer: clients that move the pointer and click (`protocol/virtual_pointer.rs`).
@@ -482,6 +485,7 @@ impl JffState {
         let output_management = OutputManagement::new(&display_handle);
         let output_power = OutputPower::new(&display_handle, backend.is_tty());
         let pointer_warp = PointerWarp::new(&display_handle);
+        let toplevel_drags = ToplevelDrags::new(&display_handle);
         let toplevel_tag_manager = ToplevelTagManager::new(&display_handle);
         let virtual_pointer_manager = VirtualPointerManager::new(&display_handle);
         // A client that can type can do anything the user can: not for sandboxed apps.
@@ -579,6 +583,7 @@ impl JffState {
             output_management,
             output_power,
             pointer_warp,
+            toplevel_drags,
             toplevel_tag_manager,
             virtual_pointer_manager,
             virtual_keyboard_state,
@@ -729,6 +734,7 @@ impl CompositorHandler for JffState {
 
         if let Some(entry) = self.desk.find_by(|w| is_window_for(w, &root)) {
             entry.window.on_commit();
+            self.toplevel_drag_commit(&root);
             self.fit_to_output_once(&root);
             self.recenter_settling_dialog(&root);
         } else {
@@ -1172,6 +1178,7 @@ impl XdgShellHandler for JffState {
             .remove_where(|w| w.toplevel().map(|t| t == &surface).unwrap_or(false));
         self.dialog_toplevels.remove(surface.wl_surface());
         self.settling_dialogs.remove(surface.wl_surface());
+        self.toplevel_drag_gone(surface.wl_surface());
     }
 
     // Popups (menus, tooltips, and X11 override-redirect windows via xwayland-satellite).
@@ -1430,6 +1437,11 @@ impl JffState {
             return; // no buffer yet: wait for the first real commit
         }
         if !self.desk.mark_fitted_where(|w| is_window_for(w, root)) {
+            return;
+        }
+        // A window a drag carries (xdg-toplevel-drag) is where the pointer puts it: not
+        // maximized, centred or fitted like a window that opens on its own.
+        if self.toplevel_drags.is_attached(root) {
             return;
         }
         if !self.desk.is_floating(|w| is_window_for(w, root)) {

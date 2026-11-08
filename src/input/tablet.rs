@@ -76,6 +76,7 @@ impl JffState {
             },
         );
         pointer.frame(self);
+        self.update_toplevel_drag();
     }
 
     /// The surface under the pen, unless the overview or screenshot selection has the input.

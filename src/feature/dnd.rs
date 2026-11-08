@@ -10,6 +10,7 @@ use smithay::input::dnd::{DnDGrab, DndGrabHandler, DndTarget, GrabType, Source};
 use smithay::input::pointer::{CursorIcon, CursorImageStatus, Focus};
 use smithay::input::Seat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{IsAlive, Logical, Physical, Point, Scale, Serial};
 use smithay::wayland::selection::data_device::WaylandDndGrabHandler;
 
@@ -36,6 +37,11 @@ impl WaylandDndGrabHandler for JffState {
                     source.cancel();
                     return;
                 };
+                // Who started it, for the toplevel drag (xdg-toplevel-drag) the source may have.
+                let client = start_data
+                    .focus
+                    .as_ref()
+                    .and_then(|(surface, _)| surface.client());
                 self.dnd_icon = icon;
                 // Nobody else sets the cursor during a drag, so this sticks.
                 self.cursor
@@ -44,6 +50,7 @@ impl WaylandDndGrabHandler for JffState {
                 let grab = DnDGrab::new_pointer(&self.display_handle, start_data, source, seat);
                 // Keep: the grab does the data-device focus itself.
                 pointer.set_grab(self, grab, serial, Focus::Keep);
+                self.toplevel_drag_started(client.as_ref());
             }
             GrabType::Touch => source.cancel(), // no touch support
         }
@@ -56,8 +63,9 @@ impl DndGrabHandler for JffState {
         _target: Option<DndTarget<'_, Self>>,
         _validated: bool,
         _seat: Seat<Self>,
-        _location: Point<f64, Logical>,
+        location: Point<f64, Logical>,
     ) {
+        self.toplevel_drag_ended(location);
         self.dnd_icon = None;
         self.cursor.set_status(CursorImageStatus::default_named());
     }

@@ -367,6 +367,7 @@ impl JffState {
             },
         );
         pointer.frame(self);
+        self.update_toplevel_drag();
 
         // The pointer reached a surface that already asked for a lock: engage it.
         if let Some((surface, origin)) = new_under {
@@ -402,6 +403,7 @@ impl JffState {
             },
         );
         pointer.frame(self);
+        self.update_toplevel_drag();
     }
 
     /// A pointer button went down or up: mouse bindings, click-to-focus, window drags, the
@@ -693,7 +695,9 @@ impl JffState {
         &self,
         pos: Point<f64, Logical>,
     ) -> Option<(Window, WlSurface, Point<f64, Logical>)> {
-        for entry in self.desk.top_down() {
+        // The window a toplevel drag carries is never under the pointer: it is not a drop target.
+        let carried = self.toplevel_drags.dragged_window();
+        for entry in self.desk.top_down().filter(|e| Some(&e.window) != carried) {
             // Same origin the renderer uses: where the window's root surface is drawn.
             let origin: Point<i32, Logical> = Point::from(entry.pos) - entry.window.geometry().loc;
             let local = pos - origin.to_f64();
