@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::PathBuf;
 
 use smithay::backend::renderer::ImportMemWl;
@@ -33,6 +34,31 @@ pub fn run() -> anyhow::Result<()> {
 
     let mut event_loop: EventLoop<JffState> = EventLoop::try_new()?;
     let display: Display<JffState> = Display::new()?;
+
+    // SIGTERM (what `wayland-logout` and a service manager send), SIGINT and SIGHUP end the
+    // event loop, so what comes after it runs: the satellite is stopped, the session and the
+    // display are closed in order. Without this the process dies on the spot and its clients
+    // see the connection vanish (xwayland-satellite panics on it).
+    let (signal_rx, signal_tx) = std::os::unix::net::UnixStream::pair()?;
+    signal_rx.set_nonblocking(true)?;
+    signal_tx.set_nonblocking(true)?;
+    for signal in [
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGHUP,
+    ] {
+        signal_hook::low_level::pipe::register(signal, signal_tx.try_clone()?)?;
+    }
+    event_loop.handle().insert_source(
+        Generic::new(signal_rx, Interest::READ, Mode::Level),
+        |_, stream, state| {
+            let mut buf = [0u8; 16];
+            while matches!((&**stream).read(&mut buf), Ok(n) if n > 0) {}
+            tracing::info!("signal received, shutting down");
+            state.loop_signal.stop();
+            Ok(PostAction::Continue)
+        },
+    )?;
 
     let mut startup_error = None;
     let config = Config::load().unwrap_or_else(|err| {
@@ -177,9 +203,9 @@ pub fn run() -> anyhow::Result<()> {
         let _ = std::fs::remove_file(path);
     }
 
+    // Before the display goes away: the satellite is a client of it.
     if let Some(child) = satellite.as_mut() {
-        let _ = child.kill();
-        let _ = child.wait();
+        crate::feature::xwayland::stop(child);
     }
 
     Ok(())

@@ -5,6 +5,7 @@
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// First X display number that looks free: no socket, no lock file.
 pub fn free_display() -> Option<u32> {
@@ -43,4 +44,25 @@ pub fn spawn() -> Option<Child> {
             None
         }
     }
+}
+
+/// How long the satellite gets to stop by itself before it is killed.
+const STOP_GRACE: Duration = Duration::from_millis(1500);
+
+/// Stop the satellite: ask it to quit (so it stops its Xwayland and removes the X socket and
+/// lock file), and kill it if it takes too long. Call it while we still serve our display.
+pub fn stop(child: &mut Child) {
+    // SAFETY: `kill` with the pid of a child we have not waited for yet.
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + STOP_GRACE;
+    while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }

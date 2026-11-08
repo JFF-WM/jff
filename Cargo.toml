@@ -26,6 +26,10 @@ wayland-scanner = "0.31.11"
 # A small client of jff itself, to learn the registry name of a transient seat
 # (`protocol/transient_seat.rs`). Smithay already depends on it for the winit backend.
 wayland-client = "0.31"
+# SIGTERM/SIGINT/SIGHUP end the session cleanly (`app/run.rs`); `wayland-logout` sends SIGTERM.
+signal-hook = "0.3"
+# Ask the satellite to stop with SIGTERM (`feature/xwayland.rs`).
+libc = "0.2"
 
 [dependencies.smithay]
 git = "https://github.com/alexparlett/smithay.git"
