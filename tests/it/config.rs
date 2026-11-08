@@ -1250,3 +1250,15 @@ fn allow_tearing_is_off_unless_asked_for() {
         .unwrap()
         .allow_tearing());
 }
+
+#[test]
+fn global_hotkeys_are_off_unless_asked_for() {
+    assert!(!Config::default().global_hotkeys());
+    assert!(TOP_LEVEL_NODES.contains(&"global-hotkeys"));
+    assert!(Config::parse("global-hotkeys #true")
+        .unwrap()
+        .global_hotkeys());
+    assert!(!Config::parse("global-hotkeys #false")
+        .unwrap()
+        .global_hotkeys());
+}

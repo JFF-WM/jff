@@ -34,6 +34,7 @@ use crate::ipc::ViewId;
 use crate::primitives::geom;
 use crate::primitives::layout;
 use crate::protocol::layer_shell::Under;
+use crate::protocol::xx_hotkey::mods_of;
 use crate::state::{configure_mode, JffState};
 
 /// What a compositor key combination asks for.
@@ -113,6 +114,7 @@ impl JffState {
             }
 
             InputEvent::PointerAxis { event } => {
+                self.hotkey_input_seen(None);
                 let pointer = self.seat.get_pointer().unwrap();
                 let source = event.source();
                 let mut frame = AxisFrame::new(event.time()).source(source);
@@ -277,6 +279,14 @@ impl JffState {
         // out of the bindings is left. Queried here, not in the closure, because the
         // keyboard is in use there.
         let inhibited = self.shortcuts_inhibited();
+        // Client hotkeys: the modifiers held before this key, and what it types in every layout
+        // group of the configured keymap.
+        let hotkey_mods = mods_of(&keyboard.modifier_state());
+        let hotkey_syms = if pressed {
+            self.hotkey_key_syms(key_code)
+        } else {
+            Vec::new()
+        };
         let Some((bind, mods_changed)) =
             keyboard.input_intercept(source, self, key_code, key_state, |state, mods, handle| {
                 // While the overview is open it gets first pick, and keeps releases
@@ -284,6 +294,7 @@ impl JffState {
                 let overview = state.overview_active();
                 let screenshot = state.screenshot.is_some();
                 if !pressed {
+                    state.client_hotkey_key_released(key_code);
                     // A key whose press no client saw keeps its release hidden too, or
                     // they'd get a release with no press.
                     let suppressed = state.suppressed_keys.remove(&key_code);
@@ -297,6 +308,7 @@ impl JffState {
                         Bind::None
                     };
                 }
+                state.hotkey_input_seen(Some(key_code));
                 let bind = (|| {
                     let raw = handle.modified_sym().raw();
                     // XF86Switch_VT_1 ..= XF86Switch_VT_12
@@ -340,11 +352,22 @@ impl JffState {
                                 .map_or(Bind::Swallow, Bind::Screenshot),
                         };
                     }
-                    sym.and_then(|sym| state.config.action_for(mods, sym))
+                    let action = sym
+                        .and_then(|sym| state.config.action_for(mods, sym))
                         .filter(|action| {
                             !inhibited || matches!(action, Action::ToggleShortcutsInhibit)
                         })
-                        .map_or(Bind::None, |action| Bind::Action(action.clone()))
+                        .cloned();
+                    match action {
+                        Some(action) => Bind::Action(action),
+                        // jff's own bindings come first, a client hotkey gets what is left.
+                        None if !inhibited
+                            && state.client_hotkey_pressed(key_code, hotkey_mods, &hotkey_syms) =>
+                        {
+                            Bind::Swallow
+                        }
+                        None => Bind::None,
+                    }
                 })();
                 // Every press kept from the client is remembered, so its release is
                 // kept too. A press that goes to the client clears the mark instead: an
@@ -526,6 +549,7 @@ impl JffState {
     /// overview and screenshot selection, then the client under the pointer. Real mice and
     /// `jff msg click` both come through here.
     pub(crate) fn pointer_button(&mut self, button: u32, state: ButtonState, time: InputTime) {
+        self.hotkey_input_seen(None);
         // Mouse bindings (MouseBack, MouseForward): the press runs the action, and both
         // press and release are kept from clients so none sees half a click.
         match state {
@@ -552,8 +576,15 @@ impl JffState {
                     }
                     return;
                 }
+                // Then a client hotkey, which never acts in the overview or a selection.
+                let modal = self.overview_active() || self.screenshot.is_some();
+                if !inhibited && !modal && self.client_hotkey_button(button, mods_of(&mods)) {
+                    self.swallowed_buttons.insert(button);
+                    return;
+                }
             }
             ButtonState::Released => {
+                self.client_hotkey_button_released(button);
                 if self.swallowed_buttons.remove(&button) {
                     return;
                 }
@@ -844,6 +875,7 @@ impl JffState {
                 self.apply_workspace_count();
                 self.reconcile_outputs();
                 self.apply_decoration_mode();
+                self.apply_hotkey_config();
                 self.osd.dismiss(crate::feature::osd::Icon::Error);
                 tracing::info!("config reloaded");
             }

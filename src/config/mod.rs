@@ -4,7 +4,7 @@
 //! `~/.config/jff/config.kdl`. When none exists, the built-in [`DEFAULT_CONFIG`] is used.
 //!
 //! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9, per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
-//! `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
+//! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `keyboard { … }`, `blur { … }`, `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
 //! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
@@ -113,6 +113,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "workspaces",
     "maximize-new-windows",
     "allow-tearing",
+    "global-hotkeys",
     "window-animations",
     "no-client-decorations",
     "drag-modifier",
@@ -323,6 +324,20 @@ impl KeyboardConfig {
             &other.layout,
             &other.variant,
             &other.options,
+        )
+    }
+
+    /// The keymap these names build, `None` when xkbcommon rejects them.
+    pub fn keymap(&self) -> Option<xkb::Keymap> {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        xkb::Keymap::new_from_names(
+            &context,
+            &self.rules,
+            &self.model,
+            &self.layout,
+            &self.variant,
+            self.options.clone(),
+            xkb::COMPILE_NO_FLAGS,
         )
     }
 
@@ -751,6 +766,8 @@ pub struct Config {
     /// `allow-tearing`: a fullscreen window that asked for it (wp_tearing_control_v1) is shown
     /// with async page flips. Off by default.
     allow_tearing: bool,
+    /// `global-hotkeys`: clients may bind their own global hotkeys (xx-hotkey-v1). Off by default.
+    global_hotkeys: bool,
     window_animations: WindowAnimations,
     no_client_decorations: bool,
     drag_modifier: DragModifier,
@@ -803,6 +820,7 @@ impl Default for Config {
                 workspaces_per_output: false,
                 maximize_new_windows: true,
                 allow_tearing: false,
+                global_hotkeys: false,
                 window_animations: WindowAnimations::default(),
                 no_client_decorations: false,
                 drag_modifier: DragModifier::Alt,
@@ -961,6 +979,7 @@ impl Config {
 
         let maximize_new_windows = parse_flag(&doc, "maximize-new-windows", true)?;
         let allow_tearing = parse_flag(&doc, "allow-tearing", false)?;
+        let global_hotkeys = parse_flag(&doc, "global-hotkeys", false)?;
         let window_animations = match doc.get("window-animations") {
             None => WindowAnimations::default(),
             Some(node) => parse_window_animations(node).context("in window-animations")?,
@@ -1072,6 +1091,7 @@ impl Config {
             workspaces_per_output,
             maximize_new_windows,
             allow_tearing,
+            global_hotkeys,
             window_animations,
             no_client_decorations,
             drag_modifier,
@@ -1195,6 +1215,11 @@ impl Config {
     /// Whether a fullscreen window may be shown with tearing when it asks for it.
     pub fn allow_tearing(&self) -> bool {
         self.allow_tearing
+    }
+
+    /// Whether clients may bind their own global hotkeys (xx-hotkey-v1).
+    pub fn global_hotkeys(&self) -> bool {
+        self.global_hotkeys
     }
 
     /// Whether new windows start maximized.

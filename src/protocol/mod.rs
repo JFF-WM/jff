@@ -27,3 +27,5 @@ pub mod virtual_keyboard;
 pub mod virtual_pointer;
 pub mod workspace;
 pub mod xdg_session_bindings;
+pub mod xx_hotkey;
+pub mod xx_hotkey_bindings;

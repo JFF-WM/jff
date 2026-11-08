@@ -220,6 +220,7 @@ impl JffState {
             return;
         };
         self.transient_seats.live = self.transient_seats.live.saturating_sub(1);
+        self.revoke_hotkeys_on_seat(&seat);
         if let Some(global) = seat.global() {
             self.display_handle.remove_global::<JffState>(global);
         }

@@ -867,6 +867,7 @@ name = "jff-wm"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "bitflags",
  "chrono",
  "fontdue",
  "kdl",

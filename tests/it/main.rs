@@ -22,4 +22,5 @@ mod screenshot_area;
 mod screenshot_capture;
 mod screenshot_save;
 mod window_anim;
+mod xx_hotkey;
 mod yuv;

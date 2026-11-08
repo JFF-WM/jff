@@ -25,6 +25,9 @@ no-client-decorations #true
 // Hold this key and drag with the mouse to move/resize windows.
 drag-modifier "Super"
 
+// enable global hotkeys
+global-hotkeys #true
+
 screenshot {
     // Where screenshots are saved. Leave out to only copy to the clipboard.
     path "~/Pictures/"

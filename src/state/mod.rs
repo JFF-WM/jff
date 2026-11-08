@@ -118,6 +118,7 @@ use crate::protocol::toplevel_tag::ToplevelTagManager;
 use crate::protocol::transient_seat::TransientSeats;
 use crate::protocol::virtual_pointer::VirtualPointerManager;
 use crate::protocol::workspace::ExtWorkspace;
+use crate::protocol::xx_hotkey::Hotkeys;
 use crate::render::cursor::CursorManager;
 
 pub struct JffState {
@@ -273,6 +274,8 @@ pub struct JffState {
     pub output_power: OutputPower,
     /// wlr-gamma-control: night-light tools (`protocol/gamma_control.rs`).
     pub gamma_control: GammaControl,
+    /// xx-hotkey-v1: client-bound global hotkeys, opt-in (`protocol/xx_hotkey.rs`).
+    pub hotkeys: Hotkeys,
     pub pointer_warp: PointerWarp,
     /// xdg-toplevel-drag: a drag-and-drop that carries a window (`protocol/toplevel_drag.rs`).
     pub toplevel_drags: ToplevelDrags,
@@ -494,6 +497,7 @@ impl JffState {
         let output_management = OutputManagement::new(&display_handle);
         let output_power = OutputPower::new(&display_handle, backend.is_tty());
         let gamma_control = GammaControl::new(&display_handle, backend.is_tty());
+        let hotkeys = Hotkeys::new(&display_handle, config.global_hotkeys());
         let pointer_warp = PointerWarp::new(&display_handle);
         let toplevel_drags = ToplevelDrags::new(&display_handle);
         let toplevel_tag_manager = ToplevelTagManager::new(&display_handle);
@@ -594,6 +598,7 @@ impl JffState {
             output_management,
             output_power,
             gamma_control,
+            hotkeys,
             pointer_warp,
             toplevel_drags,
             toplevel_tag_manager,
