@@ -4,14 +4,18 @@ pub mod grabs;
 mod tablet;
 
 use smithay::backend::input::{
-    AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
+    AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent,
+    GestureEndEvent, GesturePinchUpdateEvent, GestureSwipeUpdateEvent, InputBackend, InputEvent,
     InputTime, KeyState, KeyboardKeyEvent, Keycode, PointerAxisEvent, PointerButtonEvent,
     PointerMotionEvent,
 };
 use smithay::desktop::{Window, WindowSurfaceType};
 use smithay::input::keyboard::KeyboardSource;
 use smithay::input::pointer::{
-    AxisFrame, ButtonEvent, Focus, GrabStartData, MotionEvent, RelativeMotionEvent,
+    AxisFrame, ButtonEvent, Focus, GestureHoldBeginEvent, GestureHoldEndEvent,
+    GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent as PinchUpdate,
+    GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent as SwipeUpdate,
+    GrabStartData, MotionEvent, RelativeMotionEvent,
 };
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -132,6 +136,118 @@ impl JffState {
                 }
 
                 pointer.axis(self, frame);
+                pointer.frame(self);
+            }
+
+            // Touchpad gestures (zwp_pointer_gestures_v1), for the window under the pointer.
+            InputEvent::GestureSwipeBegin { event } => {
+                let pointer = self.seat.get_pointer().unwrap();
+                let (serial, time, fingers) =
+                    (SERIAL_COUNTER.next_serial(), event.time(), event.fingers());
+                pointer.gesture_swipe_begin(
+                    self,
+                    &GestureSwipeBeginEvent {
+                        serial,
+                        time,
+                        fingers,
+                    },
+                );
+                pointer.frame(self);
+            }
+            InputEvent::GestureSwipeUpdate { event } => {
+                let pointer = self.seat.get_pointer().unwrap();
+                let (time, delta) = (event.time(), event.delta());
+                pointer.gesture_swipe_update(self, &SwipeUpdate { time, delta });
+                pointer.frame(self);
+            }
+            InputEvent::GestureSwipeEnd { event } => {
+                let pointer = self.seat.get_pointer().unwrap();
+                let (serial, time, cancelled) = (
+                    SERIAL_COUNTER.next_serial(),
+                    event.time(),
+                    event.cancelled(),
+                );
+                pointer.gesture_swipe_end(
+                    self,
+                    &GestureSwipeEndEvent {
+                        serial,
+                        time,
+                        cancelled,
+                    },
+                );
+                pointer.frame(self);
+            }
+            InputEvent::GesturePinchBegin { event } => {
+                let pointer = self.seat.get_pointer().unwrap();
+                let (serial, time, fingers) =
+                    (SERIAL_COUNTER.next_serial(), event.time(), event.fingers());
+                pointer.gesture_pinch_begin(
+                    self,
+                    &GesturePinchBeginEvent {
+                        serial,
+                        time,
+                        fingers,
+                    },
+                );
+                pointer.frame(self);
+            }
+            InputEvent::GesturePinchUpdate { event } => {
+                let pointer = self.seat.get_pointer().unwrap();
+                let update = PinchUpdate {
+                    time: event.time(),
+                    delta: event.delta(),
+                    scale: event.scale(),
+                    rotation: event.rotation(),
+                };
+                pointer.gesture_pinch_update(self, &update);
+                pointer.frame(self);
+            }
+            InputEvent::GesturePinchEnd { event } => {
+                let pointer = self.seat.get_pointer().unwrap();
+                let (serial, time, cancelled) = (
+                    SERIAL_COUNTER.next_serial(),
+                    event.time(),
+                    event.cancelled(),
+                );
+                pointer.gesture_pinch_end(
+                    self,
+                    &GesturePinchEndEvent {
+                        serial,
+                        time,
+                        cancelled,
+                    },
+                );
+                pointer.frame(self);
+            }
+            InputEvent::GestureHoldBegin { event } => {
+                let pointer = self.seat.get_pointer().unwrap();
+                let (serial, time, fingers) =
+                    (SERIAL_COUNTER.next_serial(), event.time(), event.fingers());
+                pointer.gesture_hold_begin(
+                    self,
+                    &GestureHoldBeginEvent {
+                        serial,
+                        time,
+                        fingers,
+                    },
+                );
+                pointer.frame(self);
+            }
+            InputEvent::GestureHoldEnd { event } => {
+                let pointer = self.seat.get_pointer().unwrap();
+                let (serial, time, cancelled) = (
+                    SERIAL_COUNTER.next_serial(),
+                    event.time(),
+                    event.cancelled(),
+                );
+                pointer.gesture_hold_end(
+                    self,
+                    &GestureHoldEndEvent {
+                        serial,
+                        time,
+                        cancelled,
+                    },
+                );
                 pointer.frame(self);
             }
 

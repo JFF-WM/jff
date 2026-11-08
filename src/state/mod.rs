@@ -63,6 +63,7 @@ use smithay::wayland::pointer_constraints::{
     with_pointer_constraint, PointerConstraintsHandler, PointerConstraintsState,
 };
 use smithay::wayland::presentation::PresentationState;
+use smithay::wayland::pointer_gestures::PointerGesturesState;
 use smithay::wayland::relative_pointer::RelativePointerManagerState;
 use smithay::wayland::selection::data_device::{
     set_data_device_focus, DataDeviceHandler, DataDeviceState,
@@ -190,6 +191,10 @@ pub struct JffState {
     /// wp_security_context_v1: sockets for sandboxed apps.
     pub security_context_state: SecurityContextState,
     pub relative_pointer_manager_state: RelativePointerManagerState,
+    /// zwp_pointer_gestures_v1: touchpad swipe, pinch and hold for the window under the pointer.
+    /// Only has to stay alive: it owns the global.
+    #[allow(dead_code)]
+    pub pointer_gestures_state: PointerGesturesState,
     /// wp_presentation: the global needs no handler, feedback is answered in the backends (see
     /// `presentation.rs`).
     #[allow(dead_code)]
@@ -393,6 +398,7 @@ impl JffState {
         let tablet_manager_state = TabletManagerState::new::<Self>(&display_handle);
         let relative_pointer_manager_state =
             RelativePointerManagerState::new::<Self>(&display_handle);
+        let pointer_gestures_state = PointerGesturesState::new::<Self>(&display_handle);
 
         // GPU buffer sharing. Vulkan (vkcube, DXVK/VKD3D under Proton), most GL games, and
         // xwayland-satellite's X11 windows all hand us dmabufs. Without zwp_linux_dmabuf,
@@ -553,6 +559,7 @@ impl JffState {
             tablet_manager_state,
             security_context_state,
             relative_pointer_manager_state,
+            pointer_gestures_state,
             presentation_state,
             fifo_manager_state,
             tearing_control_state,
