@@ -23,6 +23,9 @@ resvg = "0.49.0"
 # published wayland-protocols yet.
 wayland-protocols-experimental = { version = "20251230.0.3", features = ["server"] }
 wayland-scanner = "0.31.11"
+# A small client of jff itself, to learn the registry name of a transient seat
+# (`protocol/transient_seat.rs`). Smithay already depends on it for the winit backend.
+wayland-client = "0.31"
 
 [dependencies.smithay]
 git = "https://github.com/alexparlett/smithay.git"

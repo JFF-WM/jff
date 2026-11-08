@@ -112,6 +112,7 @@ use crate::protocol::session_management::SessionManagement;
 use crate::protocol::tearing_control::TearingControlState;
 use crate::protocol::text_input::TextInput;
 use crate::protocol::toplevel_tag::ToplevelTagManager;
+use crate::protocol::transient_seat::TransientSeats;
 use crate::protocol::virtual_pointer::VirtualPointerManager;
 use crate::protocol::workspace::ExtWorkspace;
 use crate::render::cursor::CursorManager;
@@ -272,6 +273,9 @@ pub struct JffState {
     /// work, jff only decides who may see the global.
     #[allow(dead_code)]
     pub virtual_keyboard_state: VirtualKeyboardManagerState,
+    /// ext-transient-seat: clients that ask for a seat of their own to put virtual devices on
+    /// (`protocol/transient_seat.rs`).
+    pub transient_seats: TransientSeats,
     /// wp-color-representation: how a surface's buffer values are encoded, stored only so far
     /// (`protocol/color_representation.rs`).
     pub color_representation_manager: ColorRepresentationManager,
@@ -485,6 +489,7 @@ impl JffState {
             VirtualKeyboardManagerState::new::<Self, _>(&display_handle, |client| {
                 !is_sandboxed(client)
             });
+        let transient_seats = TransientSeats::new(&display_handle);
         let color_representation_manager = ColorRepresentationManager::new(&display_handle);
 
         // wlr-layer-shell: lets bars, launchers, wallpapers, and notification daemons place
@@ -577,6 +582,7 @@ impl JffState {
             toplevel_tag_manager,
             virtual_pointer_manager,
             virtual_keyboard_state,
+            transient_seats,
             color_representation_manager,
             layer_shell_state,
             next_view_id: 1,
