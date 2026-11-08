@@ -1,6 +1,7 @@
 //! Input: forwards winit keyboard/pointer events to the seat, and does click-to-focus.
 
 pub mod grabs;
+mod tablet;
 
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
@@ -339,6 +340,14 @@ impl JffState {
                     });
                 }
             }
+
+            // Pens and tablets (zwp_tablet_manager_v2), see `tablet.rs`.
+            InputEvent::DeviceAdded { device } => self.tablet_device_added(&device),
+            InputEvent::DeviceRemoved { device } => self.tablet_device_removed(&device),
+            InputEvent::TabletToolAxis { event } => self.tablet_tool_axis::<B>(&event),
+            InputEvent::TabletToolProximity { event } => self.tablet_tool_proximity::<B>(&event),
+            InputEvent::TabletToolTip { event } => self.tablet_tool_tip::<B>(&event),
+            InputEvent::TabletToolButton { event } => self.tablet_tool_button::<B>(&event),
 
             InputEvent::PointerButton { event } => {
                 self.pointer_button(event.button_code(), event.state(), event.time());

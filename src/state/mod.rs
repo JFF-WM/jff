@@ -36,6 +36,7 @@ use smithay::wayland::alpha_modifier::AlphaModifierState;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::single_pixel_buffer::SinglePixelBufferState;
 use smithay::wayland::cursor_shape::CursorShapeManagerState;
+use smithay::wayland::tablet_manager::TabletManagerState;
 use smithay::wayland::compositor::{
     add_blocker, add_pre_commit_hook, get_parent, with_states, BufferAssignment,
     CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
@@ -175,6 +176,8 @@ pub struct JffState {
     pub pointer_constraints_state: PointerConstraintsState,
     /// wp_cursor_shape_v1: clients ask for a named cursor, which jff draws at its own size.
     pub cursor_shape_manager_state: CursorShapeManagerState,
+    /// zwp_tablet_manager_v2: pens and tablets (pressure, tilt, eraser) for clients that ask.
+    pub tablet_manager_state: TabletManagerState,
     pub relative_pointer_manager_state: RelativePointerManagerState,
     /// wp_presentation: the global needs no handler, feedback is answered in the backends (see
     /// `presentation.rs`).
@@ -351,6 +354,7 @@ impl JffState {
         // Without this global, GTK draws its own cursor at the size from its own settings
         // (GSettings), which can differ from jff's XCURSOR_SIZE and look bigger.
         let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&display_handle);
+        let tablet_manager_state = TabletManagerState::new::<Self>(&display_handle);
         let relative_pointer_manager_state =
             RelativePointerManagerState::new::<Self>(&display_handle);
 
@@ -500,6 +504,7 @@ impl JffState {
             viewporter_state,
             pointer_constraints_state,
             cursor_shape_manager_state,
+            tablet_manager_state,
             relative_pointer_manager_state,
             presentation_state,
             fifo_manager_state,
