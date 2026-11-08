@@ -6,6 +6,7 @@ pub mod content_type;
 pub mod drm_lease;
 pub mod ext_foreign_toplevel;
 pub mod foreign_toplevel;
+pub mod gamma_control;
 pub mod idle;
 pub mod image_copy;
 pub mod layer_shell;

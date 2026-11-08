@@ -222,6 +222,8 @@ struct TtyOutput {
     content_game: bool,
     /// Curves from the ICC profile named in the config, if any.
     gamma: Option<crate::feature::icc::GammaTable>,
+    /// Curves a client set with wlr-gamma-control, they win over `gamma`.
+    client_gamma: Option<crate::feature::icc::GammaTable>,
     /// `gamma` hasn't reached the display yet (see [`Tty::apply_gamma`]).
     gamma_pending: bool,
     /// The display's gamma table was written, so clear it if the profile goes away.
@@ -366,16 +368,10 @@ struct DrmColorLut {
     reserved: u16,
 }
 
-/// Set the CRTC gamma table, or clear it with `None`. The hardware applies it at scanout, so
-/// it affects everything on the monitor.
-fn set_gamma(
-    drm: &DrmDevice,
-    crtc: crtc::Handle,
-    table: Option<&crate::feature::icc::GammaTable>,
-) -> anyhow::Result<()> {
-    let props = drm
-        .get_properties(crtc)
-        .context("error reading the CRTC properties")?;
+/// The CRTC's `GAMMA_LUT` property and how many entries the table has, or `None` when the GPU
+/// has no usable table.
+fn crtc_gamma_property(drm: &DrmDevice, crtc: crtc::Handle) -> Option<(property::Handle, usize)> {
+    let props = drm.get_properties(crtc).ok()?;
     let (handles, values) = props.as_props_and_values();
     let mut lut_property = None;
     let mut lut_size = 0usize;
@@ -389,7 +385,17 @@ fn set_gamma(
             _ => {}
         }
     }
-    let Some(lut_property) = lut_property.filter(|_| lut_size > 1) else {
+    lut_property.filter(|_| lut_size > 1).map(|p| (p, lut_size))
+}
+
+/// Set the CRTC gamma table, or clear it with `None`. The hardware applies it at scanout, so
+/// it affects everything on the monitor.
+fn set_gamma(
+    drm: &DrmDevice,
+    crtc: crtc::Handle,
+    table: Option<&crate::feature::icc::GammaTable>,
+) -> anyhow::Result<()> {
+    let Some((lut_property, lut_size)) = crtc_gamma_property(drm, crtc) else {
         bail!("this GPU has no gamma table for the monitor");
     };
 
@@ -827,6 +833,7 @@ impl Tty {
             retry_pending: false,
             last_vblank: None,
             gamma: None,
+            client_gamma: None,
             gamma_pending: false,
             gamma_applied: false,
             powered_off: false,
@@ -868,11 +875,12 @@ impl Tty {
                 continue;
             }
             lit.gamma_pending = false;
-            if lit.gamma.is_none() && !lit.gamma_applied {
+            let wanted = lit.client_gamma.as_ref().or(lit.gamma.as_ref());
+            if wanted.is_none() && !lit.gamma_applied {
                 continue;
             }
-            match set_gamma(drm, crtc, lit.gamma.as_ref()) {
-                Ok(()) => lit.gamma_applied = lit.gamma.is_some(),
+            match set_gamma(drm, crtc, wanted) {
+                Ok(()) => lit.gamma_applied = wanted.is_some(),
                 Err(err) => tracing::warn!(
                     "monitor {}: cannot set the calibration curves: {err:#}",
                     lit.output.name()
@@ -1029,6 +1037,35 @@ impl JffState {
                 .is_none_or(|lit| !lit.powered_off),
             _ => true,
         }
+    }
+
+    /// Entries per channel of `output`'s gamma table, `None` when it has none (winit, not lit,
+    /// no `GAMMA_LUT`).
+    pub fn output_gamma_size(&self, output: &Output) -> Option<u32> {
+        let Backend::Tty(tty) = &self.backend else {
+            return None;
+        };
+        let (&crtc, _) = tty.outputs.iter().find(|(_, lit)| lit.output == *output)?;
+        crtc_gamma_property(&tty.drm, crtc).map(|(_, size)| size as u32)
+    }
+
+    /// Use `table` on `output` instead of the config's ICC profile, or go back to the profile
+    /// with `None`. Reaches the display after the next frame. False when the monitor is gone.
+    pub fn set_client_gamma(
+        &mut self,
+        output: &Output,
+        table: Option<crate::feature::icc::GammaTable>,
+    ) -> bool {
+        let Backend::Tty(tty) = &mut self.backend else {
+            return false;
+        };
+        let Some(lit) = tty.outputs.values_mut().find(|lit| lit.output == *output) else {
+            return false;
+        };
+        lit.client_gamma = table;
+        lit.gamma_pending = true;
+        tty.apply_gamma();
+        true
     }
 
     /// False when it can't be done (winit, another VT in front, no DPMS property).

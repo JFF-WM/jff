@@ -31,6 +31,8 @@ pub enum Kind {
     Vcgt,
     /// Built from the panel's tone curves (`rTRC` / `gTRC` / `bTRC`).
     ToneCurves,
+    /// Set by a client (wlr-gamma-control).
+    Client,
 }
 
 impl GammaTable {
@@ -39,6 +41,7 @@ impl GammaTable {
         match self.kind {
             Kind::Vcgt => "calibration curves (vcgt)",
             Kind::ToneCurves => "panel tone curves (TRC)",
+            Kind::Client => "curves set by a client",
         }
     }
 
