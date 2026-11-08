@@ -4,11 +4,14 @@
 //!
 //! Smithay does the protocol, this file says what a capture is.
 //!
-//! Sources: a client can capture a monitor. Capturing a single window needs
-//! `ext-foreign-toplevel-list`, which jff doesn't have, so the toplevel source manager isn't
-//! advertised.
+//! Sources (`ext_image_capture_source_v1`): a client can capture a monitor, or a single window
+//! it got from `ext-foreign-toplevel-list` (see `ext_foreign_toplevel.rs`). A window source
+//! stands for the view whose identifier is `jff-<view id>`. Its picture is the window alone on
+//! a transparent background, same as `JffState::capture_window` in `screenshot.rs`, wherever
+//! the window is (other workspace, covered by another window). The session ends when the
+//! window closes.
 //!
-//! Pictures: a frame is a render of the monitor into an offscreen texture, read back and written
+//! Pictures: a frame is a render of the monitor (or window) into an offscreen texture, read back and written
 //! into the client's `wl_shm` buffer. Same as `JffState::capture_output` in `screenshot.rs`, so a
 //! capture shows exactly what a screenshot shows (no overview). Buffers offered: `Argb8888` and
 //! `Xrgb8888`. No dmabuf.
@@ -20,21 +23,25 @@
 //! and a change arrives with the next event (a commit, a vblank, input). The whole picture is
 //! reported as damaged.
 //!
-//! Cursor: `paint_cursors` is honored on the TTY backend (where jff draws the cursor). Cursor
+//! Cursor: `paint_cursors` is honored for monitors on the TTY backend (where jff draws the
+//! cursor), a window picture never has one. Cursor
 //! capture sessions (`create_pointer_cursor_session`) aren't supported: clients get a session
 //! that never produces anything and fall back to painting the cursor.
 //!
-//! Sessions end when the monitor goes away or is switched off. A mode change sends new buffer
-//! constraints and fails the frame in flight with `buffer_constraints`.
+//! Sessions end when the monitor goes away or is switched off. A mode change (or a window
+//! resize) sends new buffer constraints and fails the frame in flight with `buffer_constraints`.
 
+use smithay::desktop::Window;
 use smithay::output::{Output, WeakOutput};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::utils::{Buffer as BufferCoords, IsAlive, Rectangle, Size, Transform};
+use smithay::wayland::foreign_toplevel_list::ForeignToplevelHandle;
 use smithay::wayland::image_capture_source::{
     ImageCaptureSource, ImageCaptureSourceHandler, ImageCaptureSourceState,
-    OutputCaptureSourceHandler, OutputCaptureSourceState,
+    OutputCaptureSourceHandler, OutputCaptureSourceState, ToplevelCaptureSourceHandler,
+    ToplevelCaptureSourceState,
 };
 use smithay::wayland::image_copy_capture::{
     BufferConstraints, CaptureFailureReason, Frame, FrameRef, ImageCopyCaptureHandler,
@@ -43,6 +50,7 @@ use smithay::wayland::image_copy_capture::{
 use smithay::wayland::shm::with_buffer_contents_mut;
 
 use crate::feature::screenshot::Captured;
+use crate::ipc::ViewId;
 use crate::protocol::presentation::monotonic_now;
 use crate::state::JffState;
 
@@ -62,6 +70,7 @@ pub struct ImageCopy {
     #[allow(dead_code)]
     image_capture_source: ImageCaptureSourceState,
     output_capture_source: OutputCaptureSourceState,
+    toplevel_capture_source: ToplevelCaptureSourceState,
     image_copy_capture: ImageCopyCaptureState,
     sessions: Vec<CaptureSession>,
 }
@@ -72,21 +81,36 @@ impl ImageCopy {
         Self {
             image_capture_source: ImageCaptureSourceState::new(),
             output_capture_source: OutputCaptureSourceState::new::<JffState>(display),
+            toplevel_capture_source: ToplevelCaptureSourceState::new::<JffState>(display),
             image_copy_capture: ImageCopyCaptureState::new::<JffState>(display),
             sessions: Vec::new(),
         }
     }
 }
 
+/// What a capture session is of.
+enum Target {
+    Output(Output),
+    Window(Window),
+}
+
+/// Set on a source made for a window: the view id (see `ViewId`).
+struct ToplevelSourceId(u64);
+
+/// What a client has to allocate for pictures of this `size`. No dmabuf: the picture is read
+/// back to memory anyway.
+fn shm_constraints(size: (i32, i32)) -> BufferConstraints {
+    BufferConstraints {
+        size: size.into(),
+        shm: vec![wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888],
+        dma: None,
+    }
+}
+
 /// What a client has to allocate to capture `output`, or `None` when it has no mode (is off).
 fn output_constraints(output: &Output) -> Option<BufferConstraints> {
     let mode = output.current_mode()?;
-    Some(BufferConstraints {
-        size: (mode.size.w, mode.size.h).into(),
-        shm: vec![wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888],
-        // No dmabuf: the picture is read back to memory anyway.
-        dma: None,
-    })
+    Some(shm_constraints((mode.size.w, mode.size.h)))
 }
 
 /// Write `picture` (RGBA) into shm buffer `buffer`, as `Argb8888`/`Xrgb8888` (which in memory
@@ -120,10 +144,33 @@ fn write_shm(buffer: &WlBuffer, picture: &Captured) -> Result<(), String> {
 }
 
 impl JffState {
-    /// The monitor a capture source stands for, if it's still there.
-    fn source_output(&self, source: &ImageCaptureSource) -> Option<Output> {
-        let output = source.user_data().get::<WeakOutput>()?.upgrade()?;
-        self.outputs.iter().find(|o| **o == output).cloned()
+    /// The monitor or window a capture source stands for, if it's still there.
+    fn source_target(&self, source: &ImageCaptureSource) -> Option<Target> {
+        if let Some(weak) = source.user_data().get::<WeakOutput>() {
+            let output = weak.upgrade()?;
+            return self
+                .outputs
+                .iter()
+                .find(|o| **o == output)
+                .cloned()
+                .map(Target::Output);
+        }
+        let id = source.user_data().get::<ToplevelSourceId>()?.0;
+        self.desk
+            .find_by(|w| w.user_data().get::<ViewId>() == Some(&ViewId(id)))
+            .map(|entry| Target::Window(entry.window.clone()))
+    }
+
+    /// Buffer constraints for `target`, or `None` when there is nothing to show (a monitor
+    /// that is off, a window with no size yet).
+    fn target_constraints(&self, target: &Target) -> Option<BufferConstraints> {
+        match target {
+            Target::Output(output) => output_constraints(output),
+            Target::Window(window) => {
+                let (_, size) = self.window_capture_size(window).ok()?;
+                Some(shm_constraints((size.w, size.h)))
+            }
+        }
     }
 
     /// Answer the frames clients wait for. Runs when a frame is asked for and after every
@@ -143,14 +190,14 @@ impl JffState {
         if !entry.session.alive() {
             return false;
         }
-        let Some(output) = self.source_output(&entry.session.source()) else {
+        let Some(target) = self.source_target(&entry.session.source()) else {
             return false;
         };
-        let Some(wanted) = output_constraints(&output) else {
+        let Some(wanted) = self.target_constraints(&target) else {
             return false;
         };
 
-        // The monitor changed mode: clients have to allocate new buffers.
+        // The monitor changed mode or the window its size: clients have to allocate new buffers.
         let size_ok = entry
             .session
             .current_constraints()
@@ -167,7 +214,11 @@ impl JffState {
         let Some(frame) = entry.pending.take() else {
             return true;
         };
-        let picture = match self.capture_output(&output, entry.session.draw_cursor()) {
+        let drawn = match &target {
+            Target::Output(output) => self.capture_output(output, entry.session.draw_cursor()),
+            Target::Window(window) => self.capture_window(window),
+        };
+        let picture = match drawn {
             Ok(picture) => picture,
             Err(why) => {
                 tracing::warn!("image-copy-capture: {why}");
@@ -214,13 +265,36 @@ impl OutputCaptureSourceHandler for JffState {
     }
 }
 
+impl ToplevelCaptureSourceHandler for JffState {
+    fn toplevel_capture_source_state(&mut self) -> &mut ToplevelCaptureSourceState {
+        &mut self.image_copy.toplevel_capture_source
+    }
+
+    // The identifier is `jff-<view id>`, see `ext_foreign_toplevel.rs`.
+    fn toplevel_source_created(
+        &mut self,
+        source: ImageCaptureSource,
+        toplevel: ForeignToplevelHandle,
+    ) {
+        let id = toplevel
+            .identifier()
+            .strip_prefix("jff-")
+            .and_then(|id| id.parse::<u64>().ok());
+        if let Some(id) = id {
+            source
+                .user_data()
+                .insert_if_missing(|| ToplevelSourceId(id));
+        }
+    }
+}
+
 impl ImageCopyCaptureHandler for JffState {
     fn image_copy_capture_state(&mut self) -> &mut ImageCopyCaptureState {
         &mut self.image_copy.image_copy_capture
     }
 
     fn capture_constraints(&mut self, source: &ImageCaptureSource) -> Option<BufferConstraints> {
-        output_constraints(&self.source_output(source)?)
+        self.target_constraints(&self.source_target(source)?)
     }
 
     fn new_session(&mut self, session: Session) {

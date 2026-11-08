@@ -357,9 +357,11 @@ impl JffState {
         )
     }
 
-    /// A picture of `window` alone (its geometry, with its menus) on a transparent background.
-    /// Pixels are premultiplied.
-    pub(crate) fn capture_window(&mut self, window: &Window) -> Result<Captured, String> {
+    /// Scale of the monitor `window` is on and the pixel size of a picture of it.
+    pub(crate) fn window_capture_size(
+        &self,
+        window: &Window,
+    ) -> Result<(f64, Size<i32, Physical>), String> {
         let geo = window.geometry();
         if geo.size.w <= 0 || geo.size.h <= 0 {
             return Err("the window has nothing on screen yet".to_string());
@@ -375,9 +377,20 @@ impl JffState {
             .iter()
             .find(|output| output_rect(output) == on)
             .map_or(1.0, |output| output.current_scale().fractional_scale());
-        let scale = Scale::from(scale_factor);
+        let size: Size<i32, Physical> = geo
+            .size
+            .to_f64()
+            .to_physical(Scale::from(scale_factor))
+            .to_i32_round();
+        Ok((scale_factor, size))
+    }
 
-        let size: Size<i32, Physical> = geo.size.to_f64().to_physical(scale).to_i32_round();
+    /// A picture of `window` alone (its geometry, with its menus) on a transparent background.
+    /// Pixels are premultiplied.
+    pub(crate) fn capture_window(&mut self, window: &Window) -> Result<Captured, String> {
+        let geo = window.geometry();
+        let (scale_factor, size) = self.window_capture_size(window)?;
+        let scale = Scale::from(scale_factor);
         // Draw the window with its geometry corner at (0, 0).
         let loc: Point<i32, Physical> =
             Point::<i32, Logical>::from((-geo.loc.x, -geo.loc.y)).to_physical_precise_round(scale);
