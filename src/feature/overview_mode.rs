@@ -79,10 +79,6 @@ const MARGIN: i32 = 150;
 const GAP: i32 = 24;
 /// Open and close animation length.
 const ANIMATION: Duration = Duration::from_millis(180);
-/// Border width around the selected thumbnail.
-const HIGHLIGHT_BORDER: i32 = 4;
-/// Colour of the outline, straight (not premultiplied) alpha: it is translucent.
-const HIGHLIGHT_COLOR: [f32; 4] = [0.35, 0.55, 0.95, 0.6];
 /// How far the pointer moves with the left button held before it's a drag, not a click.
 const DRAG_THRESHOLD: f64 = 8.0;
 
@@ -340,6 +336,9 @@ pub struct OverviewPlan {
     badge_alpha: f32,
     /// The workspace wall, while a thumbnail is dragged and `workspace-wall` is on.
     pub wall: Option<WallPlan>,
+    /// Width and colour (straight alpha) of the outline of the selected thumbnail, from the
+    /// `overview` block of the config.
+    outline: (i32, [f32; 4]),
     highlight: Id,
 }
 
@@ -572,7 +571,12 @@ pub fn overview_elements(
     // The highlight is pushed last so it's drawn behind: only its rim shows. It is a rounded
     // outline following the thumbnail's corners (`radius` shrunk with the thumbnail, fullscreen
     // windows are square), hollow so a translucent window shows no tint behind it.
-    if let Some((window, thumb)) = plan.selected.and_then(|i| plan.thumbs.get(i)) {
+    let (outline_width, outline_color) = plan.outline;
+    if let Some((window, thumb)) = plan
+        .selected
+        .and_then(|i| plan.thumbs.get(i))
+        .filter(|_| outline_width > 0)
+    {
         let radius = if is_fullscreen(window) {
             0
         } else {
@@ -582,29 +586,24 @@ pub fn overview_elements(
             (thumb.pos.0 - origin.x, thumb.pos.1 - origin.y).into(),
             (thumb.size.0, thumb.size.1).into(),
         );
-        if let Some(ring) = ring_element(
-            renderer,
-            thumb_rect,
-            HIGHLIGHT_BORDER,
-            radius,
-            HIGHLIGHT_COLOR,
-        ) {
+        if let Some(ring) = ring_element(renderer, thumb_rect, outline_width, radius, outline_color)
+        {
             out.push(JffElement::Ring(ring));
         } else {
             // The outline shader is unavailable: a plain rectangle behind the thumbnail.
             let geometry = Rectangle::<i32, Physical>::new(
                 (
-                    thumb.pos.0 - origin.x - HIGHLIGHT_BORDER,
-                    thumb.pos.1 - origin.y - HIGHLIGHT_BORDER,
+                    thumb.pos.0 - origin.x - outline_width,
+                    thumb.pos.1 - origin.y - outline_width,
                 )
                     .into(),
                 (
-                    thumb.size.0 + 2 * HIGHLIGHT_BORDER,
-                    thumb.size.1 + 2 * HIGHLIGHT_BORDER,
+                    thumb.size.0 + 2 * outline_width,
+                    thumb.size.1 + 2 * outline_width,
                 )
                     .into(),
             );
-            let [r, g, b, a] = HIGHLIGHT_COLOR;
+            let [r, g, b, a] = outline_color;
             out.push(JffElement::Solid(SolidColorRenderElement::new(
                 plan.highlight.clone(),
                 geometry,
@@ -636,7 +635,7 @@ fn wall_elements(
             (cell.2, cell.3).into(),
         );
         let outline = if wall.hover == Some(i) {
-            Some((HIGHLIGHT_BORDER, HIGHLIGHT_COLOR))
+            Some(plan.outline).filter(|(width, _)| *width > 0)
         } else if i == wall.current {
             Some((2, WALL_CURRENT))
         } else {
@@ -1805,6 +1804,10 @@ impl JffState {
             badges,
             badge_alpha: t as f32,
             wall,
+            outline: {
+                let config = self.config.overview();
+                (config.selection_width, config.selection_color)
+            },
             highlight,
         })
     }

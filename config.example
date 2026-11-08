@@ -44,6 +44,12 @@ window-animations {
     close-ms 80
 }
 
+// Overview and switcher: how the selected thumbnail is outlined.
+overview {
+    selection-color "#333567"
+    selection-width 3
+}
+
 // A second window-animations block is ignored (only the first one counts), so this one is
 // kept as a commented alternative:
 // window-animations {

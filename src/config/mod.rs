@@ -5,7 +5,7 @@
 //!
 //! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9, per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
 //! `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
-//! `keyboard { … }`, `blur { … }`, `osd { … }`, `switcher { … }`, `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
+//! `keyboard { … }`, `blur { … }`, `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
 //! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
@@ -125,6 +125,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "blur",
     "osd",
     "switcher",
+    "overview",
     "workspace-wall",
     "hot-corner",
     "autostart",
@@ -449,6 +450,30 @@ impl Default for SwitcherConfig {
     }
 }
 
+/// Default width (px) and colour of the outline around the selected thumbnail of the overview.
+/// The colour is straight (not premultiplied) alpha: it is translucent.
+pub const DEFAULT_SELECTION_WIDTH: i32 = 4;
+pub const DEFAULT_SELECTION_COLOR: [f32; 4] = [0.35, 0.55, 0.95, 0.6];
+
+/// The `overview { … }` block: how the overview and the switcher mark the selected thumbnail.
+/// `selection-width` is the outline's width in pixels (0 draws none), `selection-color` its
+/// colour (`#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`). The square of the workspace wall the
+/// pointer is over uses the same outline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverviewConfig {
+    pub selection_width: i32,
+    pub selection_color: [f32; 4],
+}
+
+impl Default for OverviewConfig {
+    fn default() -> Self {
+        Self {
+            selection_width: DEFAULT_SELECTION_WIDTH,
+            selection_color: DEFAULT_SELECTION_COLOR,
+        }
+    }
+}
+
 /// Default height (px) of a square of the workspace wall, and its bounds.
 pub const DEFAULT_WALL_HEIGHT: i32 = 96;
 pub const MIN_WALL_HEIGHT: i32 = 32;
@@ -743,6 +768,7 @@ pub struct Config {
     blur_ignore_layers: Vec<String>,
     osd: OsdConfig,
     switcher: SwitcherConfig,
+    overview: OverviewConfig,
     workspace_wall: Option<WorkspaceWallConfig>,
     hot_corner: Option<HotCorner>,
     autostart: Vec<Action>,
@@ -789,6 +815,7 @@ impl Default for Config {
                 blur_ignore_layers: Vec::new(),
                 osd: OsdConfig::default(),
                 switcher: SwitcherConfig::default(),
+                overview: OverviewConfig::default(),
                 workspace_wall: None,
                 hot_corner: None,
                 autostart: Vec::new(),
@@ -1001,6 +1028,11 @@ impl Config {
             Some(node) => parse_switcher(node).context("in switcher")?,
         };
 
+        let overview = match doc.get("overview") {
+            None => OverviewConfig::default(),
+            Some(node) => parse_overview(node).context("in overview")?,
+        };
+
         let hot_corner = match doc.get("hot-corner") {
             None => None,
             Some(node) => parse_hot_corner(node).context("in hot-corner")?,
@@ -1052,6 +1084,7 @@ impl Config {
             blur_ignore_layers,
             osd,
             switcher,
+            overview,
             workspace_wall,
             hot_corner,
             autostart,
@@ -1118,6 +1151,10 @@ impl Config {
 
     pub fn switcher(&self) -> &SwitcherConfig {
         &self.switcher
+    }
+
+    pub fn overview(&self) -> &OverviewConfig {
+        &self.overview
     }
 
     /// The workspace wall of the overview's drag, `None` when it is off (the default).
@@ -1660,6 +1697,19 @@ fn parse_switcher(node: &KdlNode) -> anyhow::Result<SwitcherConfig> {
             }
             "slide-ms" => config.slide_ms = u32::try_from(int_arg(child, MAX_SWITCHER_SLIDE_MS)?)?,
             other => bail!("unknown switcher setting {other:?}"),
+        }
+    }
+    Ok(config)
+}
+
+/// The `overview { … }` block.
+fn parse_overview(node: &KdlNode) -> anyhow::Result<OverviewConfig> {
+    let mut config = OverviewConfig::default();
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "selection-width" => config.selection_width = int_arg(child, MAX_BORDER_WIDTH)?,
+            "selection-color" => config.selection_color = parse_color(&string_arg(child)?)?,
+            other => bail!("unknown overview setting {other:?}"),
         }
     }
     Ok(config)

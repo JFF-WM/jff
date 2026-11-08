@@ -11,8 +11,9 @@ use jff_wm::config::{
     closest, edit_distance, parse_color, Action, BorderAnimation, Config, ConfigWatch, FileStamp,
     HotCorner, KeyboardConfig, ModeRequest, ScreenshotConfig, Vrr, DEFAULT_BORDER_FADE_MS,
     DEFAULT_BORDER_PERIOD_MS, DEFAULT_BORDER_WIDTH, DEFAULT_CONFIG, DEFAULT_REPEAT_DELAY,
-    DEFAULT_REPEAT_RATE, DEFAULT_SWITCHER_SLIDE_MS, DEFAULT_WORKSPACES, MAX_BORDER_PERIOD_MS,
-    MAX_BORDER_WIDTH, MAX_GAPS, MAX_RADIUS, TOP_LEVEL_NODES,
+    DEFAULT_REPEAT_RATE, DEFAULT_SELECTION_COLOR, DEFAULT_SELECTION_WIDTH,
+    DEFAULT_SWITCHER_SLIDE_MS, DEFAULT_WORKSPACES, MAX_BORDER_PERIOD_MS, MAX_BORDER_WIDTH,
+    MAX_GAPS, MAX_RADIUS, TOP_LEVEL_NODES,
 };
 use jff_wm::config::{RuleOutput, WindowFacts, WindowMatch};
 use jff_wm::desk::{Goto, Side};
@@ -870,6 +871,33 @@ fn switcher_settings_are_parsed() {
     let config = Config::parse("switcher { slide-ms 0; }").unwrap();
     assert_eq!(config.switcher().thumbnail_height, None);
     assert_eq!(config.switcher().slide_ms, 0);
+}
+
+#[test]
+fn overview_selection_defaults_to_the_old_look() {
+    let config = Config::default();
+    assert_eq!(config.overview().selection_width, DEFAULT_SELECTION_WIDTH);
+    assert_eq!(config.overview().selection_color, DEFAULT_SELECTION_COLOR);
+}
+
+#[test]
+fn overview_selection_is_parsed() {
+    let config =
+        Config::parse("overview { selection-width 6; selection-color \"#ff0000\"; }").unwrap();
+    assert_eq!(config.overview().selection_width, 6);
+    assert_eq!(config.overview().selection_color, [1.0, 0.0, 0.0, 1.0]);
+    // One setting alone leaves the other at its default.
+    let config = Config::parse("overview { selection-width 0; }").unwrap();
+    assert_eq!(config.overview().selection_width, 0);
+    assert_eq!(config.overview().selection_color, DEFAULT_SELECTION_COLOR);
+}
+
+#[test]
+fn overview_rejects_bad_values() {
+    assert!(Config::parse("overview { selection-width -1; }").is_err());
+    assert!(Config::parse("overview { selection-width 1000; }").is_err());
+    assert!(Config::parse("overview { selection-color \"red\"; }").is_err());
+    assert!(Config::parse("overview { nonsense 1; }").is_err());
 }
 
 #[test]
