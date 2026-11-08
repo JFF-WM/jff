@@ -20,5 +20,6 @@ pub mod tearing_control;
 pub mod text_input;
 pub mod toplevel_icon;
 pub mod toplevel_tag;
+pub mod virtual_pointer;
 pub mod workspace;
 pub mod xdg_session_bindings;

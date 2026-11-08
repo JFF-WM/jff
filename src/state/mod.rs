@@ -111,6 +111,7 @@ use crate::protocol::session_management::SessionManagement;
 use crate::protocol::tearing_control::TearingControlState;
 use crate::protocol::text_input::TextInput;
 use crate::protocol::toplevel_tag::ToplevelTagManager;
+use crate::protocol::virtual_pointer::VirtualPointerManager;
 use crate::protocol::workspace::ExtWorkspace;
 use crate::render::cursor::CursorManager;
 
@@ -264,6 +265,8 @@ pub struct JffState {
     pub pointer_warp: PointerWarp,
     /// xdg-toplevel-tag: window tags for `window-rule` (`protocol/toplevel_tag.rs`).
     pub toplevel_tag_manager: ToplevelTagManager,
+    /// wlr-virtual-pointer: clients that move the pointer and click (`protocol/virtual_pointer.rs`).
+    pub virtual_pointer_manager: VirtualPointerManager,
     /// wp-color-representation: how a surface's buffer values are encoded, stored only so far
     /// (`protocol/color_representation.rs`).
     pub color_representation_manager: ColorRepresentationManager,
@@ -468,6 +471,7 @@ impl JffState {
         let output_power = OutputPower::new(&display_handle, backend.is_tty());
         let pointer_warp = PointerWarp::new(&display_handle);
         let toplevel_tag_manager = ToplevelTagManager::new(&display_handle);
+        let virtual_pointer_manager = VirtualPointerManager::new(&display_handle);
         let color_representation_manager = ColorRepresentationManager::new(&display_handle);
 
         // wlr-layer-shell: lets bars, launchers, wallpapers, and notification daemons place
@@ -558,6 +562,7 @@ impl JffState {
             output_power,
             pointer_warp,
             toplevel_tag_manager,
+            virtual_pointer_manager,
             color_representation_manager,
             layer_shell_state,
             next_view_id: 1,

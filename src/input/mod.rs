@@ -227,118 +227,12 @@ impl JffState {
                 let (x, y, w, h) = layout::bounds(&rects);
                 let size: Size<i32, Logical> = (w, h).into();
                 let pos = event.position_transformed(size) + Point::from((x as f64, y as f64));
-                let pos: Point<f64, Logical> =
-                    layout::clamp_to_rects((pos.x, pos.y), &self.pointer_bounds()).into();
-                self.check_hot_corner(pos);
-
-                let under = self.pointer_focus_under(pos);
-                let pointer = self.seat.get_pointer().unwrap();
-                pointer.motion(
-                    self,
-                    under,
-                    &MotionEvent {
-                        location: pos,
-                        serial: SERIAL_COUNTER.next_serial(),
-                        time: event.time(),
-                    },
-                );
-                pointer.frame(self);
+                self.pointer_motion_to(pos, event.time());
             }
 
             // Mice and touchpads (libinput) report how far the pointer moved, not where it is.
             InputEvent::PointerMotion { event } => {
-                let rects = self.pointer_bounds();
-                let pointer = self.seat.get_pointer().unwrap();
-                let cur = pointer.current_location();
-                let under = self.pointer_focus_under(cur);
-
-                // Is the surface under the pointer holding an active lock or confine?
-                let mut locked = false;
-                let mut confined = false;
-                let mut confine_region = None;
-                if let Some((surface, origin)) = under.as_ref() {
-                    with_pointer_constraint(surface, &pointer, |constraint| {
-                        if let Some(constraint) = constraint {
-                            if !constraint.is_active() {
-                                return;
-                            }
-                            let local = (cur - *origin).to_i32_round();
-                            if !constraint.region().map_or(true, |r| r.contains(local)) {
-                                return;
-                            }
-                            match &*constraint {
-                                PointerConstraint::Locked(_) => locked = true,
-                                PointerConstraint::Confined(c) => {
-                                    confined = true;
-                                    confine_region = c.region().cloned();
-                                }
-                            }
-                        }
-                    });
-                }
-
-                // Raw motion goes to zwp_relative_pointer, whatever the cursor does.
-                pointer.relative_motion(
-                    self,
-                    under.clone(),
-                    &RelativeMotionEvent {
-                        delta: event.delta(),
-                        delta_unaccel: event.delta_unaccel(),
-                        time: event.time(),
-                    },
-                );
-
-                // Locked: the cursor stays put, the client only sees relative motion.
-                if locked {
-                    pointer.frame(self);
-                    return;
-                }
-
-                let pos = cur + event.delta();
-                let pos: Point<f64, Logical> =
-                    layout::clamp_to_rects((pos.x, pos.y), &rects).into();
-                let pos = self.hot_corner_barrier(cur, pos);
-                let new_under = self.pointer_focus_under(pos);
-
-                // Confined: never leave the surface (or the confine region).
-                if confined {
-                    if let Some((surface, origin)) = under.as_ref() {
-                        let same = new_under.as_ref().map(|(s, _)| s) == Some(surface);
-                        let inside = confine_region
-                            .as_ref()
-                            .map_or(true, |r| r.contains((pos - *origin).to_i32_round()));
-                        if !same || !inside {
-                            pointer.frame(self);
-                            return;
-                        }
-                    }
-                }
-
-                self.check_hot_corner(pos);
-                pointer.motion(
-                    self,
-                    new_under.clone(),
-                    &MotionEvent {
-                        location: pos,
-                        serial: SERIAL_COUNTER.next_serial(),
-                        time: event.time(),
-                    },
-                );
-                pointer.frame(self);
-
-                // The pointer reached a surface that already asked for a lock: engage it.
-                if let Some((surface, origin)) = new_under {
-                    with_pointer_constraint(&surface, &pointer, |constraint| {
-                        if let Some(constraint) = constraint {
-                            if !constraint.is_active() {
-                                let local = (pos - origin).to_i32_round();
-                                if constraint.region().map_or(true, |r| r.contains(local)) {
-                                    constraint.activate();
-                                }
-                            }
-                        }
-                    });
-                }
+                self.pointer_motion_relative(event.delta(), event.delta_unaccel(), event.time());
             }
 
             // Pens and tablets (zwp_tablet_manager_v2), see `tablet.rs`.
@@ -382,6 +276,130 @@ impl JffState {
 
             _ => {}
         }
+    }
+
+    /// The pointer moved by `delta`, as a mouse or touchpad reports it (and as a
+    /// `zwlr_virtual_pointer_v1` does): pointer constraints, the hot-corner barrier and the
+    /// clients under the pointer are handled here.
+    #[allow(clippy::clone_on_copy)]
+    pub(crate) fn pointer_motion_relative(
+        &mut self,
+        delta: Point<f64, Logical>,
+        delta_unaccel: Point<f64, Logical>,
+        time: InputTime,
+    ) {
+        let rects = self.pointer_bounds();
+        let pointer = self.seat.get_pointer().unwrap();
+        let cur = pointer.current_location();
+        let under = self.pointer_focus_under(cur);
+
+        // Is the surface under the pointer holding an active lock or confine?
+        let mut locked = false;
+        let mut confined = false;
+        let mut confine_region = None;
+        if let Some((surface, origin)) = under.as_ref() {
+            with_pointer_constraint(surface, &pointer, |constraint| {
+                if let Some(constraint) = constraint {
+                    if !constraint.is_active() {
+                        return;
+                    }
+                    let local = (cur - *origin).to_i32_round();
+                    if !constraint.region().map_or(true, |r| r.contains(local)) {
+                        return;
+                    }
+                    match &*constraint {
+                        PointerConstraint::Locked(_) => locked = true,
+                        PointerConstraint::Confined(c) => {
+                            confined = true;
+                            confine_region = c.region().cloned();
+                        }
+                    }
+                }
+            });
+        }
+
+        // Raw motion goes to zwp_relative_pointer, whatever the cursor does.
+        pointer.relative_motion(
+            self,
+            under.clone(),
+            &RelativeMotionEvent {
+                delta,
+                delta_unaccel,
+                time: time.clone(),
+            },
+        );
+
+        // Locked: the cursor stays put, the client only sees relative motion.
+        if locked {
+            pointer.frame(self);
+            return;
+        }
+
+        let pos = cur + delta;
+        let pos: Point<f64, Logical> = layout::clamp_to_rects((pos.x, pos.y), &rects).into();
+        let pos = self.hot_corner_barrier(cur, pos);
+        let new_under = self.pointer_focus_under(pos);
+
+        // Confined: never leave the surface (or the confine region).
+        if confined {
+            if let Some((surface, origin)) = under.as_ref() {
+                let same = new_under.as_ref().map(|(s, _)| s) == Some(surface);
+                let inside = confine_region
+                    .as_ref()
+                    .map_or(true, |r| r.contains((pos - *origin).to_i32_round()));
+                if !same || !inside {
+                    pointer.frame(self);
+                    return;
+                }
+            }
+        }
+
+        self.check_hot_corner(pos);
+        pointer.motion(
+            self,
+            new_under.clone(),
+            &MotionEvent {
+                location: pos,
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        pointer.frame(self);
+
+        // The pointer reached a surface that already asked for a lock: engage it.
+        if let Some((surface, origin)) = new_under {
+            with_pointer_constraint(&surface, &pointer, |constraint| {
+                if let Some(constraint) = constraint {
+                    if !constraint.is_active() {
+                        let local = (pos - origin).to_i32_round();
+                        if constraint.region().map_or(true, |r| r.contains(local)) {
+                            constraint.activate();
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    /// The pointer is at `pos` in the shared desktop space (winit, `zwlr_virtual_pointer_v1`
+    /// absolute motion). Kept on a monitor.
+    pub(crate) fn pointer_motion_to(&mut self, pos: Point<f64, Logical>, time: InputTime) {
+        let pos: Point<f64, Logical> =
+            layout::clamp_to_rects((pos.x, pos.y), &self.pointer_bounds()).into();
+        self.check_hot_corner(pos);
+
+        let under = self.pointer_focus_under(pos);
+        let pointer = self.seat.get_pointer().unwrap();
+        pointer.motion(
+            self,
+            under,
+            &MotionEvent {
+                location: pos,
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        pointer.frame(self);
     }
 
     /// A pointer button went down or up: mouse bindings, click-to-focus, window drags, the
