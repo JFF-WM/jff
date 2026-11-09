@@ -445,8 +445,38 @@ impl JffState {
         delta_unaccel: Point<f64, Logical>,
         time: InputTime,
     ) {
-        let rects = self.pointer_bounds();
         let pointer = self.seat.get_pointer().unwrap();
+
+        // Locked to the surface that already has the pointer: the cursor can't move, so skip
+        // the hit-test. Anything that changes who is under the pointer ends the shortcut.
+        if let Some((surface, origin)) = self.locked_pointer_under.clone() {
+            let still_locked = surface.is_alive()
+                && pointer.current_focus().as_ref() == Some(&surface)
+                && !pointer.is_grabbed()
+                && !self.session_locked()
+                && !self.overview_active()
+                && self.screenshot.is_none()
+                && with_pointer_constraint(&surface, &pointer, |constraint| {
+                    constraint.is_some_and(|c| {
+                        c.is_active() && matches!(&*c, PointerConstraint::Locked(_))
+                    })
+                });
+            if still_locked {
+                pointer.relative_motion(
+                    self,
+                    Some((surface, origin)),
+                    &RelativeMotionEvent {
+                        delta,
+                        delta_unaccel,
+                        time,
+                    },
+                );
+                pointer.frame(self);
+                return;
+            }
+            self.locked_pointer_under = None;
+        }
+
         let cur = pointer.current_location();
         let under = self.pointer_focus_under(cur);
 
@@ -488,10 +518,12 @@ impl JffState {
 
         // Locked: the cursor stays put, the client only sees relative motion.
         if locked {
+            self.locked_pointer_under = under;
             pointer.frame(self);
             return;
         }
 
+        let rects = self.pointer_bounds();
         let pos = cur + delta;
         let pos: Point<f64, Logical> = layout::clamp_to_rects((pos.x, pos.y), &rects).into();
         let pos = self.hot_corner_barrier(cur, pos);

@@ -326,6 +326,8 @@ pub struct JffState {
     pub screenshot: Option<crate::feature::screenshot::ScreenshotUi>,
     /// Mouse buttons whose press ran a compositor binding: their release isn't forwarded.
     pub swallowed_buttons: std::collections::HashSet<u32>,
+    /// The surface (and its origin) holding an active pointer lock, kept so mouse motion doesn't hit-test again while the cursor can't move.
+    pub locked_pointer_under: Option<(WlSurface, Point<f64, Logical>)>,
     /// Keys whose press was kept from clients (a binding, the overview): their release is kept
     /// from clients too.
     pub suppressed_keys: std::collections::HashSet<Keycode>,
@@ -624,6 +626,7 @@ impl JffState {
             closing: Vec::new(),
             screenshot: None,
             swallowed_buttons: Default::default(),
+            locked_pointer_under: None,
             suppressed_keys: Default::default(),
             forwarded_keys: Default::default(),
             active_virtual_keymap: None,

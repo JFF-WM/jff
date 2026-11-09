@@ -23,6 +23,9 @@ use crate::state::JffState;
 
 use super::{Backend, BACKGROUND};
 
+/// How often a window hidden behind a covering fullscreen window gets a frame callback.
+const HIDDEN_FRAME_INTERVAL: Duration = Duration::from_secs(1);
+
 pub fn init_winit() -> anyhow::Result<(Backend, WinitEventLoop, Output)> {
     let (backend, winit_loop) =
         winit::init::<GlesRenderer>().map_err(|e| anyhow!("failed to start winit: {e:?}"))?;
@@ -352,17 +355,26 @@ impl JffState {
     pub fn send_frame_callbacks(&self, output: &Output) {
         let rect = output_rect(output);
         let time = self.start_time.elapsed();
+        // Windows behind a fullscreen window that covers the monitor can't be seen: they get a
+        // callback once per `HIDDEN_FRAME_INTERVAL` instead of one per refresh, so they stay
+        // alive without competing with the game for the GPU.
+        let covered = crate::protocol::layer_shell::fullscreen_covers(&self.desk, rect);
+        let mut behind = false;
         for entry in self.desk.top_down() {
             let size = entry.window.geometry().size;
             let area = (entry.pos.0, entry.pos.1, size.w.max(1), size.h.max(1));
             if !layout::intersects(area, rect) {
                 continue;
             }
+            let throttle = if covered && behind {
+                HIDDEN_FRAME_INTERVAL
+            } else {
+                Duration::ZERO
+            };
+            behind = true;
             entry
                 .window
-                .send_frame(output, time, Some(Duration::ZERO), |_, _| {
-                    Some(output.clone())
-                });
+                .send_frame(output, time, Some(throttle), |_, _| Some(output.clone()));
         }
         // layers get callbacks regardless of windows
         for layer in smithay::desktop::layer_map_for_output(output).layers() {
