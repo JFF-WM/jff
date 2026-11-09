@@ -1003,6 +1003,18 @@ fn workspaces_block_rejects_bad_values() {
 }
 
 #[test]
+fn forward_key_takes_one_app_id() {
+    let config =
+        Config::parse(r#"binds { Super+F10 { forward-key "com.obsproject.Studio"; } }"#).unwrap();
+    assert_eq!(
+        config.action_for(&mods(false, false, false, true), Keysym::F10),
+        Some(&Action::ForwardKey("com.obsproject.Studio".to_string())),
+    );
+    assert!(Config::parse("binds { F10 { forward-key; } }").is_err());
+    assert!(Config::parse(r#"binds { F10 { forward-key "a" "b"; } }"#).is_err());
+}
+
+#[test]
 fn workspace_wall_is_off_unless_asked_for() {
     assert!(Config::default().workspace_wall().is_none());
     assert!(Config::parse("gaps 4").unwrap().workspace_wall().is_none());

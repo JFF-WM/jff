@@ -20,7 +20,7 @@ use smithay::input::pointer::{
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{Logical, Point, Size, SERIAL_COUNTER};
+use smithay::utils::{Logical, Point, Serial, Size, SERIAL_COUNTER};
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
 
 use crate::config::{Action, Config, HotCorner};
@@ -48,6 +48,8 @@ enum Bind {
     Screenshot(ScreenshotKey),
     /// Any other key while overview or screenshot is open: nobody gets it.
     Swallow,
+    /// The release of a key a `forward-key` binding handed to this window.
+    ForwardRelease(WlSurface),
 }
 
 /// Run `command` with `args` as a detached child. Also used by the IPC (`spawn` / `spawn-sh`).
@@ -298,6 +300,9 @@ impl JffState {
                     // A key whose press no client saw keeps its release hidden too, or
                     // they'd get a release with no press.
                     let suppressed = state.suppressed_keys.remove(&key_code);
+                    if let Some(surface) = state.forwarded_keys.remove(&key_code) {
+                        return Bind::ForwardRelease(surface);
+                    }
                     // Letting go of Alt picks the window the switcher is on.
                     if state.switcher_released((mods.alt, mods.ctrl, mods.logo)) {
                         return Bind::Overview(OverviewKey::Select);
@@ -395,6 +400,17 @@ impl JffState {
 
         // A compositor shortcut: the focused client never sees it.
         match bind {
+            Bind::Action(Action::ForwardKey(app_id)) => {
+                if let Some(surface) = self.forward_target(&app_id) {
+                    self.forwarded_keys.insert(key_code, surface.clone());
+                    self.forward_key_to(&surface, key_code, key_state, serial, time);
+                }
+                return;
+            }
+            Bind::ForwardRelease(surface) => {
+                self.forward_key_to(&surface, key_code, key_state, serial, time);
+                return;
+            }
             Bind::Action(action) => {
                 self.run_action(action);
                 return;
@@ -669,6 +685,39 @@ impl JffState {
         pointer.frame(self);
     }
 
+    /// The surface of the topmost window whose app id is `app_id`, on any workspace.
+    fn forward_target(&self, app_id: &str) -> Option<WlSurface> {
+        self.desk.all_top_down().find_map(|entry| {
+            let surface = entry.window.toplevel()?.wl_surface();
+            (crate::feature::osd::toplevel_names(surface).0 == app_id).then(|| surface.clone())
+        })
+    }
+
+    /// Give `surface` the keyboard for one key event, then hand it back: the app sees the key
+    /// (with the modifiers held now) while the window the user works in keeps its focus.
+    fn forward_key_to(
+        &mut self,
+        surface: &WlSurface,
+        key_code: Keycode,
+        key_state: KeyState,
+        serial: Serial,
+        time: InputTime,
+    ) {
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        let previous = keyboard.current_focus();
+        if previous.as_ref() == Some(surface) {
+            keyboard.input_forward(self, key_code, key_state, serial, time, false);
+            return;
+        }
+        keyboard.set_focus(self, Some(surface.clone()), SERIAL_COUNTER.next_serial());
+        keyboard.advertise_modifier_state(self);
+        keyboard.input_forward(self, key_code, key_state, serial, time, false);
+        keyboard.set_focus(self, previous, SERIAL_COUNTER.next_serial());
+        keyboard.advertise_modifier_state(self);
+    }
+
     /// Carry out the action of a triggered key binding.
     fn run_action(&mut self, action: Action) {
         match action {
@@ -704,6 +753,8 @@ impl JffState {
                 }
             }
             Action::ToggleShortcutsInhibit => self.toggle_shortcuts_inhibit(),
+            // Handled where the key is, it needs the key and its state.
+            Action::ForwardKey(_) => {}
             Action::Quit => self.loop_signal.stop(),
         }
     }

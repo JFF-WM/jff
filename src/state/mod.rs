@@ -329,6 +329,8 @@ pub struct JffState {
     /// Keys whose press was kept from clients (a binding, the overview): their release is kept
     /// from clients too.
     pub suppressed_keys: std::collections::HashSet<Keycode>,
+    /// Keys a `forward-key` binding handed to a window: the release goes to the same window.
+    pub forwarded_keys: HashMap<Keycode, WlSurface>,
     /// The keymap of a virtual keyboard that is on the seat right now, `None` while the seat
     /// has the configured one (`protocol/virtual_keyboard.rs`).
     pub active_virtual_keymap: Option<Arc<str>>,
@@ -623,6 +625,7 @@ impl JffState {
             screenshot: None,
             swallowed_buttons: Default::default(),
             suppressed_keys: Default::default(),
+            forwarded_keys: Default::default(),
             active_virtual_keymap: None,
             keyboard_focus: KeyboardFocus::Nobody,
             focused_window: None,

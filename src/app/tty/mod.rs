@@ -1649,6 +1649,7 @@ impl JffState {
             self.cancel_screenshot();
             // Releases that happen while another VT has the keyboard never arrive.
             self.suppressed_keys.clear();
+            self.forwarded_keys.clear();
             self.swallowed_buttons.clear();
         }
         let Backend::Tty(tty) = &mut self.backend else {

@@ -111,6 +111,10 @@ binds {
     // Alt+D { spawn "fuzzel", }              // app launcher, needs fuzzel installed
     // Super+L { spawn-sh "swaylock", }       // lock screen, needs swaylock installed
 
+    // global hotkeys for OBS Studio
+    Ctrl+Shift+g { forward-key "com.obsproject.Studio"; }
+    Ctrl+Alt+g { forward-key "com.obsproject.Studio"; }
+
     // Windows
     Alt+M { maximize; }
     Super+F { fullscreen; }

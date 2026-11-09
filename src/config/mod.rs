@@ -7,7 +7,7 @@
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `keyboard { … }`, `blur { … }`, `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
 //! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, the first rule that fits a window applies), and
-//! `binds { "Combo" { action, } }`. Unknown top-level nodes are silently ignored, an
+//! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
 //! Two things that bite when editing the file by hand:
@@ -173,6 +173,9 @@ pub enum Action {
     ScreenshotWindow,
     /// Toggle the keyboard-shortcuts inhibitor of the focused window.
     ToggleShortcutsInhibit,
+    /// Hand the key (press and release) to the window with this app id, wherever it is and
+    /// whatever has the keyboard, so an app's own global hotkey works (`forward-key "com.obsproject.Studio"`).
+    ForwardKey(String),
     /// Stop the compositor.
     Quit,
 }
@@ -2034,6 +2037,10 @@ fn parse_action(node: &KdlNode) -> anyhow::Result<Action> {
         "screenshot-fullscreen" => no_args(Action::ScreenshotFullscreen),
         "screenshot-window" => no_args(Action::ScreenshotWindow),
         "toggle-shortcuts-inhibit" => no_args(Action::ToggleShortcutsInhibit),
+        "forward-key" => match <[String; 1]>::try_from(args) {
+            Ok([app_id]) if !app_id.is_empty() => Ok(Action::ForwardKey(app_id)),
+            _ => bail!("forward-key takes one app id, like forward-key \"com.obsproject.Studio\""),
+        },
         "quit" => no_args(Action::Quit),
         other => bail!("unknown action {other:?}"),
     }
