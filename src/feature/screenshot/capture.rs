@@ -391,7 +391,10 @@ impl JffState {
                 &mut *renderer,
                 &entry.window,
                 window_origin - origin,
-                blur_config,
+                self.config.blur_for_window(
+                    blur_config,
+                    &crate::feature::overview_mode::app_id_of(&entry.window),
+                ),
                 snapshot.as_ref(),
                 radius,
                 popup_radius,
@@ -512,7 +515,10 @@ impl JffState {
             &mut *renderer,
             window,
             window_origin - origin,
-            Some(blur),
+            self.config.blur_for_window(
+                Some(blur),
+                &crate::feature::overview_mode::app_id_of(window),
+            ),
             snapshot.as_ref(),
             radius,
             popup_radius,

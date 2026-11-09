@@ -4,7 +4,7 @@
 // Every block is optional: anything you leave out uses the built-in default.
 
 // Number of workspaces.
-workspaces { count 9; per-output }
+workspaces { count 5; per-output }
 //workspaces 5 { per-output } // number plus block also works
 
 // Workspace wall.
@@ -85,16 +85,27 @@ radius 12
 
 // Background blur. Blur is OFF unless this block exists, writing it turns it on.
 // It only shows on surfaces that are (partly) transparent, for example a terminal with
-// opacity below 1.0, and only where the app asked for blur or `all-windows` is set.
-// By default windows blur the WALLPAPER, so a wallpaper must be set (see autostart below).
+// opacity below 1.0. By default windows blur the WALLPAPER, so a wallpaper must be set (see
+// autostart below).
+//
+// Which windows get blur (by app id, see `jff msg`, pick one style):
+//   * `only-window "APP-ID"`    blur ONLY these apps, the whole window, no client request
+//                               needed. Repeat the line for more apps.
+//   * `all-windows` plus `ignore-window "APP-ID"`    blur every window except these apps.
+//   * neither: only windows that ask for blur themselves (ext-background-effect) get it.
+// `ignore-window` always wins, and also drops the blur behind that app's menus and popups.
 blur {
-    // ignore-layer "layer-name"
-    passes 3            // 1-31. Each pass doubles the blur radius
-    offset 3.0          // Sample stretch above 0. Bigger is blurrier, and blockier
-    all-windows         // Also blur windows that did not ask for blur themselves
-    all-layers          // Also blur panels/launchers (top and overlay layers) that did not ask
-    // behind-windows   // Blur the windows behind a window too (default: wallpaper only)
-    // off              // Turn blur off without deleting the settings above
+    only-window "kitty"
+    //only-window "foot"
+    //ignore-window "firefox-developer-edition"
+    //ignore-layer "jfshell-Bottom"   // layer-surface namespaces that never get blur
+    //ignore-layer "selection"
+    passes 5            // 1-31, each pass doubles the radius
+    offset 3.0          // sample stretch, bigger = blurrier (and blockier)
+    //all-windows       // blur every window, not just those that ask for it
+    //all-layers        // also blur panels/launchers on top/overlay layers
+    //behind-windows    // also blur windows behind (default: wallpaper only)
+    //off               // turn blur off without deleting the settings
 }
 
 // Programs started with the session.

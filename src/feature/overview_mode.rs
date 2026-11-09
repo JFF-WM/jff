@@ -387,6 +387,8 @@ pub struct OverviewPlan {
     pub dragged: Option<usize>,
     /// Corner radius of windows (the `radius` setting), thumbnails get it shrunk with them.
     pub radius: i32,
+    /// Which windows get blur (`blur { ignore-window / only-window }`).
+    pub blur_windows: config::BlurWindows,
     /// The search box and the app list. Not in the switcher.
     pub search: Option<SearchPlan>,
     /// The app icon badge of each of `thumbs` (same order), `None` for an app that has no app id.
@@ -439,7 +441,7 @@ pub struct SearchPlan {
 }
 
 /// The app id of `window`, empty when it has none.
-fn app_id_of(window: &Window) -> String {
+pub(crate) fn app_id_of(window: &Window) -> String {
     window
         .toplevel()
         .map(|toplevel| toplevel_names(toplevel.wl_surface()).0)
@@ -636,7 +638,7 @@ pub fn overview_elements(
             window,
             thumb,
             origin,
-            blur,
+            plan.blur_windows.apply(blur, &app_id_of(window)),
             plan.radius,
             &mut out,
             snapshot,
@@ -781,7 +783,7 @@ pub fn overview_drag_elements(
                 window,
                 thumb,
                 origin,
-                blur,
+                plan.blur_windows.apply(blur, &app_id_of(window)),
                 plan.radius,
                 &mut out,
                 snapshot,
@@ -1904,6 +1906,7 @@ impl JffState {
             selected,
             dragged,
             radius,
+            blur_windows: self.config.blur_windows().clone(),
             search: self.search_plan(),
             badges,
             badge_alpha: t as f32,

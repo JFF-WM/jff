@@ -1274,3 +1274,33 @@ fn global_hotkeys_are_off_unless_asked_for() {
         .unwrap()
         .global_hotkeys());
 }
+
+#[test]
+fn blur_window_filter() {
+    let all = Config::parse("blur { all-windows; }").unwrap();
+    assert!(all.blur_windows().allows("firefox"));
+
+    let ignore =
+        Config::parse("blur { all-windows; ignore-window \"firefox\"; ignore-window \"mpv\"; }")
+            .unwrap();
+    assert!(!ignore.blur_windows().allows("firefox"));
+    assert!(!ignore.blur_windows().allows("mpv"));
+    assert!(ignore.blur_windows().allows("kitty"));
+
+    let only = Config::parse("blur { only-window \"kitty\"; }").unwrap();
+    assert!(only.blur_windows().allows("kitty"));
+    assert!(!only.blur_windows().allows("firefox"));
+
+    let both = Config::parse("blur { only-window \"kitty\"; ignore-window \"kitty\"; }").unwrap();
+    assert!(!both.blur_windows().allows("kitty"));
+
+    let b = only.blur();
+    assert!(only
+        .blur_for_window(Some(b), "kitty")
+        .is_some_and(|b| b.all_windows));
+    assert!(!only.blur().all_windows);
+    assert!(only.blur_for_window(Some(b), "firefox").is_none());
+
+    assert!(Config::parse("blur { ignore-window; }").is_err());
+    assert!(Config::parse("blur { only-window 3; }").is_err());
+}

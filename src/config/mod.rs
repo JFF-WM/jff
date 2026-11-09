@@ -5,7 +5,7 @@
 //!
 //! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9, per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
-//! `keyboard { … }`, `blur { … }`, `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
+//! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
 //! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
@@ -422,6 +422,31 @@ impl Default for Blur {
     }
 }
 
+/// Which windows get blur, by app id: `ignore-window` entries never do, `only-window` entries are the only ones that do.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlurWindows {
+    pub ignore: Vec<String>,
+    pub only: Vec<String>,
+}
+
+impl BlurWindows {
+    /// Whether a window with this app id may be blurred: not ignored, and on the `only` list when there is one.
+    pub fn allows(&self, app_id: &str) -> bool {
+        !self.ignore.iter().any(|id| id == app_id)
+            && (self.only.is_empty() || self.only.iter().any(|id| id == app_id))
+    }
+
+    /// `blur` for this app id: `None` when filtered out, and whole-window for an `only-window` app, which needs no blur region.
+    pub fn apply(&self, blur: Option<Blur>, app_id: &str) -> Option<Blur> {
+        let blur = blur.filter(|_| self.allows(app_id))?;
+        let listed = self.only.iter().any(|id| id == app_id);
+        Some(Blur {
+            all_windows: blur.all_windows || listed,
+            ..blur
+        })
+    }
+}
+
 /// The `osd { … }` block, the toasts shown for the system bell. On unless `off`. `font` is only
 /// read at startup.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -786,6 +811,8 @@ pub struct Config {
     blur: Blur,
     /// Layer-surface namespaces the blur leaves alone (`blur { ignore-layer "…" }`).
     blur_ignore_layers: Vec<String>,
+    /// Which windows get blur (`blur { ignore-window "…", only-window "…" }`).
+    blur_windows: BlurWindows,
     osd: OsdConfig,
     switcher: SwitcherConfig,
     overview: OverviewConfig,
@@ -834,6 +861,7 @@ impl Default for Config {
                 screenshot: ScreenshotConfig::default(),
                 blur: Blur::default(),
                 blur_ignore_layers: Vec::new(),
+                blur_windows: BlurWindows::default(),
                 osd: OsdConfig::default(),
                 switcher: SwitcherConfig::default(),
                 overview: OverviewConfig::default(),
@@ -1030,8 +1058,8 @@ impl Config {
             Some(node) => parse_screenshot(node).context("in screenshot")?,
         };
 
-        let (blur, blur_ignore_layers) = match doc.get("blur") {
-            None => (Blur::default(), Vec::new()),
+        let (blur, blur_ignore_layers, blur_windows) = match doc.get("blur") {
+            None => (Blur::default(), Vec::new(), BlurWindows::default()),
             Some(node) => parse_blur(node).context("in blur")?,
         };
 
@@ -1105,6 +1133,7 @@ impl Config {
             screenshot,
             blur,
             blur_ignore_layers,
+            blur_windows,
             osd,
             switcher,
             overview,
@@ -1166,6 +1195,16 @@ impl Config {
     /// their own nor behind their menus, whatever they ask for and whatever `all-layers` says.
     pub fn blur_ignore_layers(&self) -> &[String] {
         &self.blur_ignore_layers
+    }
+
+    /// The window filter of the blur block.
+    pub fn blur_windows(&self) -> &BlurWindows {
+        &self.blur_windows
+    }
+
+    /// `blur` for the window with this app id: `None` when the window's blur (and its popups') is filtered out.
+    pub fn blur_for_window(&self, blur: Option<Blur>, app_id: &str) -> Option<Blur> {
+        self.blur_windows.apply(blur, app_id)
     }
 
     pub fn osd(&self) -> &OsdConfig {
@@ -1506,12 +1545,13 @@ fn float_arg(node: &KdlNode) -> anyhow::Result<f64> {
 }
 
 /// The `blur { … }` block. Having the block at all turns blur on.
-fn parse_blur(node: &KdlNode) -> anyhow::Result<(Blur, Vec<String>)> {
+fn parse_blur(node: &KdlNode) -> anyhow::Result<(Blur, Vec<String>, BlurWindows)> {
     let mut config = Blur {
         off: false,
         ..Blur::default()
     };
     let mut ignore_layers: Vec<String> = Vec::new();
+    let mut windows = BlurWindows::default();
     for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
         match child.name().value() {
             "off" => config.off = flag_value(child)?,
@@ -1520,6 +1560,10 @@ fn parse_blur(node: &KdlNode) -> anyhow::Result<(Blur, Vec<String>)> {
             "behind-windows" => config.behind_windows = flag_value(child)?,
             // The namespace a panel reports in `jff msg` (`layers`), e.g. `ignore-layer "Nbar-Top"`.
             "ignore-layer" => ignore_layers.push(string_arg(child)?),
+            // App ids (`jff msg` windows), e.g. `ignore-window "firefox"`: never blurred.
+            "ignore-window" => windows.ignore.push(string_arg(child)?),
+            // With any `only-window`, only those app ids are blurred.
+            "only-window" => windows.only.push(string_arg(child)?),
             "passes" => {
                 config.passes = u8::try_from(int_arg(child, 31)?)
                     .ok()
@@ -1534,7 +1578,7 @@ fn parse_blur(node: &KdlNode) -> anyhow::Result<(Blur, Vec<String>)> {
             other => bail!("unknown blur setting {other:?}"),
         }
     }
-    Ok((config, ignore_layers))
+    Ok((config, ignore_layers, windows))
 }
 
 /// `window-animations` as a flag, or as a block with `off`, `open-ms` and `close-ms`.

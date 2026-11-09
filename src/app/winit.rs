@@ -188,7 +188,14 @@ impl JffState {
                 ));
             } else {
                 if let Some(output) = &layer_output {
-                    elements.extend(layer_elements(&mut *renderer, output, above, blur, self.config.blur_ignore_layers(), self.config.popup_radius()));
+                    elements.extend(layer_elements(
+                        &mut *renderer,
+                        output,
+                        above,
+                        blur,
+                        self.config.blur_ignore_layers(),
+                        self.config.popup_radius(),
+                    ));
                     // popups of layers below the windows still draw above them
                     elements.extend(layer_popup_elements(
                         &mut *renderer,
@@ -219,8 +226,9 @@ impl JffState {
                     crate::feature::window_anim::ghost_elements(
                         &mut *renderer,
                         &mut self.closing,
-                        self.desk
-                            .current_on(&self.outputs.first().map(Output::name).unwrap_or_default()),
+                        self.desk.current_on(
+                            &self.outputs.first().map(Output::name).unwrap_or_default(),
+                        ),
                         origin,
                         close_time,
                         &mut elements,
@@ -233,7 +241,10 @@ impl JffState {
                             &mut *renderer,
                             &entry.window,
                             pos,
-                            blur,
+                            self.config.blur_for_window(
+                                blur,
+                                &crate::feature::overview_mode::app_id_of(&entry.window),
+                            ),
                             snapshot.as_ref(),
                             radius,
                             popup_radius,
