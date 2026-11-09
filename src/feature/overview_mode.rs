@@ -225,6 +225,60 @@ fn hash_of(value: impl Hash) -> u64 {
     hasher.finish()
 }
 
+/// How long the app icon takes to travel between the bottom and the centre of a thumbnail.
+const CARRY_ANIMATION: Duration = Duration::from_millis(150);
+
+/// How big the icon is while carried, as a fraction of its size at rest (1.0: unchanged).
+const CARRY_ICON_SCALE: f64 = 1.0;
+
+/// Slides the icon of the dragged thumbnail to its centre, and back when it is dropped.
+struct Carry {
+    /// The window whose icon is moved (kept while it travels back).
+    window: Option<Window>,
+    from: f64,
+    to: f64,
+    at: Instant,
+}
+
+impl Carry {
+    fn new() -> Self {
+        Self {
+            window: None,
+            from: 0.0,
+            to: 0.0,
+            at: Instant::now(),
+        }
+    }
+
+    /// 0 for the icon at the bottom, 1 at the centre.
+    fn value(&self) -> f64 {
+        let t = overview::ease_out_cubic(overview::progress(self.at.elapsed(), CARRY_ANIMATION));
+        self.from + (self.to - self.from) * t
+    }
+
+    /// Follow `dragging`, the window to move the icon of and how far along it is.
+    fn step(&mut self, dragging: Option<Window>) -> Option<(Window, f64)> {
+        let want = if dragging.is_some() { 1.0 } else { 0.0 };
+        if let Some(window) = dragging {
+            if self.window.as_ref() != Some(&window) {
+                self.window = Some(window);
+                self.from = 0.0;
+                self.to = 0.0;
+            }
+        }
+        if self.to != want {
+            self.from = self.value();
+            self.to = want;
+            self.at = Instant::now();
+        }
+        let value = self.value();
+        if want == 0.0 && value <= 0.0 {
+            self.window = None;
+        }
+        self.window.clone().map(|window| (window, value))
+    }
+}
+
 /// A thumbnail being carried by the pointer.
 struct Drag {
     window: Window,
@@ -280,6 +334,11 @@ pub struct Overview {
     /// What `badges` was painted for: the version of the app list (icons come from it) and
     /// whether the font was there (the lettered fallback needs it). Another one empties it.
     badges_for: (u64, bool),
+    /// A second copy of each of `badges`, with its own render id, for the icon being carried:
+    /// it moves alone, while the shared copy sits still on the other thumbnails of its app.
+    carry_badges: HashMap<(String, u64), MemoryRenderBuffer>,
+    /// The icon of the dragged thumbnail moving to its centre.
+    carry: Carry,
 }
 
 impl Overview {
@@ -334,6 +393,11 @@ pub struct OverviewPlan {
     badges: Vec<Option<MemoryRenderBuffer>>,
     /// Fades the badges with the open and close animation.
     badge_alpha: f32,
+    /// Index into `thumbs` of the thumbnail whose icon is at (or moving to or from) its centre,
+    /// and how far along it is, 0 (bottom) to 1 (centre).
+    badge_carry: Option<(usize, f64)>,
+    /// The carried icon's own picture, see `Overview::carry_badges`.
+    carry_badge: Option<MemoryRenderBuffer>,
     /// The workspace wall, while a thumbnail is dragged and `workspace-wall` is on.
     pub wall: Option<WallPlan>,
     /// Width and colour (straight alpha) of the outline of the selected thumbnail, from the
@@ -404,29 +468,44 @@ fn badge_elements(
     else {
         return;
     };
-    let Some((x, y, side, _)) = overview::badge_rect(thumb.rect()) else {
+    let carried = plan.badge_carry.is_some_and(|(n, _)| n == index);
+    let buffer = match (&plan.carry_badge, carried) {
+        (Some(own), true) => own,
+        _ => buffer,
+    };
+    let Some((x, y, full, _)) = overview::badge_rect(thumb.rect()) else {
         return;
     };
+    // While carried the icon shrinks (to `CARRY_ICON_SCALE`) and moves to the centre.
+    let mix = plan
+        .badge_carry
+        .filter(|(n, _)| *n == index)
+        .map_or(0.0, |(_, mix)| mix);
+    let side = ((f64::from(full) * (1.0 - (1.0 - CARRY_ICON_SCALE) * mix)).round() as i32).max(1);
+    let x = x + (full - side) / 2;
+    let centre = thumb.pos.1 + (thumb.size.1 - side) / 2;
+    let y = y + (full - side) / 2;
+    let y = y + (f64::from(centre - y) * mix).round() as i32;
     // The picture has a shadow margin around the badge, scaled by the same factor.
     let margin = (f64::from(search_ui::BADGE_MARGIN) * f64::from(side)
         / f64::from(search_ui::BADGE_BODY))
     .round() as i32;
-    let loc: Point<f64, Physical> = (
-        f64::from(x - margin - origin.x),
-        f64::from(y - margin - origin.y),
-    )
-        .into();
-    let size = smithay::utils::Size::<i32, Logical>::from((side + 2 * margin, side + 2 * margin));
+    // The picture is drawn at its own size and shrunk or grown by a rescale element: a scaled
+    // memory element has its damage in picture pixels, so only the top-left part got redrawn.
+    let corner = Point::<i32, Physical>::from((x - margin - origin.x, y - margin - origin.y));
+    let zoom = f64::from(side + 2 * margin) / f64::from(search_ui::BADGE_PICTURE);
     match MemoryRenderBufferRenderElement::from_buffer(
         &mut *renderer,
-        loc,
+        corner.to_f64(),
         buffer,
         Some(plan.badge_alpha),
         None,
-        Some(size),
+        None,
         Kind::Unspecified,
     ) {
-        Ok(element) => out.push(JffElement::Memory(element)),
+        Ok(element) => out.push(JffElement::ScaledMemory(
+            RescaleRenderElement::from_element(element, corner, zoom),
+        )),
         Err(err) => tracing::warn!("error drawing an app icon in the overview: {err:?}"),
     }
 }
@@ -991,6 +1070,8 @@ impl JffState {
             slide: Slide::still(0),
             badges: HashMap::new(),
             badges_for: (version, self.osd.fonts().is_some()),
+            carry_badges: HashMap::new(),
+            carry: Carry::new(),
             search: Search::new(entries, version),
         });
 
@@ -1671,6 +1752,10 @@ impl JffState {
             self.wall_labels(&wall_cells)
         };
         self.refresh_badges();
+        let carry = self.overview.as_mut().and_then(|ov| {
+            let dragging = ov.drag.as_ref().map(|drag| drag.window.clone());
+            ov.carry.step(dragging)
+        });
         let ov = self.overview.as_ref()?;
         let t = ov.progress();
         let at = self
@@ -1687,12 +1772,15 @@ impl JffState {
             let here = layout::nearest((at.x, at.y), &rects)
                 .map(|i| rects[i])
                 .unwrap_or(overview_rect);
-            let scale = if here == overview_rect {
+            let on_overview = here == overview_rect;
+            let scale = if on_overview {
                 f64::from(cell.2) / f64::from(overview_rect.2.max(1))
             } else {
                 1.0
             };
-            (scale, here)
+            // Over the overview the carried thumbnail is never shorter than a wall square.
+            let min_height = if on_overview { cell.3 } else { 0 };
+            (scale, here, min_height)
         });
 
         let thumbs: Vec<(Window, Thumb)> = self
@@ -1716,7 +1804,7 @@ impl JffState {
                 let thumb = match ov.drag.as_ref().filter(|drag| drag.window == window) {
                     Some(drag) => {
                         let thumb = match drag_wall {
-                            Some((scale, monitor)) => {
+                            Some((scale, monitor, min_height)) => {
                                 // The size the window has while it is carried, as when it is
                                 // dragged by its title: a maximized one is half the monitor
                                 // (it maximizes again when dropped), a snapped or fullscreen
@@ -1733,14 +1821,23 @@ impl JffState {
                                         WindowMode::Floating => real.size,
                                     },
                                 );
+                                // The picture is the window's real buffer shrunk by `zoom`, so the
+                                // thumbnail is the real size times it: another shape (a snapped
+                                // window's restore size) would leave a strip of background
+                                // inside the outline.
+                                let wanted = (f64::from(carried.0) * scale).max(1.0);
+                                let mut zoom = wanted / f64::from(real.size.0.max(1));
+                                let height = f64::from(real.size.1.max(1)) * zoom;
+                                if height < f64::from(min_height) {
+                                    zoom = f64::from(min_height) / f64::from(real.size.1.max(1));
+                                }
                                 let size = (
-                                    ((f64::from(carried.0) * scale).round() as i32).max(1),
-                                    ((f64::from(carried.1) * scale).round() as i32).max(1),
+                                    ((f64::from(real.size.0) * zoom).round() as i32).max(1),
+                                    ((f64::from(real.size.1) * zoom).round() as i32).max(1),
                                 );
                                 Thumb {
                                     size,
-                                    // The picture is the window's real buffer, shrunk to `size`.
-                                    scale: f64::from(size.0) / f64::from(real.size.0.max(1)),
+                                    scale: zoom,
                                     ..thumb
                                 }
                             }
@@ -1770,6 +1867,13 @@ impl JffState {
                     .unwrap_or(usize::MAX)
             });
         }
+        let badge_carry = carry.and_then(|(window, mix)| {
+            let index = thumbs.iter().position(|(w, _)| *w == window)?;
+            Some((index, mix))
+        });
+        let carry_badge = badge_carry
+            .and_then(|(index, _)| thumbs.get(index))
+            .and_then(|(window, _)| ov.carry_badges.get(&badge_key(window)).cloned());
         let dragged = ov
             .drag
             .as_ref()
@@ -1803,6 +1907,8 @@ impl JffState {
             search: self.search_plan(),
             badges,
             badge_alpha: t as f32,
+            badge_carry,
+            carry_badge,
             wall,
             outline: {
                 let config = self.config.overview();
@@ -1823,6 +1929,7 @@ impl JffState {
         let stamp = (ov.search.version, fonts.is_some());
         if ov.badges_for != stamp {
             ov.badges.clear();
+            ov.carry_badges.clear();
             ov.badges_for = stamp;
         }
         for window in &ov.windows {
@@ -1853,6 +1960,7 @@ impl JffState {
                 .or(own_blurry);
             let name = entry.map_or(app_id, |entry| entry.name.as_str());
             let picture = search_ui::paint_badge(fonts, icon.as_deref(), name);
+            ov.carry_badges.insert(key.clone(), buffer_of(&picture));
             ov.badges.insert(key, buffer_of(&picture));
         }
     }

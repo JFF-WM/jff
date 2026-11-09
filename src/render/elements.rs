@@ -18,6 +18,8 @@ render_elements! {
     pub JffElement<=GlesRenderer>;
     Surface = WaylandSurfaceRenderElement<GlesRenderer>,
     Memory = MemoryRenderBufferRenderElement<GlesRenderer>,
+    /// A painted picture (an overview app icon) drawn at another size than it was painted at.
+    ScaledMemory = RescaleRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>,
     /// A window shrunk and moved into its slot in the overview.
     Thumb = RelocateRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
     /// A plain colored rectangle (the overview's highlight).
