@@ -24,3 +24,4 @@ mod screenshot_save;
 mod window_anim;
 mod xx_hotkey;
 mod yuv;
+mod zone;

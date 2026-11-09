@@ -119,6 +119,7 @@ use crate::protocol::transient_seat::TransientSeats;
 use crate::protocol::virtual_pointer::VirtualPointerManager;
 use crate::protocol::workspace::ExtWorkspace;
 use crate::protocol::xx_hotkey::Hotkeys;
+use crate::protocol::xx_zones::Zones;
 use crate::render::cursor::CursorManager;
 
 pub struct JffState {
@@ -276,6 +277,8 @@ pub struct JffState {
     pub gamma_control: GammaControl,
     /// xx-hotkey-v1: client-bound global hotkeys, opt-in (`protocol/xx_hotkey.rs`).
     pub hotkeys: Hotkeys,
+    /// xx-zones-v1: client zones for placing a client's own windows (`protocol/xx_zones.rs`).
+    pub zones: Zones,
     pub pointer_warp: PointerWarp,
     /// xdg-toplevel-drag: a drag-and-drop that carries a window (`protocol/toplevel_drag.rs`).
     pub toplevel_drags: ToplevelDrags,
@@ -502,6 +505,7 @@ impl JffState {
         let output_power = OutputPower::new(&display_handle, backend.is_tty());
         let gamma_control = GammaControl::new(&display_handle, backend.is_tty());
         let hotkeys = Hotkeys::new(&display_handle, config.global_hotkeys());
+        let zones = Zones::new(&display_handle);
         let pointer_warp = PointerWarp::new(&display_handle);
         let toplevel_drags = ToplevelDrags::new(&display_handle);
         let toplevel_tag_manager = ToplevelTagManager::new(&display_handle);
@@ -603,6 +607,7 @@ impl JffState {
             output_power,
             gamma_control,
             hotkeys,
+            zones,
             pointer_warp,
             toplevel_drags,
             toplevel_tag_manager,
@@ -758,6 +763,9 @@ impl CompositorHandler for JffState {
         if let Some(entry) = self.desk.find_by(|w| is_window_for(w, &root)) {
             entry.window.on_commit();
             self.toplevel_drag_commit(&root);
+            if self.zones.has_pending() && *surface == root {
+                self.zones_commit(&root);
+            }
             self.fit_to_output_once(&root);
             self.recenter_settling_dialog(&root);
         } else {
@@ -1202,6 +1210,7 @@ impl XdgShellHandler for JffState {
         self.dialog_toplevels.remove(surface.wl_surface());
         self.settling_dialogs.remove(surface.wl_surface());
         self.toplevel_drag_gone(surface.wl_surface());
+        self.zones_toplevel_gone(surface.wl_surface());
     }
 
     // Popups (menus, tooltips, and X11 override-redirect windows via xwayland-satellite).
@@ -1470,6 +1479,12 @@ impl JffState {
         if !self.desk.is_floating(|w| is_window_for(w, root)) {
             return;
         }
+        // A window in a zone was placed by its client: it is not maximized or centred, and the
+        // size it has now is what its place is checked against.
+        let zoned = self.zones_is_member(root);
+        if zoned {
+            self.zones_member_fitted(root);
+        }
         // A dialog is a window that belongs to another one, or says it is a dialog. It keeps the
         // size it asks for (shrunk to fit) and is centred over its parent.
         // A window its app had put back (xdg-session-management) is where and how it was, not
@@ -1480,7 +1495,11 @@ impl JffState {
         // `window-rule`: the first rule that fits. Matched here, not in `new_toplevel`: the app
         // id, the title, the tag and the dialog hint arrive after the toplevel is created, and
         // are all there by the first commit that has a buffer.
-        let rule = self.matching_window_rule(root, dialog, restored.is_some());
+        let mut rule = self.matching_window_rule(root, dialog, restored.is_some());
+        // The zone has a monitor already.
+        if let (true, Some(rule)) = (zoned, rule.as_mut()) {
+            rule.output = None;
+        }
         if let Some(saved) = restored.as_ref() {
             // A restored window keeps the monitor, size and mode its session saved. A rule only
             // chooses its workspace.
@@ -1505,11 +1524,16 @@ impl JffState {
         // `maximize-new-windows` (on by default). Done now rather than in `new_toplevel` so the
         // window's own size is known and remembered for when it's restored. A window a rule
         // keeps floating stays that way.
-        if self.config.maximize_new_windows() && !dialog && restored.is_none() && !ruled_floating {
+        if self.config.maximize_new_windows()
+            && !dialog
+            && restored.is_none()
+            && !ruled_floating
+            && !zoned
+        {
             self.set_maximized(&toplevel, true);
             return;
         }
-        if dialog && restored.is_none() {
+        if dialog && restored.is_none() && !zoned {
             self.center_dialog(root, parent.as_ref(), (size.w, size.h), None);
             return;
         }

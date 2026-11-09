@@ -16,6 +16,7 @@ use smithay::utils::{Logical, Point};
 
 use crate::desk::{Pos, WindowMode};
 use crate::primitives::geom;
+use crate::protocol::xx_zones::ZoneDrag;
 use crate::state::JffState;
 
 pub struct MoveGrab {
@@ -29,6 +30,8 @@ pub struct MoveGrab {
     saved_restore: Option<(Pos, (i32, i32))>,
     last: Point<f64, Logical>,
     moved: bool,
+    /// The zone that moves along (Alt+drag on a member of a zone).
+    zone: Option<ZoneDrag>,
 }
 
 impl MoveGrab {
@@ -41,7 +44,14 @@ impl MoveGrab {
             back_to: None,
             saved_restore: None,
             moved: false,
+            zone: None,
         }
+    }
+
+    /// Move the zone of the window along with it.
+    pub fn with_zone(mut self, zone: ZoneDrag) -> Self {
+        self.zone = Some(zone);
+        self
     }
 
     pub fn new_unfilled(
@@ -94,6 +104,12 @@ impl PointerGrab<JffState> for MoveGrab {
         let pos = dragged_pos(self.initial_pos, self.start_data.location, event.location);
         let window = self.window.clone();
         data.desk.set_pos_where(|w| *w == window, pos);
+        if let Some(zone) = &self.zone {
+            data.zone_drag_to(
+                zone,
+                (pos.0 - self.initial_pos.0, pos.1 - self.initial_pos.1),
+            );
+        }
     }
 
     fn relative_motion(
@@ -203,6 +219,9 @@ impl PointerGrab<JffState> for MoveGrab {
 
     fn unset(&mut self, data: &mut JffState) {
         data.dragging_view = None;
+        if let Some(zone) = self.zone.take() {
+            data.zone_drag_end(zone);
+        }
         let window = self.window.clone();
         let Some(toplevel) = window.toplevel().cloned() else {
             return;

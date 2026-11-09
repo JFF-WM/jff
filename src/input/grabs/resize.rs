@@ -336,3 +336,13 @@ impl JffState {
         }
     }
 }
+
+impl ActiveResize {
+    /// Whether this is the resize of the window whose root surface is `surface`.
+    pub fn is_for(
+        &self,
+        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    ) -> bool {
+        self.toplevel.wl_surface() == surface
+    }
+}

@@ -1356,8 +1356,13 @@ impl JffState {
             } else {
                 overview::drop_pos(drag.anchor, (at.x, at.y), (size.w, size.h), target)
             };
+            let before = self.desk.pos_of(|w| *w == window);
             self.desk.set_pos_where(|w| *w == window, pos);
             self.desk.raise_where(|w| *w == window);
+            // A floating member of a zone takes its zone along.
+            if let (None, Some(before)) = (restore, before) {
+                self.zones_carry(&window, before);
+            }
             if let Some((restore_pos, restore_size)) = restore {
                 let carried = (
                     restore_pos.0 + target.0 - source.0,

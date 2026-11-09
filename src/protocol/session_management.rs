@@ -450,6 +450,11 @@ impl JffState {
         self.session_management.applied.remove(root)
     }
 
+    /// Whether `root` was put back by its session and has not shown its first buffer yet.
+    pub fn session_is_restored(&self, root: &WlSurface) -> bool {
+        self.session_management.applied.contains_key(root)
+    }
+
     /// Maximized, fullscreen or snapped as it was. Floating needs nothing, size and place
     /// are already set.
     pub fn session_finish_restore(&mut self, toplevel: &ToplevelSurface, saved: &SavedWindow) {

@@ -57,6 +57,9 @@ impl JffState {
     pub fn reconcile_window_workspaces(&mut self) {
         // The windows of apps with a session are saved as they are, before every frame.
         self.session_flush();
+        // Before the monitors are looked at: a member that left its zone's monitor is out of
+        // the zone by then.
+        self.zones_sync();
         if !self.desk.per_output() {
             return;
         }
@@ -69,7 +72,12 @@ impl JffState {
             return;
         }
         let rects: Vec<Rect> = monitors.iter().map(|(_, rect)| *rect).collect();
+        let zones = &self.zones;
         self.desk.assign_outputs(|entry| {
+            // Members of a zone live on the monitor of the zone.
+            if let Some(name) = zones.output_of(&entry.window) {
+                return Some(name);
+            }
             let size = entry.window.geometry().size;
             let at = layout::center(entry.pos, (size.w, size.h));
             let i = layout::nearest(at, &rects)?;
@@ -147,6 +155,10 @@ impl JffState {
         }
         // The window stays on its monitor, so it is that monitor's workspace that counts.
         let shown = self.desk.current_on(&output);
+        // The zone goes along: its other members first, so the window ends up on top.
+        for mate in self.zones_mates(window) {
+            self.desk.move_to_workspace(|w| *w == mate, target);
+        }
         self.desk.move_to_workspace(|w| w == window, target);
 
         if from == shown {

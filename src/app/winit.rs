@@ -102,6 +102,8 @@ impl JffState {
                 crate::protocol::presentation::monotonic_now() + refresh,
             );
         }
+        // Clients of zones hear about moved members and a resized zone.
+        self.zones_sync();
         self.refresh_window_outputs();
         // Needs &mut self, so it has to happen before the backend is borrowed. May end the overview.
         let overview = self.overview_plan();

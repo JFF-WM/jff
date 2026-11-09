@@ -266,6 +266,8 @@ impl JffState {
         let usable: Vec<Rect> = rects.iter().map(|r| self.usable_rect(*r)).collect();
         let free: Vec<Rect> = rects.iter().map(|r| self.panel_free_rect(*r)).collect();
         let (inset, snap_gap) = (self.config.maximize_inset(), self.config.snap_gap());
+        // Zones keep their place on their monitor, the windows below then only see what is left.
+        self.zones_follow_outputs();
         if !rects.is_empty() {
             for entry in self.desk.iter_mut() {
                 let size = entry.window.geometry().size;

@@ -35,6 +35,7 @@ use crate::primitives::geom;
 use crate::primitives::layout;
 use crate::protocol::layer_shell::Under;
 use crate::protocol::xx_hotkey::mods_of;
+use crate::protocol::xx_zones::ZoneDrag;
 use crate::state::{configure_mode, JffState};
 
 /// What a compositor key combination asks for.
@@ -818,7 +819,9 @@ impl JffState {
         };
 
         if button == BTN_LEFT {
-            return self.start_move(window, start_data, serial);
+            // Alt+drag on a window in a zone moves the whole zone.
+            let zone = self.zone_drag_for(window);
+            return self.start_move_with(window, start_data, serial, zone);
         }
 
         let Some(toplevel) = window.toplevel().cloned() else {
@@ -848,6 +851,17 @@ impl JffState {
         window: &Window,
         start_data: GrabStartData<JffState>,
         serial: smithay::utils::Serial,
+    ) -> bool {
+        self.start_move_with(window, start_data, serial, None)
+    }
+
+    /// [`JffState::start_move`], taking the zone of the window along when `zone` is given.
+    fn start_move_with(
+        &mut self,
+        window: &Window,
+        start_data: GrabStartData<JffState>,
+        serial: smithay::utils::Serial,
+        zone: Option<ZoneDrag>,
     ) -> bool {
         let Some((pos, size)) = self
             .desk
@@ -888,12 +902,19 @@ impl JffState {
             }
         }
 
-        let grab = match back {
+        // Only a window that floats moves its zone: one that was maximized or snapped has just
+        // been taken out of that, and is not where the zone's layout puts it.
+        let floated = back.is_none();
+        let mut grab = match back {
             Some((mode, restore)) => {
                 MoveGrab::new_unfilled(start_data, window.clone(), initial_pos, mode, restore)
             }
             None => MoveGrab::new(start_data, window.clone(), initial_pos),
         };
+        if let (Some(zone), true) = (zone, floated) {
+            self.zone_drag_begin(&zone);
+            grab = grab.with_zone(zone);
+        }
         self.dragging_view = window.user_data().get::<ViewId>().map(|id| id.0);
         pointer.set_grab(self, grab, serial, Focus::Clear);
         true
