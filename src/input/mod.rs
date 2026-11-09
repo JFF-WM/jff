@@ -975,6 +975,7 @@ impl JffState {
             Ok(config) => {
                 let old_keyboard = self.config.keyboard().clone();
                 self.config = config;
+                crate::logging::apply(self.config.log());
                 self.apply_keyboard_config(&old_keyboard);
                 self.apply_workspace_count();
                 self.reconcile_outputs();

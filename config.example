@@ -277,3 +277,10 @@ keyboard {
     repeat-delay 300    // ms before a held key repeats
     repeat-rate 40      // repeats per second
 }
+
+// add log file
+log {
+    enable
+    path "/tmp/"   // optional, default /tmp/
+    level "debug"         // optional, default "info"
+}

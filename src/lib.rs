@@ -7,6 +7,7 @@ pub mod feature;
 pub mod focus;
 pub mod input;
 pub mod ipc;
+pub mod logging;
 pub mod primitives;
 pub mod protocol;
 pub mod render;

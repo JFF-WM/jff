@@ -7,7 +7,6 @@ use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::wayland_server::Display;
 use smithay::wayland::socket::ListeningSocketSource;
-use tracing_subscriber::EnvFilter;
 
 use crate::config::{Action, Config, ConfigWatch, CONFIG_WATCH_INTERVAL};
 use crate::input::spawn_command;
@@ -26,11 +25,7 @@ pub fn run() -> anyhow::Result<()> {
         std::process::exit(check_config(&args[2..]));
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    crate::logging::init();
 
     let mut event_loop: EventLoop<JffState> = EventLoop::try_new()?;
     let display: Display<JffState> = Display::new()?;
@@ -66,6 +61,9 @@ pub fn run() -> anyhow::Result<()> {
         startup_error = Some(format!("{err:#}"));
         Config::default()
     });
+    // The log file is a config setting, so it can only start now. What was logged before this
+    // (reading the file) went to stderr only.
+    crate::logging::apply(config.log());
 
     // Remember the file as it is read now, so saving it later is noticed.
     let mut config_watch = ConfigWatch::new(Config::stamp());

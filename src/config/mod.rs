@@ -5,6 +5,7 @@
 //!
 //! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9, per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
+//! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
 //! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
 //! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
@@ -13,8 +14,8 @@
 //! Two things that bite when editing the file by hand:
 //! - `adaptive-sync` takes a quoted string (`"off"` / `"fullscreen"` / `"always"`), not a
 //!   bare flag.
-//! - `maximize-new-windows`, `no-client-decorations`, `numlock`, `include-cursor` and
-//!   `copy-to-clipboard` accept a bare name (`numlock`), `true` / `false`, `"true"` /
+//! - `maximize-new-windows`, `no-client-decorations`, `numlock`, `include-cursor`,
+//!   `copy-to-clipboard` and `enable` (in `log`) accept a bare name (`numlock`), `true` / `false`, `"true"` /
 //!   `"false"`, `"yes"` / `"no"`, or `"on"` / `"off"`.
 //!
 //! `DEFAULT_CONFIG` is what runs when the user has no file. It has to parse: `Config::default`
@@ -122,6 +123,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "popup-radius",
     "border",
     "screenshot",
+    "log",
     "keyboard",
     "blur",
     "osd",
@@ -380,6 +382,86 @@ impl Default for ScreenshotConfig {
             path: None,
             include_cursor: false,
             copy_to_clipboard: true,
+        }
+    }
+}
+
+/// Where the log file goes when `log { enable }` gives no `path`.
+pub const DEFAULT_LOG_PATH: &str = "/tmp/jff.log";
+
+/// How much `log { level }` lets through. `Info` is the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    #[default]
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    /// Every spelling the config takes, for error messages.
+    pub const NAMES: &'static [&'static str] = &["error", "warn", "info", "debug", "trace"];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text.to_ascii_lowercase().as_str() {
+            "error" => Some(Self::Error),
+            "warn" | "warning" => Some(Self::Warn),
+            "info" => Some(Self::Info),
+            "debug" => Some(Self::Debug),
+            "trace" => Some(Self::Trace),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What the `log` block of the config says.
+///
+/// The log file is opt-in. Without `enable` jff only logs to stderr, as before.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogConfig {
+    /// Write the log to a file.
+    pub enable: bool,
+    /// The file, or a folder (ends with `/`, or already is one) that gets a file per session,
+    /// `jff-YYYY-MM-DD_HH-MM-SS.log`. `~/` is the home directory. `None` is [`DEFAULT_LOG_PATH`].
+    pub path: Option<String>,
+    /// What goes into the file.
+    pub level: LogLevel,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            path: None,
+            level: LogLevel::Info,
+        }
+    }
+}
+
+impl LogConfig {
+    /// The file the log is written to.
+    pub fn resolved_path(&self) -> PathBuf {
+        match &self.path {
+            Some(path) => expand_home(path),
+            None => PathBuf::from(DEFAULT_LOG_PATH),
         }
     }
 }
@@ -808,6 +890,7 @@ pub struct Config {
     popup_radius: Option<i32>,
     border: Border,
     screenshot: ScreenshotConfig,
+    log: LogConfig,
     blur: Blur,
     /// Layer-surface namespaces the blur leaves alone (`blur { ignore-layer "…" }`).
     blur_ignore_layers: Vec<String>,
@@ -859,6 +942,7 @@ impl Default for Config {
                 popup_radius: None,
                 border: Border::default(),
                 screenshot: ScreenshotConfig::default(),
+                log: LogConfig::default(),
                 blur: Blur::default(),
                 blur_ignore_layers: Vec::new(),
                 blur_windows: BlurWindows::default(),
@@ -932,6 +1016,13 @@ impl Config {
                     .unwrap_or_default();
                 warnings.push(format!("unknown setting {name:?} is ignored{hint}"));
             }
+        }
+        let has_log_settings = doc
+            .get("log")
+            .and_then(KdlNode::children)
+            .is_some_and(|c| c.nodes().iter().any(|n| n.name().value() != "enable"));
+        if has_log_settings && !config.log().enable {
+            warnings.push("log has settings but no `enable`, nothing is written".to_string());
         }
         let border = config.border();
         if border.animate != BorderAnimation::None && !border.animated() {
@@ -1058,6 +1149,11 @@ impl Config {
             Some(node) => parse_screenshot(node).context("in screenshot")?,
         };
 
+        let log = match doc.get("log") {
+            None => LogConfig::default(),
+            Some(node) => parse_log(node).context("in log")?,
+        };
+
         let (blur, blur_ignore_layers, blur_windows) = match doc.get("blur") {
             None => (Blur::default(), Vec::new(), BlurWindows::default()),
             Some(node) => parse_blur(node).context("in blur")?,
@@ -1131,6 +1227,7 @@ impl Config {
             popup_radius,
             border,
             screenshot,
+            log,
             blur,
             blur_ignore_layers,
             blur_windows,
@@ -1245,6 +1342,10 @@ impl Config {
     }
 
     /// The screenshot block.
+    pub fn log(&self) -> &LogConfig {
+        &self.log
+    }
+
     pub fn screenshot(&self) -> &ScreenshotConfig {
         &self.screenshot
     }
@@ -1866,6 +1967,29 @@ fn parse_screenshot(node: &KdlNode) -> anyhow::Result<ScreenshotConfig> {
     }
     config.include_cursor = parse_flag(children, "include-cursor", config.include_cursor)?;
     config.copy_to_clipboard = parse_flag(children, "copy-to-clipboard", config.copy_to_clipboard)?;
+    Ok(config)
+}
+
+/// The `log { … }` block: `enable`, `path "FILE"`, `level "info"`.
+fn parse_log(node: &KdlNode) -> anyhow::Result<LogConfig> {
+    let mut config = LogConfig::default();
+    let Some(children) = node.children() else {
+        return Ok(config);
+    };
+    for child in children.nodes() {
+        match child.name().value() {
+            "path" => config.path = Some(string_arg(child)?).filter(|p| !p.trim().is_empty()),
+            "level" => {
+                let text = string_arg(child)?;
+                config.level = LogLevel::parse(&text).with_context(|| {
+                    format!("level takes {}, not {text:?}", LogLevel::NAMES.join(", "))
+                })?;
+            }
+            "enable" => {}
+            other => bail!("unknown log setting {other:?}"),
+        }
+    }
+    config.enable = parse_flag(children, "enable", config.enable)?;
     Ok(config)
 }
 

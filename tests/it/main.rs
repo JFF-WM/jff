@@ -13,6 +13,7 @@ mod icc;
 mod ipc;
 mod ipc_events;
 mod layout;
+mod logging;
 mod osd;
 mod outputs;
 mod overview_grid;

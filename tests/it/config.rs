@@ -9,11 +9,11 @@ use smithay::input::keyboard::ModifiersState;
 
 use jff_wm::config::{
     closest, edit_distance, parse_color, Action, BorderAnimation, Config, ConfigWatch, FileStamp,
-    HotCorner, KeyboardConfig, ModeRequest, ScreenshotConfig, Vrr, DEFAULT_BORDER_FADE_MS,
-    DEFAULT_BORDER_PERIOD_MS, DEFAULT_BORDER_WIDTH, DEFAULT_CONFIG, DEFAULT_REPEAT_DELAY,
-    DEFAULT_REPEAT_RATE, DEFAULT_SELECTION_COLOR, DEFAULT_SELECTION_WIDTH,
-    DEFAULT_SWITCHER_SLIDE_MS, DEFAULT_WORKSPACES, MAX_BORDER_PERIOD_MS, MAX_BORDER_WIDTH,
-    MAX_GAPS, MAX_RADIUS, TOP_LEVEL_NODES,
+    HotCorner, KeyboardConfig, LogLevel, ModeRequest, ScreenshotConfig, Vrr,
+    DEFAULT_BORDER_FADE_MS, DEFAULT_BORDER_PERIOD_MS, DEFAULT_BORDER_WIDTH, DEFAULT_CONFIG,
+    DEFAULT_LOG_PATH, DEFAULT_REPEAT_DELAY, DEFAULT_REPEAT_RATE, DEFAULT_SELECTION_COLOR,
+    DEFAULT_SELECTION_WIDTH, DEFAULT_SWITCHER_SLIDE_MS, DEFAULT_WORKSPACES, MAX_BORDER_PERIOD_MS,
+    MAX_BORDER_WIDTH, MAX_GAPS, MAX_RADIUS, TOP_LEVEL_NODES,
 };
 use jff_wm::config::{RuleOutput, WindowFacts, WindowMatch};
 use jff_wm::desk::{Goto, Side};
@@ -1303,4 +1303,103 @@ fn blur_window_filter() {
 
     assert!(Config::parse("blur { ignore-window; }").is_err());
     assert!(Config::parse("blur { only-window 3; }").is_err());
+}
+
+#[test]
+fn log_file_is_off_by_default() {
+    let log = Config::default().log().clone();
+    assert!(!log.enable);
+    assert_eq!(log.level, LogLevel::Info);
+    assert_eq!(log.path, None);
+    assert_eq!(DEFAULT_LOG_PATH, "/tmp/jff.log");
+    assert_eq!(
+        log.resolved_path(),
+        std::path::PathBuf::from("/tmp/jff.log")
+    );
+    assert!(TOP_LEVEL_NODES.contains(&"log"));
+}
+
+#[test]
+fn log_block_needs_enable() {
+    // Settings without `enable` are kept but write nothing.
+    let config = Config::parse(r#"log { level "debug"; }"#).unwrap();
+    assert!(!config.log().enable);
+    assert_eq!(config.log().level, LogLevel::Debug);
+    // An empty block is not enabling either.
+    assert!(!Config::parse("log").unwrap().log().enable);
+    assert!(!Config::parse("log {}").unwrap().log().enable);
+}
+
+#[test]
+fn log_enable_takes_a_bare_name_or_a_value() {
+    assert!(Config::parse("log { enable; }").unwrap().log().enable);
+    assert!(Config::parse("log { enable #true; }").unwrap().log().enable);
+    assert!(
+        Config::parse(r#"log { enable "on"; }"#)
+            .unwrap()
+            .log()
+            .enable
+    );
+    assert!(
+        !Config::parse("log { enable #false; }")
+            .unwrap()
+            .log()
+            .enable
+    );
+    assert!(Config::parse("log { enable 3; }").is_err());
+}
+
+#[test]
+fn log_level_is_info_unless_set() {
+    let config = Config::parse("log { enable; }").unwrap();
+    assert_eq!(config.log().level, LogLevel::Info);
+    for (name, level) in [
+        ("error", LogLevel::Error),
+        ("warn", LogLevel::Warn),
+        ("info", LogLevel::Info),
+        ("debug", LogLevel::Debug),
+        ("trace", LogLevel::Trace),
+        ("DEBUG", LogLevel::Debug),
+    ] {
+        let text = format!(r#"log {{ enable; level "{name}"; }}"#);
+        assert_eq!(Config::parse(&text).unwrap().log().level, level, "{name}");
+    }
+    assert!(Config::parse(r#"log { level "loud"; }"#).is_err());
+    assert!(Config::parse("log { level 3; }").is_err());
+    assert!(Config::parse("log { level; }").is_err());
+    assert_eq!(LogLevel::Debug.to_string(), "debug");
+}
+
+#[test]
+fn log_path_is_where_the_file_goes() {
+    let config = Config::parse(r#"log { enable; path "/var/tmp/jff-debug.log"; }"#).unwrap();
+    assert_eq!(config.log().path.as_deref(), Some("/var/tmp/jff-debug.log"));
+    assert_eq!(
+        config.log().resolved_path(),
+        std::path::PathBuf::from("/var/tmp/jff-debug.log")
+    );
+    // An empty path is no path: the default is used.
+    let config = Config::parse(r#"log { enable; path ""; }"#).unwrap();
+    assert_eq!(config.log().path, None);
+    assert_eq!(
+        config.log().resolved_path(),
+        std::path::PathBuf::from(DEFAULT_LOG_PATH)
+    );
+    assert!(Config::parse("log { path 3; }").is_err());
+}
+
+#[test]
+fn unknown_log_settings_are_errors() {
+    assert!(Config::parse("log { enabled; }").is_err());
+    assert!(Config::parse(r#"log { file "/tmp/x"; }"#).is_err());
+}
+
+#[test]
+fn check_config_warns_about_log_settings_that_do_nothing() {
+    let warnings = Config::check_text(r#"log { level "debug"; }"#).unwrap();
+    assert!(warnings.iter().any(|w| w.contains("log")), "{warnings:?}");
+    assert!(Config::check_text(r#"log { enable; level "debug"; }"#)
+        .unwrap()
+        .is_empty());
+    assert!(Config::check_text("log { enable; }").unwrap().is_empty());
 }
