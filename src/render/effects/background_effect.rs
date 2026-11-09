@@ -183,6 +183,31 @@ pub fn render_for_surface_zoomed(
     mask: Option<&Rounding>,
     push: &mut dyn FnMut(FramebufferEffectElement),
 ) {
+    render_for_surface_faded(
+        surface,
+        surface_loc,
+        zoom,
+        fallback_geo,
+        scale,
+        blur,
+        mask,
+        1.0,
+        push,
+    );
+}
+
+/// Like [`render_for_surface_zoomed`], with the blur faded by `fade` (0 to 1) on top of the client's own multiplier.
+pub fn render_for_surface_faded(
+    surface: &WlSurface,
+    surface_loc: Point<f64, Logical>,
+    zoom: f64,
+    fallback_geo: Option<Rectangle<i32, Logical>>,
+    scale: f64,
+    blur: config::Blur,
+    mask: Option<&Rounding>,
+    fade: f32,
+    push: &mut dyn FnMut(FramebufferEffectElement),
+) {
     if blur.off {
         return;
     }
@@ -199,7 +224,7 @@ pub fn render_for_surface_zoomed(
 
         // A client can fade its surface (wp_alpha_modifier_v1): the blur fades with it, and a
         // surface nobody can see blurs nothing.
-        let alpha = multiplier_of(states);
+        let alpha = multiplier_of(states) * fade;
         if alpha::is_invisible(alpha) {
             return;
         }
@@ -328,18 +353,23 @@ pub fn window_elements(
     out: &mut Vec<JffElement>,
 ) {
     let alpha = open.alpha;
-    // A window that is still opening has no blur and no outline: both would show at full
-    // strength behind a half-transparent or moving window.
-    let (blur, border) = if open.settled() {
-        (blur, border)
-    } else {
-        (None, None)
-    };
+    // A window that is still opening has no outline (it would show at full strength behind a
+    // half-transparent or moving window). Its blur fades in with it, see `open.alpha`.
+    let border = if open.settled() { border } else { None };
     let scale = Scale::from(1.0f64);
     let loc: Point<i32, Physical> = surface_loc.to_physical_precise_round(scale);
     let geo = window.geometry();
     if open.scale != 1.0 || open.dy != 0 {
-        scaled_window(renderer, window, surface_loc, radius, open, out);
+        scaled_window(
+            renderer,
+            window,
+            surface_loc,
+            blur,
+            snapshot,
+            radius,
+            open,
+            out,
+        );
         return;
     }
     let toplevel = window.toplevel();
@@ -381,13 +411,15 @@ pub fn window_elements(
         out.extend(ring.map(JffElement::Border));
         return;
     };
+    // Popups of a window that is still opening get no blur.
+    let popup_blur = blur.filter(|_| open.settled());
     popup_elements(
         renderer,
         toplevel.wl_surface(),
         surface_loc,
         geo.loc,
-        blur,
-        blur.is_some_and(|b| b.all_windows),
+        popup_blur,
+        popup_blur.is_some_and(|b| b.all_windows),
         popup_radius,
         out,
     );
@@ -419,7 +451,7 @@ pub fn window_elements(
         }
     }));
     if let Some(blur) = blur {
-        render_for_surface_zoomed(
+        render_for_surface_faded(
             toplevel.wl_surface(),
             surface_loc.to_f64(),
             1.0,
@@ -427,6 +459,7 @@ pub fn window_elements(
             1.0,
             blur,
             rounding.as_ref(),
+            alpha,
             &mut |element| out.push(JffElement::from(element.with_wallpaper_source(snapshot))),
         );
     }
@@ -439,6 +472,8 @@ fn scaled_window(
     renderer: &mut GlesRenderer,
     window: &Window,
     surface_loc: Point<i32, Logical>,
+    blur: Option<config::Blur>,
+    snapshot: Option<&WallpaperSnapshot>,
     radius: i32,
     open: OpenFrame,
     out: &mut Vec<JffElement>,
@@ -482,5 +517,23 @@ fn scaled_window(
             Some(rounding) => rounding.wrap_thumb(placed),
             None => JffElement::Thumb(placed),
         });
+    }
+    // The blur follows the shrunk window and fades in with it, right behind it in the list.
+    if let (Some(blur), Some(toplevel)) = (blur, window.toplevel()) {
+        let origin = Point::<f64, Logical>::from((
+            f64::from(place.x) - f64::from(geo.loc.x) * open.scale,
+            f64::from(place.y) - f64::from(geo.loc.y) * open.scale,
+        ));
+        render_for_surface_faded(
+            toplevel.wl_surface(),
+            origin,
+            open.scale,
+            blur.all_windows.then_some(geo),
+            1.0,
+            blur,
+            rounding.as_ref(),
+            open.alpha,
+            &mut |element| out.push(JffElement::from(element.with_wallpaper_source(snapshot))),
+        );
     }
 }
