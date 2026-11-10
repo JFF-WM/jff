@@ -119,7 +119,11 @@ impl JffState {
             return;
         };
 
-        if self.keyboard_focus != focus {
+        // Decided once, before `keyboard_focus` is overwritten below. This pass runs on every
+        // event-loop iteration, so anything that is not guarded by this flag is repeated
+        // hundreds of times a second.
+        let focus_changed = self.keyboard_focus != focus;
+        if focus_changed {
             tracing::debug!("keyboard focus: {:?} -> {:?}", self.keyboard_focus, focus);
         }
 
@@ -150,7 +154,7 @@ impl JffState {
         // the terminal got the Enter press, so it repeats Enter until told otherwise, and not
         // every client stops repeating on a leave). Tell it the keys came up, before it
         // loses the keyboard. Keys whose press it never saw (a binding took them) stay out.
-        if self.keyboard_focus != focus && !to_client && self.keyboard_focus.surface().is_some() {
+        if focus_changed && !to_client && self.keyboard_focus.surface().is_some() {
             let held: Vec<_> = keyboard
                 .pressed_keys()
                 .into_iter()
@@ -173,7 +177,12 @@ impl JffState {
         // the overview is kept from everybody, and the window that was left never saw it. Its
         // idea of the modifiers would stay "Alt held" and every key typed in it would arrive as
         // Alt+key. Whoever gets the keyboard next is told the modifiers as they are now.
-        if to_client {
+        //
+        // Only when the keyboard changed hands. That covers the case above (Nobody, Overview
+        // or Screenshot -> a client), and a client that already has the keyboard already knows
+        // the modifiers. Sending them on every pass flooded the focused client with identical
+        // `wl_keyboard.modifiers` events, enough to overflow its queue while it was busy.
+        if to_client && focus_changed {
             keyboard.advertise_modifier_state(self);
         }
     }
