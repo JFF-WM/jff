@@ -166,6 +166,15 @@ fn targets(level: LogLevel) -> Targets {
     Targets::new()
         .with_default(others)
         .with_target(OWN_TARGET, own)
+        // why a window was refused the primary plane (direct scanout)
+        .with_target(
+            "smithay::backend::drm::compositor",
+            if matches!(level, LogLevel::Debug | LogLevel::Trace) {
+                LevelFilter::TRACE
+            } else {
+                own
+            },
+        )
 }
 
 /// Set up logging. Call once, first thing. Stderr is filtered by `RUST_LOG` (default `info`),

@@ -10,7 +10,7 @@ use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags, PrimaryPlaneElement};
 use smithay::backend::renderer::PresentationMode;
-use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
+use smithay::backend::drm::exporter::gbm::{GbmFramebufferExporter, NodeFilter};
 use smithay::backend::drm::{
     DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata, DrmEventTime, DrmNode, VrrSupport,
 };
@@ -821,7 +821,7 @@ impl Tty {
             surface,
             None,
             allocator,
-            GbmFramebufferExporter::new(self.gbm.clone(), self.render_node.into()),
+            GbmFramebufferExporter::new(self.gbm.clone(), NodeFilter::All),
             COLOR_FORMATS.iter().copied(),
             render_formats,
             self.drm.cursor_size(),
@@ -1517,7 +1517,7 @@ impl JffState {
         match lit.compositor.render_frame(
             &mut *renderer,
             &elements,
-            if locked {
+            if locked || direct_scanout {
                 LOCKED_BACKGROUND
             } else {
                 BACKGROUND
