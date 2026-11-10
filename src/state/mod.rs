@@ -103,6 +103,7 @@ use crate::primitives::geom;
 use crate::primitives::layout;
 use crate::protocol::color_representation::ColorRepresentationManager;
 use crate::protocol::ext_foreign_toplevel::ExtForeignToplevel;
+use crate::protocol::fixes::Fixes;
 use crate::protocol::foreign_toplevel::ForeignToplevel;
 use crate::protocol::gamma_control::GammaControl;
 use crate::protocol::image_copy::ImageCopy;
@@ -281,6 +282,8 @@ pub struct JffState {
     /// xx-zones-v1: client zones for placing a client's own windows (`protocol/xx_zones.rs`).
     pub zones: Zones,
     pub pointer_warp: PointerWarp,
+    /// wl_fixes: lets clients free their `wl_registry` (`protocol/fixes.rs`).
+    pub fixes: Fixes,
     /// zwp_input_timestamps_v1: nanosecond event times for clients that ask (`protocol/input_timestamps.rs`).
     pub input_timestamps: InputTimestamps,
     /// xdg-toplevel-drag: a drag-and-drop that carries a window (`protocol/toplevel_drag.rs`).
@@ -510,6 +513,7 @@ impl JffState {
         let hotkeys = Hotkeys::new(&display_handle, config.global_hotkeys());
         let zones = Zones::new(&display_handle);
         let pointer_warp = PointerWarp::new(&display_handle);
+        let fixes = Fixes::new(&display_handle);
         let input_timestamps = InputTimestamps::new(&display_handle);
         let toplevel_drags = ToplevelDrags::new(&display_handle);
         let toplevel_tag_manager = ToplevelTagManager::new(&display_handle);
@@ -613,6 +617,7 @@ impl JffState {
             hotkeys,
             zones,
             pointer_warp,
+            fixes,
             input_timestamps,
             toplevel_drags,
             toplevel_tag_manager,

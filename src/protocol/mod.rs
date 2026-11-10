@@ -5,6 +5,7 @@ pub mod color_representation;
 pub mod content_type;
 pub mod drm_lease;
 pub mod ext_foreign_toplevel;
+pub mod fixes;
 pub mod foreign_toplevel;
 pub mod gamma_control;
 pub mod idle;
