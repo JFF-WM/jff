@@ -7,7 +7,8 @@
 //!   drawing that picture, fading out, as a [`Ghost`]. If the picture can't be taken (the
 //!   surface is already dead) the window just disappears, like before.
 //!
-//! Frame loops already redraw every refresh, so nothing here schedules frames.
+//! Nothing here schedules frames: while a fade runs, `JffState::animations_ongoing` keeps the
+//! monitor drawing.
 
 use std::time::{Duration, Instant};
 
@@ -135,17 +136,17 @@ impl Ghost {
 }
 
 /// Drop ghosts that have finished fading (`close` long) and draw the rest (those on
-/// `workspace`) with the frame's top-left at `origin`. Push the result before the windows' elements: ghosts go on
-/// top. Drawn at scale 1, like the capture they came from.
+/// `workspace`) with the frame's top-left at `origin`, as they look at `now`. Push the result
+/// before the windows' elements: ghosts go on top. Drawn at scale 1, like the capture they came from.
 pub fn ghost_elements(
     renderer: &mut GlesRenderer,
     ghosts: &mut Vec<Ghost>,
     workspace: usize,
     origin: Point<i32, Logical>,
     close: Duration,
+    now: Instant,
     out: &mut Vec<JffElement>,
 ) {
-    let now = Instant::now();
     ghosts.retain(|ghost| now.saturating_duration_since(ghost.closed) < close);
     for ghost in ghosts.iter().filter(|g| g.workspace == workspace) {
         let alpha =

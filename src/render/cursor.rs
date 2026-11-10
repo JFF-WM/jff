@@ -34,6 +34,11 @@ pub struct Cursor {
 }
 
 impl Cursor {
+    /// Several frames: the picture changes with time, without any event.
+    pub fn is_animated(&self) -> bool {
+        self.frames.len() > 1 && self.duration_ms > 0
+    }
+
     /// The frame to show `millis` after start. Animations loop.
     pub fn frame(&self, millis: u32) -> &Frame {
         if self.duration_ms == 0 {
@@ -92,6 +97,11 @@ impl CursorManager {
     /// The focused client asked for a different cursor (`wl_pointer.set_cursor`).
     pub fn set_status(&mut self, status: CursorImageStatus) {
         self.status = status;
+    }
+
+    /// The cursor being drawn is a themed one that animates (the busy spinner).
+    pub fn is_animated(&mut self) -> bool {
+        matches!(self.render_cursor(), RenderCursor::Named(cursor) if cursor.is_animated())
     }
 
     pub fn render_cursor(&mut self) -> RenderCursor {

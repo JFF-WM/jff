@@ -747,8 +747,10 @@ impl CompositorHandler for JffState {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
-        // Imports the attached buffer so the renderer can draw it.
+        // Imports the attached buffer so the renderer can draw it. Also reached when a barrier
+        // or a blocker clears and a held commit applies, outside any client request.
         on_commit_buffer_handler::<Self>(surface);
+        self.queue_redraw_all();
 
         // Popups need their own commit bookkeeping before they can be drawn.
         self.popups.commit(surface);

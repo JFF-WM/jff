@@ -37,7 +37,7 @@ use smithay::desktop::utils::{
 use smithay::desktop::Window;
 use smithay::output::{Mode, Output, OutputModeSource, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
-use smithay::reexports::calloop::LoopHandle;
+use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
 use smithay::reexports::drm::control::{
     connector, crtc, property, Device as ControlDevice, Mode as DrmMode, ModeTypeFlags,
     ResourceHandles,
@@ -54,12 +54,14 @@ use smithay::wayland::drm_lease::{DrmLease, DrmLeaseBuilder, DrmLeaseState, Leas
 use smithay::wayland::presentation::Refresh;
 use smithay::reexports::wayland_server::DisplayHandle;
 
+use crate::app::pacing::advance_frame_sequence;
 use crate::app::{Backend, BACKGROUND};
 use crate::config::{Config, ModeRequest, Vrr};
 use crate::desk::Desk;
 use crate::feature::outputs::{output_rect, Monitor, MonitorMode};
 use crate::feature::overview_mode::{overview_drag_elements, overview_elements};
 use crate::feature::screenshot::screenshot_elements;
+use crate::primitives::frame_clock::{next_presentation_time, wait_until, FALLBACK_REFRESH};
 use crate::primitives::layout;
 use crate::protocol::layer_shell::{
     fullscreen_covers, layer_body_elements, layer_elements, layer_popup_elements, layers_above,
@@ -204,17 +206,9 @@ struct TtyOutput {
     output: Output,
     connector: connector::Handle,
     mode: DrmMode,
-    /// A frame is queued and its vblank hasn't arrived yet.
-    waiting_for_vblank: bool,
-    /// A retry timer is already scheduled.
-    retry_pending: bool,
-    /// Frame callbacks for the coming frame already went out at the vblank, so the deferred
-    /// render must not send them again.
-    callbacks_sent: bool,
-    /// Wall time of the last renders (fast attack, slow decay). Decides how long before the
-    /// next vblank the deferred render has to start.
-    render_cost: Duration,
-    /// CLOCK_MONOTONIC time of the last vblank. The idle timer follows this grid.
+    /// Where the output is in its draw cycle, see [`RedrawState`].
+    redraw: RedrawState,
+    /// CLOCK_MONOTONIC time of the last vblank. The frame clock counts on from it.
     last_vblank: Option<Duration>,
     /// What the monitor and driver support for VRR.
     vrr_support: VrrSupport,
@@ -244,42 +238,77 @@ struct TtyOutput {
     powered_off: bool,
 }
 
-/// Time until the next expected vblank, counting on from the last one seen.
-///
-/// A fixed delay isn't a multiple of the refresh interval, so after a vblank with no client
-/// frame the next check lands at a random phase and frames arrive unevenly (micro stutter).
-fn next_vblank_delay(last: Option<Duration>, refresh: Duration) -> Duration {
-    let refresh_ns = refresh.as_nanos().max(1);
-    let Some(last) = last else {
-        return refresh;
-    };
-    let now_ns = crate::protocol::presentation::monotonic_now().as_nanos();
-    let last_ns = last.as_nanos();
-    let periods = now_ns.saturating_sub(last_ns) / refresh_ns + 1;
-    let next_ns = last_ns + periods * refresh_ns;
-    let delay_ns = next_ns.saturating_sub(now_ns).max(500_000);
-    Duration::from_nanos(delay_ns as u64)
+/// Where a monitor is in its draw cycle. A frame is drawn only when something asked for one
+/// ([`JffState::queue_redraw_all`]), never on a timer.
+enum RedrawState {
+    /// Nothing to draw and nothing in flight.
+    Idle,
+    /// A frame was asked for. It is drawn at the end of the current event loop pass.
+    Queued,
+    /// A frame is queued on the display and its vblank hasn't arrived. `redraw_needed` is set
+    /// by a commit or an animation in the meantime: the next frame follows at the vblank.
+    WaitingForVBlank { redraw_needed: bool },
+    /// The last redraw had nothing new to show, so no vblank will come. A timer stands in for
+    /// it: clients keep their frame callbacks at the refresh rate while the monitor idles.
+    WaitingForEstimatedVBlank { token: RegistrationToken },
+    /// Same, and a frame was asked for in the meantime. It is drawn at the end of the current
+    /// event loop pass, not when the timer goes off: a frame that waits for the timer is
+    /// committed around the real vblank and lands on either side of it at random. A frame that
+    /// goes to the display removes the timer.
+    WaitingForEstimatedVBlankAndQueued { token: RegistrationToken },
 }
 
-/// How long to wait after a vblank before rendering the next frame, so it is built from what
-/// clients committed during the frame and still reaches the display on the next vblank.
-///
-/// Rendering right at the vblank latches whatever the clients had at that instant. A client
-/// that was sent its frame callback at the same instant commits a frame later, so it always
-/// shows up one refresh late. Callbacks go out at the vblank and the render waits until
-/// `render_cost` plus a margin before the next one.
-///
-/// `None` renders immediately (VRR, or a render that doesn't fit in the refresh interval).
-fn render_deadline_delay(lit: &TtyOutput, refresh: Duration) -> Option<Duration> {
-    if lit.vrr_on {
-        return None;
+impl TtyOutput {
+    /// A frame is queued on the display and its vblank hasn't arrived.
+    fn waiting_for_vblank(&self) -> bool {
+        matches!(self.redraw, RedrawState::WaitingForVBlank { .. })
     }
-    let budget = lit.render_cost + lit.render_cost / 2 + Duration::from_micros(700);
-    if budget >= refresh * 3 / 4 {
-        return None;
+
+    /// Ask for a frame: now when idle, after the vblank or the estimated vblank when waiting.
+    fn queue_redraw(&mut self) {
+        self.redraw = match std::mem::replace(&mut self.redraw, RedrawState::Idle) {
+            RedrawState::Idle | RedrawState::Queued => RedrawState::Queued,
+            RedrawState::WaitingForVBlank { .. } => RedrawState::WaitingForVBlank {
+                redraw_needed: true,
+            },
+            RedrawState::WaitingForEstimatedVBlank { token }
+            | RedrawState::WaitingForEstimatedVBlankAndQueued { token } => {
+                RedrawState::WaitingForEstimatedVBlankAndQueued { token }
+            }
+        };
     }
-    let delay = next_vblank_delay(lit.last_vblank, refresh).checked_sub(budget)?;
-    (delay >= Duration::from_micros(500)).then_some(delay)
+
+    /// A frame is asked for and is drawn at the end of this event loop pass.
+    fn redraw_is_queued(&self) -> bool {
+        matches!(
+            self.redraw,
+            RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued { .. }
+        )
+    }
+
+    /// Forget the draw cycle (monitor off, session paused): nothing is in flight any more.
+    fn reset_redraw(&mut self, handle: &LoopHandle<'static, JffState>) {
+        if let RedrawState::WaitingForEstimatedVBlank { token }
+        | RedrawState::WaitingForEstimatedVBlankAndQueued { token } = self.redraw
+        {
+            handle.remove(token);
+        }
+        self.redraw = RedrawState::Idle;
+    }
+
+    /// Refresh interval of the monitor, 60 Hz when it has no mode.
+    fn refresh(&self) -> Duration {
+        crate::protocol::presentation::refresh_interval(&self.output).unwrap_or(FALLBACK_REFRESH)
+    }
+
+    /// When a frame drawn now reaches the screen (CLOCK_MONOTONIC).
+    fn next_presentation_time(&self) -> Duration {
+        next_presentation_time(
+            self.last_vblank,
+            self.refresh(),
+            crate::protocol::presentation::monotonic_now(),
+        )
+    }
 }
 
 pub struct Tty {
@@ -856,10 +885,7 @@ impl Tty {
             output,
             connector: info.handle(),
             mode: drm_mode,
-            waiting_for_vblank: false,
-            retry_pending: false,
-            callbacks_sent: false,
-            render_cost: Duration::from_millis(2),
+            redraw: RedrawState::Idle,
             last_vblank: None,
             gamma: None,
             client_gamma: None,
@@ -900,7 +926,7 @@ impl Tty {
     fn apply_gamma(&mut self) {
         let Tty { drm, outputs, .. } = &mut *self;
         for (&crtc, lit) in outputs.iter_mut() {
-            if !lit.gamma_pending || lit.waiting_for_vblank || lit.last_vblank.is_none() {
+            if !lit.gamma_pending || lit.waiting_for_vblank() || lit.last_vblank.is_none() {
                 continue;
             }
             lit.gamma_pending = false;
@@ -918,25 +944,36 @@ impl Tty {
         }
     }
 
-    /// Render `crtc` again after `delay`, unless a frame or retry is already pending.
-    fn schedule_retry(&mut self, crtc: crtc::Handle, delay: Duration) {
+    /// The redraw of `crtc` had nothing to queue, so no vblank is coming: wait for the one it
+    /// would have been (see [`RedrawState::WaitingForEstimatedVBlank`]).
+    fn queue_estimated_vblank(&mut self, crtc: crtc::Handle) {
         let Some(lit) = self.outputs.get_mut(&crtc) else {
             return;
         };
-        if lit.retry_pending || lit.waiting_for_vblank {
+        // The redraw that just had nothing to show was asked for while a timer was already
+        // running: that timer stands, no second one.
+        if let RedrawState::WaitingForEstimatedVBlank { token }
+        | RedrawState::WaitingForEstimatedVBlankAndQueued { token } = lit.redraw
+        {
+            lit.redraw = RedrawState::WaitingForEstimatedVBlank { token };
             return;
         }
-        lit.retry_pending = true;
+        let now = crate::protocol::presentation::monotonic_now();
+        let delay = wait_until(lit.next_presentation_time(), now);
         let timer = Timer::from_duration(delay);
-        let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
-            if let Backend::Tty(tty) = &mut state.backend {
-                if let Some(lit) = tty.outputs.get_mut(&crtc) {
-                    lit.retry_pending = false;
-                }
-            }
-            state.render_crtc(crtc);
+        match self.loop_handle.insert_source(timer, move |_, _, state| {
+            state.on_estimated_vblank(crtc);
             TimeoutAction::Drop
-        });
+        }) {
+            Ok(token) => lit.redraw = RedrawState::WaitingForEstimatedVBlank { token },
+            Err(err) => {
+                tracing::warn!(
+                    "monitor {}: no estimated vblank timer: {err}",
+                    lit.output.name()
+                );
+                lit.redraw = RedrawState::Idle;
+            }
+        }
     }
 }
 
@@ -999,6 +1036,8 @@ pub fn init(
                 }
             }
             state.process_input_event(event);
+            // the pointer moved, a key changed something...
+            state.queue_redraw_all();
         })
         .map_err(|e| anyhow!("failed to insert the libinput source: {}", e.error))?;
 
@@ -1046,10 +1085,26 @@ pub fn init(
 }
 
 impl JffState {
-    /// Draw a frame on every monitor that is ready for one.
-    pub fn render_tty(&mut self) {
+    /// Ask for a frame on every monitor. It is drawn at the end of the current event loop pass
+    /// (or right after the vblank when one is in flight), see [`Self::redraw_queued_outputs`].
+    pub fn queue_redraw_tty(&mut self) {
+        if let Backend::Tty(tty) = &mut self.backend {
+            for lit in tty.outputs.values_mut() {
+                lit.queue_redraw();
+            }
+        }
+    }
+
+    /// Draw a frame on every monitor that asked for one. The event loop calls it after each
+    /// pass, once everything the pass did (commits, input, vblanks) has been applied.
+    pub fn redraw_queued_outputs(&mut self) {
         let crtcs: Vec<crtc::Handle> = match &self.backend {
-            Backend::Tty(tty) => tty.outputs.keys().copied().collect(),
+            Backend::Tty(tty) => tty
+                .outputs
+                .iter()
+                .filter(|(_, lit)| lit.redraw_is_queued())
+                .map(|(&crtc, _)| crtc)
+                .collect(),
             _ => return,
         };
         for crtc in crtcs {
@@ -1105,8 +1160,13 @@ impl JffState {
         if !tty.drm.is_active() {
             return false;
         }
-        let Tty { outputs, drm, .. } = &mut *tty;
-        let Some((&crtc, lit)) = outputs.iter_mut().find(|(_, lit)| lit.output == *output) else {
+        let Tty {
+            outputs,
+            drm,
+            loop_handle,
+            ..
+        } = &mut *tty;
+        let Some((_, lit)) = outputs.iter_mut().find(|(_, lit)| lit.output == *output) else {
             return false;
         };
         if lit.powered_off == !on {
@@ -1126,7 +1186,7 @@ impl JffState {
             if on { "on" } else { "off" }
         );
         lit.powered_off = !on;
-        lit.waiting_for_vblank = false;
+        lit.reset_redraw(loop_handle);
         if on {
             // same recovery as after a VT switch
             if let Err(err) = lit.compositor.reset_state() {
@@ -1134,55 +1194,57 @@ impl JffState {
             }
             lit.compositor.reset_buffers();
             lit.last_vblank = None;
-            self.render_crtc(crtc);
+            lit.queue_redraw();
         }
         true
     }
 
-    /// Draw one frame to the monitor on `crtc` and queue it for the next vblank.
+    /// Draw one frame to the monitor on `crtc` and queue it for the next vblank. Does nothing
+    /// unless a frame was asked for (`Queued`, or `WaitingForEstimatedVBlankAndQueued`).
     fn render_crtc(&mut self, crtc: crtc::Handle) {
+        let Backend::Tty(tty) = &mut self.backend else {
+            return;
+        };
+        let active = tty.drm.is_active();
+        let Some(lit) = tty.outputs.get_mut(&crtc) else {
+            return;
+        };
+        if !lit.redraw_is_queued() {
+            return;
+        }
+        // On another VT or switched off there is nothing to draw: the monitor is asked again
+        // when it comes back. This also stops the estimated vblank timer, if one is running.
+        if !active || lit.powered_off {
+            lit.reset_redraw(&tty.loop_handle);
+            return;
+        }
+        // When this frame reaches the screen. Timed commits due by then belong in it, and
+        // animations are computed for that moment (the clock stands still there for the frame).
+        let presented_at = lit.next_presentation_time();
+        let output = lit.output.clone();
+        let anim_now = std::time::Instant::now()
+            + presented_at.saturating_sub(crate::protocol::presentation::monotonic_now());
+
         self.reconcile_window_workspaces();
         self.refresh_window_outputs();
         // Needs &mut self, so it has to happen before the backend is borrowed. May end the overview.
         let overview = self.overview_plan();
         let fullscreen = self.fullscreen_rects();
-
-        // Timed commits due by the next vblank (when this frame shows up) belong in this frame.
-        if let Backend::Tty(tty) = &self.backend {
-            if tty.drm.is_active() {
-                if let Some(lit) = tty.outputs.get(&crtc).filter(|l| !l.waiting_for_vblank) {
-                    let refresh = crate::protocol::presentation::refresh_interval(&lit.output)
-                        .unwrap_or(Duration::from_nanos(16_666_667));
-                    let target = crate::protocol::presentation::monotonic_now()
-                        + next_vblank_delay(lit.last_vblank, refresh);
-                    let output = lit.output.clone();
-                    self.release_commit_timers(&output, target);
-                }
-            }
-        }
+        self.release_commit_timers(&output, presented_at);
 
         let Backend::Tty(tty) = &mut self.backend else {
             return;
         };
-        // on another VT, nothing to draw
-        if !tty.drm.is_active() {
-            return;
-        }
         let Tty {
             renderer,
             outputs,
             drm,
+            loop_handle,
             ..
         } = &mut *tty;
         let Some(lit) = outputs.get_mut(&crtc) else {
             return;
         };
-        if lit.powered_off {
-            return;
-        }
-        if lit.waiting_for_vblank {
-            return; // the vblank handler will draw the next one
-        }
 
         // VRR follows the config, for `fullscreen`, whether a fullscreen window is on top. A
         // switch that needs a modeset blanks the screen, so only `always` does one.
@@ -1400,7 +1462,7 @@ impl JffState {
                 let animate = self.config.window_animations();
                 let (open_time, close_time) = self.config.window_animation_times();
                 let open_style = self.config.window_open_style();
-                let now = std::time::Instant::now();
+                let now = anim_now;
                 // windows that were just closed, fading out, are on top
                 crate::feature::window_anim::ghost_elements(
                     &mut *renderer,
@@ -1408,6 +1470,7 @@ impl JffState {
                     self.desk.current_on(&lit.output.name()),
                     origin,
                     close_time,
+                    now,
                     &mut elements,
                 );
                 for entry in self.desk.top_down() {
@@ -1512,7 +1575,6 @@ impl JffState {
             PresentationMode::VSync
         };
 
-        let render_started = std::time::Instant::now();
         let mut queued = false;
         match lit.compositor.render_frame(
             &mut *renderer,
@@ -1573,33 +1635,64 @@ impl JffState {
         }
 
         if queued {
-            lit.waiting_for_vblank = true;
-            let sample = render_started.elapsed();
-            lit.render_cost = if sample > lit.render_cost {
-                sample
-            } else {
-                (lit.render_cost * 15 + sample) / 16
+            // The frame goes out with the next vblank, so the timer that stood in for it is
+            // not needed any more.
+            if let RedrawState::WaitingForEstimatedVBlankAndQueued { token } = lit.redraw {
+                loop_handle.remove(token);
+            }
+            lit.redraw = RedrawState::WaitingForVBlank {
+                redraw_needed: false,
             };
-        }
-        let retry_delay = next_vblank_delay(
-            lit.last_vblank,
-            crate::protocol::presentation::refresh_interval(&lit.output)
-                .unwrap_or(Duration::from_nanos(16_666_667)),
-        );
-        let output = lit.output.clone();
-        let callbacks_sent = std::mem::take(&mut lit.callbacks_sent);
-        if !queued {
-            // no frame queued means no vblank event, so poll on the refresh grid instead
-            tty.schedule_retry(crtc, retry_delay);
+        } else {
+            // Nothing went to the display, so no vblank is coming. What clients committed is
+            // already on screen: their barriers go, their callbacks wait for the estimated vblank.
+            tty.queue_estimated_vblank(crtc);
         }
 
-        if !callbacks_sent {
+        if queued {
+            // The clients' buffers were latched by this frame, so the callbacks can go out now.
+            // A new cycle starts: each surface gets one callback per cycle, which keeps a client
+            // that commits without damage from spinning.
+            advance_frame_sequence(&output);
             self.send_frame_callbacks(&output);
-        }
-        if !queued {
-            // no vblank is coming to clear the barriers, and what clients committed is already
-            // on screen
+        } else {
             self.release_fifo_barriers(&output);
+        }
+    }
+
+    /// The timer that stands in for a vblank went off (see [`RedrawState::WaitingForEstimatedVBlank`]).
+    fn on_estimated_vblank(&mut self, crtc: crtc::Handle) {
+        let Backend::Tty(tty) = &mut self.backend else {
+            return;
+        };
+        let Some(lit) = tty.outputs.get_mut(&crtc) else {
+            return;
+        };
+        match lit.redraw {
+            RedrawState::WaitingForEstimatedVBlank { .. } => {}
+            // The timer fired just in front of a redraw that was asked for: draw it now.
+            RedrawState::WaitingForEstimatedVBlankAndQueued { .. } => {
+                lit.redraw = RedrawState::Queued;
+                advance_frame_sequence(&lit.output);
+                return;
+            }
+            _ => return, // a timer that was overtaken (monitor off, session paused)
+        }
+        lit.redraw = RedrawState::Idle;
+        let output = lit.output.clone();
+        tty.apply_gamma();
+
+        // The cycle is over: clients that committed without damage get their callback now.
+        advance_frame_sequence(&output);
+        self.send_frame_callbacks(&output);
+
+        let ongoing = self.animations_ongoing();
+        if let Backend::Tty(tty) = &mut self.backend {
+            if let Some(lit) = tty.outputs.get_mut(&crtc) {
+                if ongoing {
+                    lit.queue_redraw();
+                }
+            }
         }
     }
 
@@ -1611,7 +1704,14 @@ impl JffState {
         let Some(lit) = tty.outputs.get_mut(&crtc) else {
             return;
         };
-        lit.waiting_for_vblank = false;
+        // Out of the waiting state for the rest of this handler. A commit that comes in while
+        // barriers are released below queues a redraw on the idle monitor.
+        let redraw_needed = matches!(
+            std::mem::replace(&mut lit.redraw, RedrawState::Idle),
+            RedrawState::WaitingForVBlank {
+                redraw_needed: true
+            }
+        );
         // kernel flip timestamp, if it gave one on the monotonic clock
         let hw_time = match meta.map(|m| m.time) {
             Some(DrmEventTime::Monotonic(time)) if !time.is_zero() => Some(time),
@@ -1642,25 +1742,22 @@ impl JffState {
         // the frame is on screen, so clients waiting on a fifo barrier may commit again
         self.release_fifo_barriers(&output);
 
-        // Send the frame callbacks now so clients start on the next frame at once, and render
-        // late in the frame (see `render_deadline_delay`).
-        let delay = match &self.backend {
-            Backend::Tty(tty) => tty.outputs.get(&crtc).and_then(|lit| {
-                let refresh = crate::protocol::presentation::refresh_interval(&lit.output)?;
-                render_deadline_delay(lit, refresh)
-            }),
-            _ => None,
-        };
-        let Some(delay) = delay else {
-            self.render_crtc(crtc);
+        // Draw again right away when a commit or an animation asked for it. Otherwise the
+        // monitor goes idle: nothing is drawn until something asks for it. The drawing itself
+        // happens at the end of this event loop pass, see `redraw_queued_outputs`.
+        let ongoing = self.animations_ongoing();
+        let Backend::Tty(tty) = &mut self.backend else {
             return;
         };
-        self.send_frame_callbacks(&output);
-        if let Backend::Tty(tty) = &mut self.backend {
-            if let Some(lit) = tty.outputs.get_mut(&crtc) {
-                lit.callbacks_sent = true;
-            }
-            tty.schedule_retry(crtc, delay);
+        let Some(lit) = tty.outputs.get_mut(&crtc) else {
+            return;
+        };
+        if redraw_needed || ongoing {
+            lit.queue_redraw();
+        }
+        if matches!(lit.redraw, RedrawState::Idle) {
+            // Same cycle as the last frame, so only surfaces that have not had a callback yet get one.
+            self.send_frame_callbacks(&output);
         }
     }
 
@@ -1728,7 +1825,7 @@ impl JffState {
                     state.suspend();
                 }
                 for lit in tty.outputs.values_mut() {
-                    lit.waiting_for_vblank = false;
+                    lit.reset_redraw(&tty.loop_handle);
                 }
             }
             SessionEvent::ActivateSession => {
@@ -1747,7 +1844,7 @@ impl JffState {
                         tracing::warn!("error resetting the DRM compositor: {err:?}");
                     }
                     lit.compositor.reset_buffers();
-                    lit.waiting_for_vblank = false;
+                    lit.reset_redraw(&tty.loop_handle);
                     lit.last_vblank = None;
                     lit.powered_off = false;
                     // another VT may have left its own curves: set ours (or clear them)

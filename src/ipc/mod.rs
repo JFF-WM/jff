@@ -1174,7 +1174,12 @@ fn serve(handle: &LoopHandle<'static, JffState>, stream: UnixStream) {
                             // Its own source took over, this one has nothing left to do.
                             return Ok(PostAction::Remove);
                         }
-                        Ok(parsed) => state.ipc_reply(parsed),
+                        Ok(parsed) => {
+                            let reply = state.ipc_reply(parsed);
+                            // a command may have moved, focused or changed anything
+                            state.queue_redraw_all();
+                            reply
+                        }
                         Err(message) => error_reply(&message),
                     };
                     // Replies are small: if the client can't take one, drop it.

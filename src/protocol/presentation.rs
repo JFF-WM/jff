@@ -118,6 +118,23 @@ impl crate::state::JffState {
         }
     }
 
+    /// Whether a surface shown on any monitor belongs to a client that uses wp_commit_timing_v1.
+    /// Its timed commits are released only when a frame is drawn, so the monitor has to keep
+    /// drawing while one may be waiting. (Smithay's `CommitTimerBarrierState` may be able to
+    /// say when the next one is due, which would be more precise, but I did not verify it.)
+    pub(crate) fn commit_timers_in_use(&self) -> bool {
+        let mut used = false;
+        for output in &self.outputs {
+            self.for_each_shown_surface(output, |_, states| {
+                used |= states
+                    .data_map
+                    .get::<CommitTimerBarrierStateUserData>()
+                    .is_some();
+            });
+        }
+        used
+    }
+
     /// Clear the wp_fifo_v1 barriers of everything shown on `output`, so the commits waiting on
     /// them (`wait_barrier`) can apply. Call it when a frame reaches the screen: at the vblank
     /// on the TTY backend, right after submitting with winit, and on TTY also when a redraw

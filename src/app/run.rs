@@ -107,6 +107,8 @@ pub fn run() -> anyhow::Result<()> {
         |_, display, state| {
             // SAFETY: the display is never dropped while the loop is running.
             unsafe { display.get_mut().dispatch_clients(state).unwrap() };
+            // a commit, a request that moved a window, a new client...
+            state.queue_redraw_all();
             Ok(PostAction::Continue)
         },
     )?;
@@ -194,6 +196,9 @@ pub fn run() -> anyhow::Result<()> {
         state.publish_ext_foreign_toplevels();
         state.publish_ext_workspaces();
         state.service_image_copy();
+        // Last, so the frame is made from the state the steps above settled. A monitor draws
+        // here only if something asked for it (commit, input, animation, vblank).
+        state.redraw_queued_outputs();
         let _ = state.display_handle.flush_clients();
     })?;
 

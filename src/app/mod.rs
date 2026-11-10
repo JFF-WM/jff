@@ -8,6 +8,7 @@ use smithay::reexports::calloop::LoopHandle;
 use crate::config::Config;
 use crate::state::JffState;
 
+pub mod pacing;
 pub mod run;
 pub mod tty;
 pub mod winit;

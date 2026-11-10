@@ -6,7 +6,9 @@ use anyhow::anyhow;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent, WinitEventLoop};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Physical, Point, Scale, Transform};
+use smithay::wayland::compositor::SurfaceData;
 
 use crate::feature::outputs::output_rect;
 use crate::feature::overview_mode::overview_elements;
@@ -21,6 +23,7 @@ use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
 use crate::render::elements::JffElement;
 use crate::state::JffState;
 
+use super::pacing::{advance_frame_sequence, frame_sequence, LastCallback};
 use super::{Backend, BACKGROUND};
 
 /// How often a window hidden behind a covering fullscreen window gets a frame callback.
@@ -55,7 +58,22 @@ impl JffState {
     pub fn start_rendering(&mut self) {
         match &self.backend {
             Backend::Winit(winit) => winit.window().request_redraw(),
-            Backend::Tty(_) => self.render(),
+            Backend::Tty(_) => {
+                // the event loop has not run yet, so nothing else would draw the first frame
+                self.queue_redraw_all();
+                self.redraw_queued_outputs();
+            }
+        }
+    }
+
+    /// Ask for a frame on every monitor, because something on screen may have changed. On the
+    /// TTY backend it is drawn at the end of the event loop pass, once per vblank at most, a
+    /// monitor that is never asked draws nothing.
+    pub fn queue_redraw_all(&mut self) {
+        if self.backend.is_tty() {
+            self.queue_redraw_tty();
+        } else if let Backend::Winit(winit) = &self.backend {
+            winit.window().request_redraw();
         }
     }
 
@@ -84,9 +102,10 @@ impl JffState {
         }
     }
 
+    /// Draw now (winit) or ask for a frame (TTY, where drawing follows the vblank).
     pub fn render(&mut self) {
         if self.backend.is_tty() {
-            self.render_tty();
+            self.queue_redraw_tty();
         } else {
             self.render_winit();
         }
@@ -236,6 +255,7 @@ impl JffState {
                         ),
                         origin,
                         close_time,
+                        now,
                         &mut elements,
                     );
                     for entry in self.desk.top_down() {
@@ -344,19 +364,31 @@ impl JffState {
             Err(err) => tracing::warn!("error rendering output: {err:?}"),
         }
 
-        // redraws non-stop for now, pace it later
+        // redraws non-stop: the winit backend has no vblank to follow
         winit.window().request_redraw();
 
         if let Some(output) = self.outputs.first().cloned() {
+            advance_frame_sequence(&output);
             self.send_frame_callbacks(&output);
             self.release_fifo_barriers(&output);
         }
     }
 
     /// Frame callbacks for everything on `output`, so clients go on to draw their next frame.
+    /// Each surface gets at most one per frame cycle of the output (see `pacing.rs`), however
+    /// often this is called.
     pub fn send_frame_callbacks(&self, output: &Output) {
         let rect = output_rect(output);
         let time = self.start_time.elapsed();
+        let sequence = frame_sequence(output);
+        let name = output.name();
+        let should_send = |_: &WlSurface, states: &SurfaceData| -> Option<Output> {
+            states
+                .data_map
+                .get_or_insert_threadsafe(LastCallback::default)
+                .first_in_cycle(&name, sequence)
+                .then(|| output.clone())
+        };
         // Windows behind a fullscreen window that covers the monitor can't be seen: they get a
         // callback once per `HIDDEN_FRAME_INTERVAL` instead of one per refresh, so they stay
         // alive without competing with the game for the GPU.
@@ -376,13 +408,11 @@ impl JffState {
             behind = true;
             entry
                 .window
-                .send_frame(output, time, Some(throttle), |_, _| Some(output.clone()));
+                .send_frame(output, time, Some(throttle), should_send);
         }
         // layers get callbacks regardless of windows
         for layer in smithay::desktop::layer_map_for_output(output).layers() {
-            layer.send_frame(output, time, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            });
+            layer.send_frame(output, time, Some(Duration::ZERO), should_send);
         }
     }
 }

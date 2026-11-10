@@ -145,6 +145,11 @@ struct State {
     /// Strength of the animation the running fade started from.
     from_amount: f32,
     since: Instant,
+    /// Length of the fade, as of the last frame.
+    fade: Duration,
+    /// When the border was last drawn. A window that is gone or hidden stops being seen, and
+    /// then its entry no longer counts as an animation (see [`animating`]).
+    seen: Instant,
     /// The last ring handed out. Returned again while nothing about it changed, so Smithay sees
     /// the same element (same id, same commit) and repaints nothing.
     ring: Option<(RingKey, BorderElement)>,
@@ -157,6 +162,24 @@ const MAX_STATES: usize = 256;
 thread_local! {
     /// By the window's surface. Rendering is single-threaded, so a per-thread table is enough.
     static STATES: RefCell<HashMap<ObjectId, State>> = RefCell::new(HashMap::new());
+}
+
+/// How long after it was last drawn a border still counts as one that is being shown.
+const SEEN_WITHIN: Duration = Duration::from_millis(100);
+
+/// A border drawn lately is changing by itself: fading after a focus change, or turning
+/// (`animate`). The monitor has to keep drawing for it, nothing else asks for those frames.
+pub fn animating(now: Instant) -> bool {
+    STATES.with(|states| {
+        states.borrow().values().any(|state| {
+            now.saturating_duration_since(state.seen) < SEEN_WITHIN
+                && (now.saturating_duration_since(state.since) < state.fade
+                    || state
+                        .ring
+                        .as_ref()
+                        .is_some_and(|(key, _)| key.motion.amount > 0.0))
+        })
+    })
 }
 
 fn target(paint: &BorderPaint) -> [f32; 4] {
@@ -210,8 +233,12 @@ pub fn border_element(
             from: want,
             from_amount: want_amount,
             since: now.checked_sub(fade).unwrap_or(now),
+            fade,
+            seen: now,
             ring: None,
         });
+        state.fade = fade;
+        state.seen = now;
         if state.focused != paint.focused {
             // Start from wherever the fade has got to, so changing focus mid-fade doesn't jump.
             let elapsed = now.duration_since(state.since);

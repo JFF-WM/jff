@@ -1000,6 +1000,7 @@ impl JffState {
                 self.show_error("Config error", &format!("{err:#}"));
             }
         }
+        self.queue_redraw_all();
     }
 }
 
@@ -1098,6 +1099,7 @@ impl JffState {
         let inserted = self.loop_handle.insert_source(timer, |_, _, state| {
             state.hot_corner_timer = None;
             state.hot_corner_armed = false;
+            state.queue_redraw_all();
             // Warps don't come through the motion path: look again before acting.
             let at = state
                 .seat
