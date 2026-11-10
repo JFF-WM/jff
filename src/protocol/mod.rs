@@ -9,6 +9,7 @@ pub mod foreign_toplevel;
 pub mod gamma_control;
 pub mod idle;
 pub mod image_copy;
+pub mod input_timestamps;
 pub mod layer_shell;
 pub mod output_management;
 pub mod output_power;

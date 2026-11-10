@@ -77,6 +77,17 @@ impl JffState {
     pub fn process_input_event<B: InputBackend>(&mut self, event: InputEvent<B>) {
         // Idle tools (ext-idle-notify) measure time since the last input.
         self.idle_notifier_state.notify_activity(&self.seat);
+        // zwp_input_timestamps_v1: a client that asked gets the event's time just before the
+        // event itself. Sending it for an event a compositor binding then swallows is harmless:
+        // the next event of that device is stamped again, and the client keeps the latest.
+        match &event {
+            InputEvent::Keyboard { event } => self.stamp_keyboard(Event::time(event)),
+            InputEvent::PointerMotion { event } => self.stamp_pointer(Event::time(event)),
+            InputEvent::PointerMotionAbsolute { event } => self.stamp_pointer(Event::time(event)),
+            InputEvent::PointerButton { event } => self.stamp_pointer(Event::time(event)),
+            InputEvent::PointerAxis { event } => self.stamp_pointer(Event::time(event)),
+            _ => {}
+        }
         match event {
             InputEvent::Keyboard { event } => {
                 // A real key while a virtual keyboard's keymap is on the seat: back to the

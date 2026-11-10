@@ -106,6 +106,7 @@ use crate::protocol::ext_foreign_toplevel::ExtForeignToplevel;
 use crate::protocol::foreign_toplevel::ForeignToplevel;
 use crate::protocol::gamma_control::GammaControl;
 use crate::protocol::image_copy::ImageCopy;
+use crate::protocol::input_timestamps::InputTimestamps;
 use crate::protocol::output_management::OutputManagement;
 use crate::protocol::output_power::OutputPower;
 use crate::protocol::pointer_warp::PointerWarp;
@@ -280,6 +281,8 @@ pub struct JffState {
     /// xx-zones-v1: client zones for placing a client's own windows (`protocol/xx_zones.rs`).
     pub zones: Zones,
     pub pointer_warp: PointerWarp,
+    /// zwp_input_timestamps_v1: nanosecond event times for clients that ask (`protocol/input_timestamps.rs`).
+    pub input_timestamps: InputTimestamps,
     /// xdg-toplevel-drag: a drag-and-drop that carries a window (`protocol/toplevel_drag.rs`).
     pub toplevel_drags: ToplevelDrags,
     /// xdg-toplevel-tag: window tags for `window-rule` (`protocol/toplevel_tag.rs`).
@@ -507,6 +510,7 @@ impl JffState {
         let hotkeys = Hotkeys::new(&display_handle, config.global_hotkeys());
         let zones = Zones::new(&display_handle);
         let pointer_warp = PointerWarp::new(&display_handle);
+        let input_timestamps = InputTimestamps::new(&display_handle);
         let toplevel_drags = ToplevelDrags::new(&display_handle);
         let toplevel_tag_manager = ToplevelTagManager::new(&display_handle);
         let virtual_pointer_manager = VirtualPointerManager::new(&display_handle);
@@ -609,6 +613,7 @@ impl JffState {
             hotkeys,
             zones,
             pointer_warp,
+            input_timestamps,
             toplevel_drags,
             toplevel_tag_manager,
             virtual_pointer_manager,

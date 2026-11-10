@@ -10,6 +10,7 @@ mod desk;
 mod geom;
 mod grab_move;
 mod icc;
+mod input_timestamps;
 mod ipc;
 mod ipc_events;
 mod layout;
