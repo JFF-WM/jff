@@ -1706,12 +1706,21 @@ impl JffState {
         };
         // Out of the waiting state for the rest of this handler. A commit that comes in while
         // barriers are released below queues a redraw on the idle monitor.
+        let previous = std::mem::replace(&mut lit.redraw, RedrawState::Idle);
+        if let RedrawState::WaitingForEstimatedVBlank { token }
+        | RedrawState::WaitingForEstimatedVBlankAndQueued { token } = previous
+        {
+            tty.loop_handle.remove(token);
+        }
         let redraw_needed = matches!(
-            std::mem::replace(&mut lit.redraw, RedrawState::Idle),
+            previous,
             RedrawState::WaitingForVBlank {
                 redraw_needed: true
             }
         );
+        let Some(lit) = tty.outputs.get_mut(&crtc) else {
+            return;
+        };
         // kernel flip timestamp, if it gave one on the monotonic clock
         let hw_time = match meta.map(|m| m.time) {
             Some(DrmEventTime::Monotonic(time)) if !time.is_zero() => Some(time),
