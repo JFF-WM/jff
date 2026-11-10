@@ -718,10 +718,10 @@ fn check_reports_errors_like_parse() {
 
 #[test]
 fn check_warns_about_ignored_top_level_settings() {
-    let warnings = Config::check_text("gap 10\nradius 8\nfoo 1").unwrap();
+    let warnings = Config::check_text("gap 10\nradius 8\nqqqq 1").unwrap();
     assert_eq!(warnings.len(), 2, "{warnings:?}");
     assert!(warnings[0].contains("\"gap\"") && warnings[0].contains("\"gaps\""));
-    assert!(warnings[1].contains("\"foo\"") && !warnings[1].contains("did you mean"));
+    assert!(warnings[1].contains("\"qqqq\"") && !warnings[1].contains("did you mean"));
     // Real settings don't get a warning.
     let known = "workspaces 4\ngaps 4\nautostart \"true\"\nsh-autostart \"true\"\nblur {}";
     assert!(Config::check_text(known).unwrap().is_empty());
@@ -748,7 +748,7 @@ fn typos_find_their_setting() {
     assert_eq!(closest("gap", TOP_LEVEL_NODES), Some("gaps"));
     assert_eq!(closest("raduis", TOP_LEVEL_NODES), Some("radius"));
     assert_eq!(closest("bind", TOP_LEVEL_NODES), Some("binds"));
-    assert_eq!(closest("foo", TOP_LEVEL_NODES), None);
+    assert_eq!(closest("qqqq", TOP_LEVEL_NODES), None);
     assert_eq!(edit_distance("kitten", "sitting"), 3);
     assert_eq!(edit_distance("", "abc"), 3);
     assert_eq!(edit_distance("same", "same"), 0);
