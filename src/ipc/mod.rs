@@ -61,7 +61,8 @@
 //!  "views":[VIEW,...],                     every view, topmost first (a view is described above)
 //!  "workspace":2,"count":9,                the shown workspace (from 1) and how many there are
 //!  "focused":3,                            id of the view that has the keyboard, or null
-//!  "outputs":[{"name":"DP-1","x":0,"y":0,"width":1920,"height":1080,"scanout":false},...],
+//!  "outputs":[{"name":"DP-1","x":0,"y":0,"width":1920,"height":1080,"scanout":false,
+//!              "adaptive_sync":false},...],
 //!  "overview":false,"screenshot":false,    overview / screenshot selection is open
 //!  "locked":false,                         the session is locked
 //!  "popups":[POPUP,...],                   mapped menus and popovers
@@ -87,8 +88,8 @@
 //! view-workspace   id, workspace                             views
 //! focus            id, previous (view ids, or null)          focus
 //! workspace        workspace, count                          workspaces
-//! output-added     name, x, y, width, height, scanout        outputs
-//! output-changed   name, x, y, width, height, scanout        outputs
+//! output-added     name, x, y, width, height, scanout, adaptive_sync   outputs
+//! output-changed   name, x, y, width, height, scanout, adaptive_sync   outputs
 //! output-removed   name                                      outputs
 //! overview         open                                      modes
 //! screenshot       open (the area selection)                 modes
@@ -116,6 +117,10 @@
 //! `scanout` is true while the monitor's primary plane shows a client's buffer directly (direct
 //! scanout, no copy), false while it shows a frame jff composited. It changes with an
 //! `output-changed` event, so `jff msg watch outputs` shows direct scanout starting and stopping.
+//!
+//! `adaptive_sync` is true while the monitor runs with variable refresh rate, false while it
+//! has a fixed refresh. With `adaptive-sync "fullscreen"` it turns on and off as a fullscreen
+//! window covers the monitor, and each change is an `output-changed` event too.
 //!
 //! `drag` says the user started (`on` true) or stopped (`on` false) moving a window by its
 //! titlebar, or carrying its thumbnail in the overview (after the pointer moved far enough to
@@ -705,6 +710,10 @@ impl JffState {
                     height,
                     scanout: match &self.backend {
                         Backend::Tty(tty) => tty.scanning_out(output),
+                        _ => false,
+                    },
+                    adaptive_sync: match &self.backend {
+                        Backend::Tty(tty) => tty.adaptive_sync(output),
                         _ => false,
                     },
                 }

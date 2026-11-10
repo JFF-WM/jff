@@ -592,6 +592,13 @@ impl Tty {
             .any(|lit| lit.output == *output && lit.scanning_out)
     }
 
+    /// Whether variable refresh rate is on for `output` right now. False if it isn't lit.
+    pub fn adaptive_sync(&self, output: &Output) -> bool {
+        self.outputs
+            .values()
+            .any(|lit| lit.output == *output && lit.vrr_on)
+    }
+
     /// Connected monitors as of the last scan, lit or not.
     pub fn monitors(&self) -> &[Monitor] {
         &self.monitors
@@ -1235,6 +1242,7 @@ impl JffState {
         let Backend::Tty(tty) = &mut self.backend else {
             return;
         };
+        tty.apply_gamma();
         let Tty {
             renderer,
             outputs,
@@ -1680,7 +1688,6 @@ impl JffState {
         }
         lit.redraw = RedrawState::Idle;
         let output = lit.output.clone();
-        tty.apply_gamma();
 
         // The cycle is over: clients that committed without damage get their callback now.
         advance_frame_sequence(&output);
@@ -1747,7 +1754,6 @@ impl JffState {
             Err(err) => tracing::warn!("error marking frame as submitted: {err}"),
         }
         let output = lit.output.clone();
-        tty.apply_gamma();
         // the frame is on screen, so clients waiting on a fifo barrier may commit again
         self.release_fifo_barriers(&output);
 
@@ -1789,7 +1795,6 @@ impl JffState {
         };
         // also runs on reload-config, where a profile may have changed
         tty.sync_gamma(&self.config);
-        tty.apply_gamma();
         let monitors_changed = tty.monitors() != known.as_slice();
         if removed.is_empty() && added.is_empty() {
             // a disabled monitor can still have been plugged or unplugged

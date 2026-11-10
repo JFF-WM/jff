@@ -136,18 +136,22 @@ pub struct OutputInfo {
     /// The monitor's primary plane is showing a client's buffer directly (direct scanout), not
     /// a frame jff composited. Always false on winit.
     pub scanout: bool,
+    /// The monitor is running with variable refresh rate (`adaptive-sync`) right now. With
+    /// `fullscreen` it follows a fullscreen window on top; always false on winit.
+    pub adaptive_sync: bool,
 }
 
 impl OutputInfo {
     fn members(&self) -> String {
         format!(
-            "\"name\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"scanout\":{}",
+            "\"name\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"scanout\":{},\"adaptive_sync\":{}",
             json_str(&self.name),
             self.x,
             self.y,
             self.width,
             self.height,
-            self.scanout
+            self.scanout,
+            self.adaptive_sync
         )
     }
 

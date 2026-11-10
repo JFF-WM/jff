@@ -29,6 +29,7 @@ fn output(name: &str, x: i32) -> OutputInfo {
         width: 1920,
         height: 1080,
         scanout: false,
+        adaptive_sync: false,
     }
 }
 
@@ -420,7 +421,31 @@ fn outputs_added_removed_and_changed() {
             width: 2560,
             height: 1080,
             scanout: false,
+            adaptive_sync: false,
         })]
+    );
+}
+
+#[test]
+fn adaptive_sync_changes_are_output_changes() {
+    let old = snapshot(vec![]);
+    let mut new = old.clone();
+    new.outputs[0].adaptive_sync = true;
+    assert_eq!(
+        diff(&old, &new),
+        vec![Event::OutputChanged(OutputInfo {
+            adaptive_sync: true,
+            ..output("DP-1", 0)
+        })]
+    );
+    assert_eq!(
+        diff(&old, &new)[0].to_json(),
+        "{\"event\":\"output-changed\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
+             \"height\":1080,\"scanout\":false,\"adaptive_sync\":true}"
+    );
+    assert_eq!(
+        diff(&new, &old),
+        vec![Event::OutputChanged(output("DP-1", 0))]
     );
 }
 
@@ -439,7 +464,7 @@ fn scanout_changes_are_output_changes() {
     assert_eq!(
         diff(&old, &new)[0].to_json(),
         "{\"event\":\"output-changed\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-             \"height\":1080,\"scanout\":true}"
+             \"height\":1080,\"scanout\":true,\"adaptive_sync\":false}"
     );
     assert_eq!(
         diff(&new, &old),
@@ -663,7 +688,7 @@ fn events_are_written_as_one_json_line_each() {
         (
             Event::OutputAdded(output("DP-1", 0)),
             "{\"event\":\"output-added\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-                 \"height\":1080,\"scanout\":false}",
+                 \"height\":1080,\"scanout\":false,\"adaptive_sync\":false}",
         ),
         (
             Event::OutputRemoved {
@@ -674,7 +699,7 @@ fn events_are_written_as_one_json_line_each() {
         (
             Event::OutputChanged(output("DP-1", 0)),
             "{\"event\":\"output-changed\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-                 \"height\":1080,\"scanout\":false}",
+                 \"height\":1080,\"scanout\":false,\"adaptive_sync\":false}",
         ),
         (
             Event::Overview { open: true },
