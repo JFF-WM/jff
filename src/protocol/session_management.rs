@@ -536,17 +536,16 @@ impl JffState {
         if self.dragging_view.is_none() && self.resize.is_none() {
             self.session_save_if_dirty();
         }
-        if !self.session_management.live.is_empty() {
+    }
+
+    /// Write the store if anything changed since the last save.
+    fn session_save_if_dirty(&mut self) {
+        if self.session_management.dirty {
             tracing::debug!(
-                "xdg-session: flush, {} live sessions, store has {}",
+                "xdg-session: saving, {} live sessions, store has {}",
                 self.session_management.live.len(),
                 self.session_management.store.len()
             );
-        }
-    }
-
-    fn session_save_if_dirty(&mut self) {
-        if self.session_management.dirty {
             self.session_management.write();
         }
     }
