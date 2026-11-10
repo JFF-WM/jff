@@ -208,6 +208,12 @@ struct TtyOutput {
     waiting_for_vblank: bool,
     /// A retry timer is already scheduled.
     retry_pending: bool,
+    /// Frame callbacks for the coming frame already went out at the vblank, so the deferred
+    /// render must not send them again.
+    callbacks_sent: bool,
+    /// Wall time of the last renders (fast attack, slow decay). Decides how long before the
+    /// next vblank the deferred render has to start.
+    render_cost: Duration,
     /// CLOCK_MONOTONIC time of the last vblank. The idle timer follows this grid.
     last_vblank: Option<Duration>,
     /// What the monitor and driver support for VRR.
@@ -253,6 +259,27 @@ fn next_vblank_delay(last: Option<Duration>, refresh: Duration) -> Duration {
     let next_ns = last_ns + periods * refresh_ns;
     let delay_ns = next_ns.saturating_sub(now_ns).max(500_000);
     Duration::from_nanos(delay_ns as u64)
+}
+
+/// How long to wait after a vblank before rendering the next frame, so it is built from what
+/// clients committed during the frame and still reaches the display on the next vblank.
+///
+/// Rendering right at the vblank latches whatever the clients had at that instant. A client
+/// that was sent its frame callback at the same instant commits a frame later, so it always
+/// shows up one refresh late. Callbacks go out at the vblank and the render waits until
+/// `render_cost` plus a margin before the next one.
+///
+/// `None` renders immediately (VRR, or a render that doesn't fit in the refresh interval).
+fn render_deadline_delay(lit: &TtyOutput, refresh: Duration) -> Option<Duration> {
+    if lit.vrr_on {
+        return None;
+    }
+    let budget = lit.render_cost + lit.render_cost / 2 + Duration::from_micros(700);
+    if budget >= refresh * 3 / 4 {
+        return None;
+    }
+    let delay = next_vblank_delay(lit.last_vblank, refresh).checked_sub(budget)?;
+    (delay >= Duration::from_micros(500)).then_some(delay)
 }
 
 pub struct Tty {
@@ -831,6 +858,8 @@ impl Tty {
             mode: drm_mode,
             waiting_for_vblank: false,
             retry_pending: false,
+            callbacks_sent: false,
+            render_cost: Duration::from_millis(2),
             last_vblank: None,
             gamma: None,
             client_gamma: None,
@@ -1483,6 +1512,7 @@ impl JffState {
             PresentationMode::VSync
         };
 
+        let render_started = std::time::Instant::now();
         let mut queued = false;
         match lit.compositor.render_frame(
             &mut *renderer,
@@ -1544,6 +1574,12 @@ impl JffState {
 
         if queued {
             lit.waiting_for_vblank = true;
+            let sample = render_started.elapsed();
+            lit.render_cost = if sample > lit.render_cost {
+                sample
+            } else {
+                (lit.render_cost * 15 + sample) / 16
+            };
         }
         let retry_delay = next_vblank_delay(
             lit.last_vblank,
@@ -1551,12 +1587,15 @@ impl JffState {
                 .unwrap_or(Duration::from_nanos(16_666_667)),
         );
         let output = lit.output.clone();
+        let callbacks_sent = std::mem::take(&mut lit.callbacks_sent);
         if !queued {
             // no frame queued means no vblank event, so poll on the refresh grid instead
             tty.schedule_retry(crtc, retry_delay);
         }
 
-        self.send_frame_callbacks(&output);
+        if !callbacks_sent {
+            self.send_frame_callbacks(&output);
+        }
         if !queued {
             // no vblank is coming to clear the barriers, and what clients committed is already
             // on screen
@@ -1602,7 +1641,27 @@ impl JffState {
         tty.apply_gamma();
         // the frame is on screen, so clients waiting on a fifo barrier may commit again
         self.release_fifo_barriers(&output);
-        self.render_crtc(crtc);
+
+        // Send the frame callbacks now so clients start on the next frame at once, and render
+        // late in the frame (see `render_deadline_delay`).
+        let delay = match &self.backend {
+            Backend::Tty(tty) => tty.outputs.get(&crtc).and_then(|lit| {
+                let refresh = crate::protocol::presentation::refresh_interval(&lit.output)?;
+                render_deadline_delay(lit, refresh)
+            }),
+            _ => None,
+        };
+        let Some(delay) = delay else {
+            self.render_crtc(crtc);
+            return;
+        };
+        self.send_frame_callbacks(&output);
+        if let Backend::Tty(tty) = &mut self.backend {
+            if let Some(lit) = tty.outputs.get_mut(&crtc) {
+                lit.callbacks_sent = true;
+            }
+            tty.schedule_retry(crtc, delay);
+        }
     }
 
     /// Rescan for plugged, unplugged or reconfigured monitors and update the outputs.
