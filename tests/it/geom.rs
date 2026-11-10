@@ -202,13 +202,22 @@ fn edges_are_found_within_the_margin() {
     assert_eq!(edge_at(r, (900.0, 1079.0), 2.0), None);
     assert_eq!(edge_at(r, (900.0, 500.0), 2.0), None);
     assert_eq!(edge_at(r, (0.0, 0.0), 2.0), Some(Side::Left));
-    assert_eq!(edge_at((1920, 0, 1280, 720), (1920.0, 300.0), 2.0), Some(Side::Left));
+    assert_eq!(
+        edge_at((1920, 0, 1280, 720), (1920.0, 300.0), 2.0),
+        Some(Side::Left)
+    );
 }
 
 #[test]
 fn pointer_keeps_its_relative_spot() {
     let from = (0, 0, 1000, 500);
-    assert_eq!(pointer_anchored_pos(from, (500, 250), (500.0, 250.0)), (250, 125));
+    assert_eq!(
+        pointer_anchored_pos(from, (500, 250), (500.0, 250.0)),
+        (250, 125)
+    );
     assert_eq!(pointer_anchored_pos(from, (500, 250), (0.0, 0.0)), (0, 0));
-    assert_eq!(pointer_anchored_pos(from, (500, 250), (1000.0, 500.0)), (500, 250));
+    assert_eq!(
+        pointer_anchored_pos(from, (500, 250), (1000.0, 500.0)),
+        (500, 250)
+    );
 }
