@@ -31,7 +31,9 @@ use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
 };
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
-use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
+use smithay::backend::renderer::element::surface::{
+    render_elements_from_surface_tree, WaylandSurfaceRenderElement,
+};
 use smithay::backend::renderer::element::utils::{
     Relocate, RelocateRenderElement, RescaleRenderElement,
 };
@@ -52,6 +54,7 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{
     Logical, Physical, Point, Rectangle, Scale, Serial, Transform, SERIAL_COUNTER,
 };
+use smithay::wayland::shell::wlr_layer::Layer;
 
 use crate::config;
 use crate::desk::WindowMode;
@@ -415,6 +418,12 @@ pub struct WallPlan {
     /// The number of each square and where it goes (top-left, shared space). `None` while the
     /// font loads.
     labels: Vec<Option<(MemoryRenderBuffer, Point<i32, Logical>)>>,
+    /// The windows of each square's workspace on the overview's monitor, shrunk into the square,
+    /// topmost first. Empty lists with `thumbnails` off.
+    thumbs: Vec<Vec<(Window, Thumb)>>,
+    /// The wallpaper of the overview's monitor (its background layer surfaces and where each
+    /// sits on the monitor), drawn shrunk behind the windows of every square.
+    wallpaper: Vec<(WlSurface, Point<i32, Logical>)>,
     /// The workspace shown on the overview's monitor.
     current: usize,
     /// The square the pointer is over.
@@ -430,6 +439,8 @@ const WALL_NUMBER: [f32; 3] = [0.95, 0.95, 0.97];
 /// Distance between squares, and from the bottom of the usable area.
 const WALL_GAP: i32 = 12;
 const WALL_BOTTOM_GAP: i32 = 24;
+/// Most windows drawn in one square, the topmost ones: every one is drawn again.
+const WALL_MAX_THUMBS: usize = 12;
 
 /// The painted search box and app list, placed in the shared space (shadow margin included).
 pub struct SearchPlan {
@@ -728,7 +739,14 @@ fn wall_elements(
             }
         }
     }
-    for (buffer, pos) in wall.labels.iter().flatten() {
+    for (i, label) in wall.labels.iter().enumerate() {
+        let Some((buffer, pos)) = label else {
+            continue;
+        };
+        // The number is for the squares with nothing in them.
+        if wall.thumbs.get(i).is_some_and(|thumbs| !thumbs.is_empty()) {
+            continue;
+        }
         let loc: Point<f64, Physical> =
             (f64::from(pos.x - origin.x), f64::from(pos.y - origin.y)).into();
         match MemoryRenderBufferRenderElement::from_buffer(
@@ -744,6 +762,19 @@ fn wall_elements(
             Err(err) => tracing::warn!("error drawing a workspace number: {err:?}"),
         }
     }
+    for (window, thumb) in wall.thumbs.iter().flatten() {
+        thumb_elements(
+            renderer,
+            window,
+            thumb,
+            origin,
+            None,
+            plan.radius,
+            out,
+            None,
+        );
+    }
+    wallpaper_elements(renderer, plan, wall, origin, out);
     for (i, cell) in wall.cells.iter().enumerate() {
         let Some(id) = wall.ids.get(i) else {
             continue;
@@ -759,6 +790,61 @@ fn wall_elements(
             WALL_FILL,
             Kind::Unspecified,
         )));
+    }
+}
+
+/// The monitor's wallpaper shrunk into every square of the wall, with the square's rounded
+/// corners. Behind the windows of the square and in front of its fill.
+fn wallpaper_elements(
+    renderer: &mut GlesRenderer,
+    plan: &OverviewPlan,
+    wall: &WallPlan,
+    origin: Point<i32, Logical>,
+    out: &mut Vec<JffElement>,
+) {
+    if wall.wallpaper.is_empty() {
+        return;
+    }
+    let monitor = output_rect(&plan.output);
+    let scale =
+        f64::from(wall.cells.first().map_or(1, |cell| cell.2)) / f64::from(monitor.2.max(1));
+    for cell in &wall.cells {
+        let rounding = Rounding::new(
+            renderer,
+            Rectangle::new(
+                (cell.0 - origin.x, cell.1 - origin.y).into(),
+                (cell.2, cell.3).into(),
+            ),
+            plan.radius / 2,
+        );
+        // Later surfaces of the layer are in front: the list is back to front, draw it so.
+        for (surface, loc) in wall.wallpaper.iter().rev() {
+            let slot: Point<i32, Physical> = Point::from((
+                cell.0 - origin.x + (f64::from(loc.x) * scale).round() as i32,
+                cell.1 - origin.y + (f64::from(loc.y) * scale).round() as i32,
+            ));
+            let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                render_elements_from_surface_tree(
+                    &mut *renderer,
+                    surface,
+                    Point::<i32, Physical>::from((0, 0)),
+                    Scale::from(1.0f64),
+                    1.0,
+                    Kind::Unspecified,
+                );
+            for element in surfaces {
+                let shrunk = RescaleRenderElement::from_element(
+                    element,
+                    Point::<i32, Physical>::from((0, 0)),
+                    scale,
+                );
+                let placed = RelocateRenderElement::from_element(shrunk, slot, Relocate::Relative);
+                out.push(match &rounding {
+                    Some(rounding) => rounding.wrap_thumb(placed),
+                    None => JffElement::Thumb(placed),
+                });
+            }
+        }
     }
 }
 
@@ -898,6 +984,42 @@ impl JffState {
                 })
             })
             .collect()
+    }
+
+    /// The windows of every workspace shrunk into its square of the wall, topmost first, the
+    /// one being dragged too (it is in its square until dropped elsewhere). Windows keep their
+    /// place while their workspace is hidden, and they get no frame callbacks then, so what is
+    /// drawn is the last thing they showed.
+    fn wall_thumbs(&self, cells: &[Rect]) -> Vec<Vec<(Window, Thumb)>> {
+        let mut out: Vec<Vec<(Window, Thumb)>> = cells.iter().map(|_| Vec::new()).collect();
+        let Some(ov) = self.overview.as_ref() else {
+            return out;
+        };
+        if !self
+            .config
+            .workspace_wall()
+            .is_some_and(|wall| wall.thumbnails)
+        {
+            return out;
+        }
+        let monitor = output_rect(&ov.output);
+        for entry in self.desk.all_top_down() {
+            let Some(list) = out.get_mut(entry.workspace) else {
+                continue;
+            };
+            let size = entry.window.geometry().size;
+            if list.len() >= WALL_MAX_THUMBS
+                || size.w <= 0
+                || size.h <= 0
+                || self.rect_for_window(entry.pos, (size.w, size.h)) != monitor
+            {
+                continue;
+            }
+            let thumb =
+                overview::wall_thumb(cells[entry.workspace], monitor, entry.pos, (size.w, size.h));
+            list.push((entry.window.clone(), thumb));
+        }
+        out
     }
 
     /// Whether a thumbnail is being dragged.
@@ -1862,6 +1984,19 @@ impl JffState {
         } else {
             self.wall_labels(&wall_cells)
         };
+        let wall_thumbs = self.wall_thumbs(&wall_cells);
+        let wallpaper: Vec<(WlSurface, Point<i32, Logical>)> = match self.overview.as_ref() {
+            Some(ov) if !wall_cells.is_empty() => {
+                let map = layer_map_for_output(&ov.output);
+                map.layers_on(Layer::Background)
+                    .filter_map(|layer| {
+                        let geo = map.layer_geometry(layer)?;
+                        Some((layer.wl_surface().clone(), geo.loc))
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
         self.refresh_badges();
         let carry = self.overview.as_mut().and_then(|ov| {
             let dragging = ov.drag.as_ref().map(|drag| drag.window.clone());
@@ -2005,6 +2140,8 @@ impl JffState {
         let wall = (!wall_cells.is_empty()).then(|| WallPlan {
             ids: ov.wall_ids.clone(),
             labels: wall_labels,
+            thumbs: wall_thumbs,
+            wallpaper,
             current: self.desk.current_on(&output.name()),
             hover: overview::wall_hit(&wall_cells, (at.x, at.y)),
             cells: wall_cells,

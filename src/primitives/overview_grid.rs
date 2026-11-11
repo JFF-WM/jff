@@ -290,6 +290,22 @@ pub fn wall(
         .collect()
 }
 
+/// Where a window at `pos` with geometry `size` goes inside the wall square `cell`, which shows
+/// the whole of the monitor at `monitor`: the monitor shrunk to the square's width.
+pub fn wall_thumb(cell: Rect, monitor: Rect, pos: Pos, size: Size) -> Thumb {
+    let scale = f64::from(cell.2) / f64::from(monitor.2.max(1));
+    let at =
+        |v: i32, origin: i32, start: i32| start + (f64::from(v - origin) * scale).round() as i32;
+    Thumb {
+        pos: (at(pos.0, monitor.0, cell.0), at(pos.1, monitor.1, cell.1)),
+        size: (
+            ((f64::from(size.0) * scale).round() as i32).max(1),
+            ((f64::from(size.1) * scale).round() as i32).max(1),
+        ),
+        scale,
+    }
+}
+
 /// The square of the wall `p` is in, if any.
 pub fn wall_hit(cells: &[Rect], p: (f64, f64)) -> Option<usize> {
     cells.iter().position(|cell| layout::contains(*cell, p))

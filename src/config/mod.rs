@@ -606,11 +606,13 @@ pub const MAX_WALL_HEIGHT: i32 = 400;
 
 /// The `workspace-wall` setting: while a thumbnail is dragged in the overview, a row of squares,
 /// one per workspace, appears, dropping the thumbnail on one sends the window to that workspace.
-/// `height` is the height in pixels of a square (it has the shape of the monitor). Off unless
-/// the setting is in the file.
+/// `height` is the height in pixels of a square (it has the shape of the monitor). `thumbnails`
+/// draws the windows of each workspace inside its square (on unless `thumbnails #false`). Off
+/// unless the setting is in the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkspaceWallConfig {
     pub height: i32,
+    pub thumbnails: bool,
 }
 
 /// Default size (px) of a hot corner whose block gives none, and its upper bound.
@@ -1734,11 +1736,12 @@ fn parse_osd(node: &KdlNode) -> anyhow::Result<OsdConfig> {
     Ok(config)
 }
 
-/// `workspace-wall`, `workspace-wall #false`, or a block with `height N` and `off`. `None` when
-/// it is off.
+/// `workspace-wall`, `workspace-wall #false`, or a block with `height N`, `thumbnails` and `off`.
+/// `None` when it is off.
 fn parse_workspace_wall(node: &KdlNode) -> anyhow::Result<Option<WorkspaceWallConfig>> {
     let mut on = true;
     let mut height = DEFAULT_WALL_HEIGHT;
+    let mut thumbnails = true;
     if !positional(node).is_empty() {
         on = flag_value(node)?;
     }
@@ -1750,11 +1753,12 @@ fn parse_workspace_wall(node: &KdlNode) -> anyhow::Result<Option<WorkspaceWallCo
                     bail!("height takes a number from {MIN_WALL_HEIGHT} to {MAX_WALL_HEIGHT}");
                 }
             }
+            "thumbnails" => thumbnails = flag_value(child)?,
             "off" => on = !flag_value(child)?,
             other => bail!("unknown workspace-wall setting {other:?}"),
         }
     }
-    Ok(on.then_some(WorkspaceWallConfig { height }))
+    Ok(on.then_some(WorkspaceWallConfig { height, thumbnails }))
 }
 
 /// A `window-rule` block: `match` lines, then actions.

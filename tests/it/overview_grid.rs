@@ -8,7 +8,7 @@ use jff_wm::primitives::layout::Rect;
 use jff_wm::primitives::overview_grid::{
     anchor_in, arrange, cycle, dragged_thumb, drop_pos, ease_out_cubic, hit_test, lerp_thumb,
     modifier_released, moved_past, neighbor, progress, shifted, slide_at, strip, strip_offset,
-    wall, wall_hit, Dir, Thumb,
+    wall, wall_hit, wall_thumb, Dir, Thumb,
 };
 
 const SCREEN: Rect = (0, 0, 1920, 1080);
@@ -355,6 +355,26 @@ fn wall_is_one_monitor_shaped_square_per_workspace_centered_at_the_bottom() {
     // Centered: as much room left as right.
     let right = SCREEN.2 - (cells[3].0 + cells[3].2);
     assert_eq!(cells[0].0, right);
+}
+
+#[test]
+fn wall_thumb_is_the_window_on_the_monitor_shrunk_into_the_square() {
+    // a 1920x1080 monitor at x=1920 shown in a 192x108 square at (100, 500): one tenth
+    let thumb = wall_thumb(
+        (100, 500, 192, 108),
+        (1920, 0, 1920, 1080),
+        (2400, 200),
+        (960, 540),
+    );
+    assert_eq!(thumb.pos, (148, 520));
+    assert_eq!(thumb.size, (96, 54));
+    assert!((thumb.scale - 0.1).abs() < 1e-9);
+}
+
+#[test]
+fn wall_thumb_never_collapses_to_nothing() {
+    let thumb = wall_thumb((0, 0, 19, 10), (0, 0, 1920, 1080), (0, 0), (10, 10));
+    assert_eq!(thumb.size, (1, 1));
 }
 
 #[test]

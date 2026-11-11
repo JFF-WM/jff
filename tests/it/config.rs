@@ -1039,6 +1039,12 @@ fn workspace_wall_bare_block_and_flag() {
         .workspace_wall()
         .is_none());
     assert!(Config::parse("workspace-wall { height 5; }").is_err());
+    // the windows of each workspace are drawn in its square unless asked not to
+    assert_eq!(wall.map(|w| w.thumbnails), Some(true));
+    let plain = Config::parse("workspace-wall { thumbnails #false; }")
+        .unwrap()
+        .workspace_wall();
+    assert_eq!(plain.map(|w| w.thumbnails), Some(false));
     assert!(Config::parse("workspace-wall { nope; }").is_err());
 }
 
