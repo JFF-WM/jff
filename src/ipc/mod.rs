@@ -24,6 +24,7 @@
 //! click left|right|middle    press and release that button where the pointer is
 //! toggle-overview            open the window overview, or close it when it is open
 //! status                     views and workspace state in one reply (for panels)
+//! outputs                    every monitor: area, scanout, adaptive sync and colors
 //! screenshot-area            freeze the monitor under the pointer and pick a rectangle to save
 //! screenshot-fullscreen      save a picture of the monitor under the pointer
 //! screenshot-window          save a picture of the window the user works in
@@ -45,6 +46,11 @@
 //!   "maximized":false,"fullscreen":false,"focused":true,"output":"DP-1","workspace":1}`.
 //! `id` is assigned when the window appears and never reused while jff runs.
 //!
+//! `outputs` replies `{"ok":true,"outputs":[OUTPUT,...]}`, each OUTPUT what `watch` describes
+//! below (`name`, `x`, `y`, `width`, `height`, `scanout`, `adaptive_sync`, `color`), as it is
+//! now. A script that wants one answer gets it here, a panel that wants to follow the changes
+//! uses `watch outputs`.
+//!
 //! Watching: `watch [GROUP...]`
 //!
 //! `jff msg watch` is for panels. The connection stays open, and jff writes one JSON object per
@@ -62,7 +68,7 @@
 //!  "workspace":2,"count":9,                the shown workspace (from 1) and how many there are
 //!  "focused":3,                            id of the view that has the keyboard, or null
 //!  "outputs":[{"name":"DP-1","x":0,"y":0,"width":1920,"height":1080,"scanout":false,
-//!              "adaptive_sync":false},...],
+//!              "adaptive_sync":false,"color":COLOR},...],
 //!  "overview":false,"screenshot":false,    overview / screenshot selection is open
 //!  "locked":false,                         the session is locked
 //!  "popups":[POPUP,...],                   mapped menus and popovers
@@ -88,8 +94,8 @@
 //! view-workspace   id, workspace                             views
 //! focus            id, previous (view ids, or null)          focus
 //! workspace        workspace, count                          workspaces
-//! output-added     name, x, y, width, height, scanout, adaptive_sync   outputs
-//! output-changed   name, x, y, width, height, scanout, adaptive_sync   outputs
+//! output-added     name, x, y, width, height, scanout, adaptive_sync, color   outputs
+//! output-changed   name, x, y, width, height, scanout, adaptive_sync, color   outputs
 //! output-removed   name                                      outputs
 //! overview         open                                      modes
 //! screenshot       open (the area selection)                 modes
@@ -121,6 +127,30 @@
 //! `adaptive_sync` is true while the monitor runs with variable refresh rate, false while it
 //! has a fixed refresh. With `adaptive-sync "fullscreen"` it turns on and off as a fullscreen
 //! window covers the monitor, and each change is an `output-changed` event too.
+//!
+//! `color` is how jff takes the monitor's colors to be, and what `wp_color_management_v1`
+//! clients are told about it. It changes with an `output-changed` event, for instance when
+//! `reload-config` gives the monitor another `icc-profile`:
+//!
+//! ```text
+//! "color":{"profile":"/home/me/.local/share/color/icc/DP-1.icc",   the config's icc-profile, or null
+//!          "primaries":"display-p3",       srgb, display-p3, dci-p3, bt2020, adobe-rgb, pal, ntsc,
+//!                                          or null for primaries that have no such name
+//!          "transfer":"srgb",              srgb, gamma22, gamma28, or power:2.4
+//!          "white":"d65",                  d65, d50, dci, or xy:0.3127,0.3290
+//!          "gamut":"wide",                 wide, srgb, or unknown
+//!          "icc_readable":true}
+//! ```
+//!
+//! `primaries`, `transfer` and `white` come from the profile, and are sRGB's when the monitor has
+//! none or jff can't read it, since that is what clients are told then. Primaries and white match
+//! a name within a small tolerance (0.004 and 0.003 in xy): a profile's numbers are rounded and
+//! adapted to D50 and back, so they are never exactly a standard's. `gamut` is `wide` when the
+//! gamut is clearly (5%) larger than sRGB's, `srgb` otherwise, and `unknown` when jff has no
+//! profile data for the panel to tell: no `icc-profile`, or one that can't be read. So a monitor
+//! that is `srgb` here is one a profile says is sRGB, not just one nobody described.
+//! `icc_readable` is true when the profile was found and read. It is false without a profile
+//! too, `profile` being null tells that apart from a profile that is missing or broken.
 //!
 //! `drag` says the user started (`on` true) or stopped (`on` false) moving a window by its
 //! titlebar, or carrying its thumbnail in the overview (after the pointer moved far enough to
@@ -172,8 +202,8 @@ use crate::desk::Goto;
 use crate::feature::outputs::output_rect;
 use crate::input::{spawn_command, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use crate::ipc::events::{
-    ClickInfo, ClickTarget, Event, Group, GroupSet, LayerInfo, OutputInfo, PopupInfo, Snapshot,
-    View,
+    ClickInfo, ClickTarget, Event, Group, GroupSet, LayerInfo, OutputColor, OutputInfo, PopupInfo,
+    Snapshot, View,
 };
 use crate::primitives::json::json_str;
 use crate::protocol::layer_shell::{is_mapped, Under};
@@ -228,6 +258,8 @@ pub enum ClickButton {
 pub enum Request {
     Views,
     Status,
+    /// `outputs`: every monitor, as `watch` describes them.
+    Outputs,
     Focused,
     Info(Option<u64>),
     Close(Option<u64>),
@@ -260,7 +292,7 @@ pub enum Request {
 }
 
 pub const COMMANDS: &str =
-    "views, status, focused, view-info, close, maximize, unmaximize, toggle-maximize, \
+    "views, status, outputs, focused, view-info, close, maximize, unmaximize, toggle-maximize, \
      fullscreen, unfullscreen, focus, workspaces, workspace, move-to-workspace, spawn, spawn-sh, \
      screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, watch";
 
@@ -319,6 +351,8 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         ("toggle-overview", _) => return Err("toggle-overview takes no arguments".to_string()),
         ("status", []) => return Ok(Request::Status),
         ("status", _) => return Err("status takes no arguments".to_string()),
+        ("outputs", []) => return Ok(Request::Outputs),
+        ("outputs", _) => return Err("outputs takes no arguments".to_string()),
         ("screenshot-area", []) => return Ok(Request::ScreenshotArea),
         ("screenshot-fullscreen", []) => return Ok(Request::ScreenshotFullscreen),
         ("screenshot-window", []) => return Ok(Request::ScreenshotWindow),
@@ -429,6 +463,14 @@ impl JffState {
                     views.join(","),
                     self.current_workspace() + 1,
                     self.workspace_count(),
+                ))
+            }
+            Request::Outputs => {
+                let outputs: Vec<String> =
+                    self.output_list().iter().map(OutputInfo::to_json).collect();
+                Ok(format!(
+                    "{{\"ok\":true,\"outputs\":[{}]}}\n",
+                    outputs.join(",")
                 ))
             }
             Request::Focused => Ok(match self.focused_window() {
@@ -690,15 +732,9 @@ impl JffState {
         }
     }
 
-    /// Everything `watch` reports, right now. The focus is the keyboard's (`focused_window()`),
-    /// not the `focused_window` field, which only says what the user picked last.
-    pub fn take_snapshot(&self) -> Snapshot {
-        let views = self.view_list();
-        // A window that has the keyboard but isn't in `views` yet (no size) isn't announced
-        // either, so a `focus` event never names a view the client hasn't been told about.
-        let focused = views.iter().find(|v| v.focused).map(|v| v.id);
-        let outputs = self
-            .outputs
+    /// Every monitor, as `watch` and `outputs` describe them.
+    fn output_list(&self) -> Vec<OutputInfo> {
+        self.outputs
             .iter()
             .map(|output| {
                 let (x, y, width, height) = output_rect(output);
@@ -716,9 +752,35 @@ impl JffState {
                         Backend::Tty(tty) => tty.adaptive_sync(output),
                         _ => false,
                     },
+                    color: self.output_color(&output.name()),
                 }
             })
-            .collect();
+            .collect()
+    }
+
+    /// The colors of the monitor `name`: its ICC profile (the config's) and what jff took from
+    /// it. Without a profile, or with one that can't be read, that is sRGB.
+    fn output_color(&self, name: &str) -> OutputColor {
+        let profile = self
+            .config
+            .output(name)
+            .and_then(|config| config.icc_profile.as_deref());
+        let readable = profile.is_some() && self.color_management.monitor_has_profile(name);
+        OutputColor::new(
+            profile.map(|path| path.to_string_lossy().into_owned()),
+            &self.color_management.monitor_description(name),
+            readable,
+        )
+    }
+
+    /// Everything `watch` reports, right now. The focus is the keyboard's (`focused_window()`),
+    /// not the `focused_window` field, which only says what the user picked last.
+    pub fn take_snapshot(&self) -> Snapshot {
+        let views = self.view_list();
+        // A window that has the keyboard but isn't in `views` yet (no size) isn't announced
+        // either, so a `focus` event never names a view the client hasn't been told about.
+        let focused = views.iter().find(|v| v.focused).map(|v| v.id);
+        let outputs = self.output_list();
         Snapshot {
             views,
             workspace: self.current_workspace() + 1,

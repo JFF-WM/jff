@@ -1,8 +1,9 @@
 //! Tests for `jff_wm::ipc::events`.
 
 use jff_wm::ipc::events::{
-    diff, Event, Group, GroupSet, LayerInfo, OutputInfo, PopupInfo, Snapshot, View,
+    diff, Event, Group, GroupSet, LayerInfo, OutputColor, OutputInfo, PopupInfo, Snapshot, View,
 };
+use jff_wm::primitives::color::{ImageDescription, NamedPrimaries};
 
 fn view(id: u64) -> View {
     View {
@@ -30,6 +31,7 @@ fn output(name: &str, x: i32) -> OutputInfo {
         height: 1080,
         scanout: false,
         adaptive_sync: false,
+        color: OutputColor::default(),
     }
 }
 
@@ -422,6 +424,7 @@ fn outputs_added_removed_and_changed() {
             height: 1080,
             scanout: false,
             adaptive_sync: false,
+            color: OutputColor::default(),
         })]
     );
 }
@@ -441,12 +444,95 @@ fn adaptive_sync_changes_are_output_changes() {
     assert_eq!(
         diff(&old, &new)[0].to_json(),
         "{\"event\":\"output-changed\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-             \"height\":1080,\"scanout\":false,\"adaptive_sync\":true}"
+             \"height\":1080,\"scanout\":false,\"adaptive_sync\":true,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false}}"
     );
     assert_eq!(
         diff(&new, &old),
         vec![Event::OutputChanged(output("DP-1", 0))]
     );
+}
+
+const P3_PROFILE: &str = "/home/me/.local/share/color/icc/DP-1.icc";
+
+/// A monitor whose profile says Display P3.
+fn p3_color() -> OutputColor {
+    let mut description = ImageDescription::srgb();
+    description.primaries = NamedPrimaries::DisplayP3.chromaticities();
+    OutputColor::new(Some(P3_PROFILE.to_string()), &description, true)
+}
+
+#[test]
+fn color_changes_are_output_changes() {
+    let old = snapshot(vec![]);
+    let mut new = old.clone();
+    new.outputs[0].color = p3_color();
+    assert_eq!(
+        diff(&old, &new),
+        vec![Event::OutputChanged(OutputInfo {
+            color: p3_color(),
+            ..output("DP-1", 0)
+        })]
+    );
+    assert_eq!(
+        diff(&new, &old),
+        vec![Event::OutputChanged(output("DP-1", 0))]
+    );
+    assert!(diff(&new, &new.clone()).is_empty());
+}
+
+#[test]
+fn a_profiled_monitor_has_named_colors() {
+    let color = p3_color();
+    assert_eq!(color.primaries.as_deref(), Some("display-p3"));
+    assert_eq!(color.transfer, "srgb");
+    assert_eq!(color.white, "d65");
+    assert_eq!(color.gamut, "wide");
+    assert!(color.icc_readable);
+    assert_eq!(
+        color.to_json(),
+        format!(
+            "{{\"profile\":\"{P3_PROFILE}\",\"primaries\":\"display-p3\",\"transfer\":\"srgb\",\
+             \"white\":\"d65\",\"gamut\":\"wide\",\"icc_readable\":true}}"
+        )
+    );
+}
+
+#[test]
+fn a_monitor_without_a_profile_is_srgb_of_unknown_gamut() {
+    let color = OutputColor::default();
+    assert_eq!(color.profile, None);
+    assert_eq!(color.primaries.as_deref(), Some("srgb"));
+    assert_eq!(color.gamut, "unknown");
+    assert!(!color.icc_readable);
+    assert_eq!(
+        color.to_json(),
+        "{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\
+         \"gamut\":\"unknown\",\"icc_readable\":false}"
+    );
+}
+
+#[test]
+fn a_profile_that_cannot_be_read_keeps_its_path_and_the_gamut_is_unknown() {
+    // The description is the sRGB fallback, whatever it says about gamut is not known.
+    let color = OutputColor::new(
+        Some("/nonexistent/DP-1.icc".to_string()),
+        &ImageDescription::srgb(),
+        false,
+    );
+    assert_eq!(color.profile.as_deref(), Some("/nonexistent/DP-1.icc"));
+    assert_eq!(color.gamut, "unknown");
+    assert!(!color.icc_readable);
+}
+
+#[test]
+fn a_profile_that_says_srgb_makes_the_gamut_srgb() {
+    let color = OutputColor::new(
+        Some(P3_PROFILE.to_string()),
+        &ImageDescription::srgb(),
+        true,
+    );
+    assert_eq!(color.gamut, "srgb");
+    assert_eq!(color.primaries.as_deref(), Some("srgb"));
 }
 
 #[test]
@@ -464,7 +550,7 @@ fn scanout_changes_are_output_changes() {
     assert_eq!(
         diff(&old, &new)[0].to_json(),
         "{\"event\":\"output-changed\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-             \"height\":1080,\"scanout\":true,\"adaptive_sync\":false}"
+             \"height\":1080,\"scanout\":true,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false}}"
     );
     assert_eq!(
         diff(&new, &old),
@@ -688,7 +774,7 @@ fn events_are_written_as_one_json_line_each() {
         (
             Event::OutputAdded(output("DP-1", 0)),
             "{\"event\":\"output-added\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-                 \"height\":1080,\"scanout\":false,\"adaptive_sync\":false}",
+                 \"height\":1080,\"scanout\":false,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false}}",
         ),
         (
             Event::OutputRemoved {
@@ -699,7 +785,7 @@ fn events_are_written_as_one_json_line_each() {
         (
             Event::OutputChanged(output("DP-1", 0)),
             "{\"event\":\"output-changed\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-                 \"height\":1080,\"scanout\":false,\"adaptive_sync\":false}",
+                 \"height\":1080,\"scanout\":false,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false}}",
         ),
         (
             Event::Overview { open: true },

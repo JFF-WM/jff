@@ -180,6 +180,19 @@ impl NamedPrimaries {
         Self::ALL.into_iter().find(|p| p.raw() == raw)
     }
 
+    /// The name IPC clients see (`jff msg watch outputs`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Srgb => "srgb",
+            Self::Pal => "pal",
+            Self::Ntsc => "ntsc",
+            Self::Bt2020 => "bt2020",
+            Self::DciP3 => "dci-p3",
+            Self::DisplayP3 => "display-p3",
+            Self::AdobeRgb => "adobe-rgb",
+        }
+    }
+
     pub fn raw(self) -> u32 {
         match self {
             Self::Srgb => 1,
@@ -274,6 +287,15 @@ impl NamedTf {
     /// `None` for a value that is not an offered name.
     pub fn from_raw(raw: u32) -> Option<Self> {
         Self::ALL.into_iter().find(|tf| tf.raw() == raw)
+    }
+
+    /// The name IPC clients see, the protocol's own (`srgb`, `gamma22`, `gamma28`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Srgb => "srgb",
+            Self::Gamma22 => "gamma22",
+            Self::Gamma28 => "gamma28",
+        }
     }
 
     pub fn raw(self) -> u32 {

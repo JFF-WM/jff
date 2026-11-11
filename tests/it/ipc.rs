@@ -17,6 +17,7 @@ use jff_wm::primitives::json::{json_opt, json_str};
 fn requests_are_parsed() {
     assert_eq!(parse_request("views"), Ok(Request::Views));
     assert_eq!(parse_request("status"), Ok(Request::Status));
+    assert_eq!(parse_request("outputs"), Ok(Request::Outputs));
     assert_eq!(parse_request("  focused \n"), Ok(Request::Focused));
     assert_eq!(parse_request("view-info"), Ok(Request::Info(None)));
     assert_eq!(parse_request("view-info 7"), Ok(Request::Info(Some(7))));
@@ -415,4 +416,11 @@ fn toggle_overview_takes_no_arguments() {
     );
     assert!(parse_request("toggle-overview 1").is_err());
     assert!(parse_request("toggle-overview open").is_err());
+}
+
+#[test]
+fn outputs_takes_no_arguments() {
+    assert_eq!(parse_request(" outputs \n"), Ok(Request::Outputs));
+    assert!(parse_request("outputs DP-1").is_err());
+    assert!(COMMANDS.contains("outputs"));
 }

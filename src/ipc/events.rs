@@ -8,6 +8,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::primitives::color::ImageDescription;
+use crate::primitives::color_names::{gamut_class, primaries_name, transfer_name, white_name};
 use crate::primitives::json::{json_opt, json_str};
 
 // ---- groups -----------------------------------------------------------------------------------
@@ -137,26 +139,96 @@ pub struct OutputInfo {
     /// a frame jff composited. Always false on winit.
     pub scanout: bool,
     /// The monitor is running with variable refresh rate (`adaptive-sync`) right now. With
-    /// `fullscreen` it follows a fullscreen window on top; always false on winit.
+    /// `fullscreen` it follows a fullscreen window on top, always false on winit.
     pub adaptive_sync: bool,
+    /// How jff takes the monitor's colors to be.
+    pub color: OutputColor,
 }
 
 impl OutputInfo {
     fn members(&self) -> String {
         format!(
-            "\"name\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"scanout\":{},\"adaptive_sync\":{}",
+            "\"name\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"scanout\":{},\"adaptive_sync\":{},\"color\":{}",
             json_str(&self.name),
             self.x,
             self.y,
             self.width,
             self.height,
             self.scanout,
-            self.adaptive_sync
+            self.adaptive_sync,
+            self.color.to_json(),
         )
     }
 
     pub fn to_json(&self) -> String {
         format!("{{{}}}", self.members())
+    }
+}
+
+/// The colors of a monitor, as jff takes them to be and tells clients (`wp_color_management_v1`).
+///
+/// `primaries`, `transfer` and `white` are those of the monitor's ICC profile, or of sRGB when
+/// there is none (or it can't be read): that is what a client is told the monitor looks like.
+/// `gamut` says how much of that is known. Without a readable profile jff knows nothing about
+/// the panel, so it is `unknown` whatever the numbers say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputColor {
+    /// The `icc-profile` of the monitor's config, if it has one, readable or not.
+    pub profile: Option<String>,
+    /// `srgb`, `display-p3`, `bt2020`, `adobe-rgb`, `dci-p3`, `pal` or `ntsc`, or `None` when
+    /// the primaries are not one of those.
+    pub primaries: Option<String>,
+    /// `srgb`, `gamma22`, `gamma28`, or `power:EXPONENT`.
+    pub transfer: String,
+    /// `d65`, `d50`, `dci`, or `xy:X,Y`.
+    pub white: String,
+    /// `srgb`, `wide`, or `unknown`.
+    pub gamut: String,
+    /// The profile was found and is a profile jff can read. False without one, too: tell the
+    /// two apart with `profile`.
+    pub icc_readable: bool,
+}
+
+impl OutputColor {
+    /// The colors of a monitor whose `description` jff got from `profile`. `description` is
+    /// sRGB for a monitor without a readable profile.
+    pub fn new(
+        profile: Option<String>,
+        description: &ImageDescription,
+        icc_readable: bool,
+    ) -> Self {
+        let gamut = if icc_readable {
+            gamut_class(&description.primaries)
+        } else {
+            "unknown"
+        };
+        Self {
+            profile,
+            primaries: primaries_name(&description.primaries).map(str::to_string),
+            transfer: transfer_name(description.tf),
+            white: white_name(description.primaries.white),
+            gamut: gamut.to_string(),
+            icc_readable,
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"profile\":{},\"primaries\":{},\"transfer\":{},\"white\":{},\"gamut\":{},\"icc_readable\":{}}}",
+            json_opt(self.profile.as_deref()),
+            json_opt(self.primaries.as_deref()),
+            json_str(&self.transfer),
+            json_str(&self.white),
+            json_str(&self.gamut),
+            self.icc_readable,
+        )
+    }
+}
+
+/// A monitor with no profile: sRGB, of which nothing is known.
+impl Default for OutputColor {
+    fn default() -> Self {
+        Self::new(None, &ImageDescription::srgb(), false)
     }
 }
 

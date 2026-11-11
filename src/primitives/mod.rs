@@ -3,6 +3,7 @@
 pub mod alpha;
 pub mod app_search;
 pub mod color;
+pub mod color_names;
 pub mod frame_clock;
 pub mod gamut;
 pub mod geom;

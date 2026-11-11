@@ -182,6 +182,13 @@ impl ColorManagement {
             .unwrap_or_else(ImageDescription::srgb)
     }
 
+    /// Whether the monitor `name` has an ICC profile that was read, so that
+    /// [`monitor_description`](Self::monitor_description) is what the profile says and not the
+    /// sRGB it falls back to.
+    pub fn monitor_has_profile(&self, name: &str) -> bool {
+        self.monitors.contains_key(name)
+    }
+
     /// Give the outputs a new description. Returns its identity, `None` when it is the one they
     /// have already (or the numbers ran out, and what they have stays).
     fn set_output_description(&mut self, description: ImageDescription) -> Option<u32> {
