@@ -12,10 +12,13 @@
 //! bit identity. Moving to version 2 or 3 means `ready2`, `preferred_changed2` and the
 //! reference objects, and is not needed for anything here.
 //!
-//! Every output is described as sRGB for now, so the preferred description of any surface is
-//! that one and never changes. The first thing that can change an output's description (stage
-//! 2: the panel's own primaries) also has to send `image_description_changed` and
-//! `preferred_changed`, the objects to send them to are not tracked before then.
+//! An output is described as sRGB, unless the config gives a monitor an ICC profile: then it is
+//! described as that profile says (its primaries, tone curve and white, see
+//! `feature::icc::description`), and [`sync_output_color`] keeps it up to date. All outputs
+//! share one description, the profile of the first monitor that has one, so the preferred
+//! description of any surface is that one. When it changes, `image_description_changed` and
+//! `preferred_changed` go to the objects that asked, which is why those are kept in
+//! [`ColorManagement`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -79,6 +82,12 @@ pub struct ColorManagement {
     /// destroys the object before the backend has attached its data to it (a use-after-free).
     /// So the events go out after the dispatch, from [`flush_pending_info`].
     pending_info: Vec<(WpImageDescriptionInfoV1, ImageDescription)>,
+    /// Clients' `wp_color_management_output_v1` objects, told when the output's description
+    /// changes.
+    outputs: Vec<WpColorManagementOutputV1>,
+    /// Clients' `wp_color_management_surface_feedback_v1` objects, told when the preferred
+    /// description changes.
+    feedbacks: Vec<WpColorManagementSurfaceFeedbackV1>,
 }
 
 impl ColorManagement {
@@ -93,6 +102,8 @@ impl ColorManagement {
             identities,
             output,
             pending_info: Vec::new(),
+            outputs: Vec::new(),
+            feedbacks: Vec::new(),
         }
     }
 
@@ -100,6 +111,20 @@ impl ColorManagement {
     /// All outputs have the same one for now.
     pub fn output_description(&self) -> Arc<Described> {
         self.output.clone()
+    }
+
+    /// Give the outputs a new description. Returns its identity, `None` when it is the one they
+    /// have already (or the numbers ran out, and what they have stays).
+    fn set_output_description(&mut self, description: ImageDescription) -> Option<u32> {
+        if self.output.description == description {
+            return None;
+        }
+        let identity = self.identities.next()?;
+        self.output = Arc::new(Described {
+            description,
+            identity,
+        });
+        Some(identity)
     }
 
     /// A client's description with a number of its own. `None` when the numbers ran out.
@@ -274,7 +299,7 @@ impl GlobalDispatch<WpColorManagerV1, ()> for JffState {
 
 impl Dispatch<WpColorManagerV1, ()> for JffState {
     fn request(
-        _state: &mut JffState,
+        state: &mut JffState,
         _client: &Client,
         resource: &WpColorManagerV1,
         request: wp_color_manager_v1::Request,
@@ -287,12 +312,14 @@ impl Dispatch<WpColorManagerV1, ()> for JffState {
         match request {
             Request::Destroy => {}
             Request::GetOutput { id, output } => {
-                data_init.init(
+                let object = data_init.init(
                     id,
                     ColorOutput {
                         output: Output::from_resource(&output),
                     },
                 );
+                state.color_management.outputs.retain(|o| o.is_alive());
+                state.color_management.outputs.push(object);
             }
             Request::GetSurface { id, surface } => {
                 let taken = with_states(&surface, |states| {
@@ -318,7 +345,9 @@ impl Dispatch<WpColorManagerV1, ()> for JffState {
                 }
             }
             Request::GetSurfaceFeedback { id, surface } => {
-                data_init.init(id, ColorFeedback { surface });
+                let object = data_init.init(id, ColorFeedback { surface });
+                state.color_management.feedbacks.retain(|f| f.is_alive());
+                state.color_management.feedbacks.push(object);
             }
             Request::CreateIccCreator { obj } => {
                 data_init.init(obj, ());
@@ -510,6 +539,51 @@ impl Dispatch<WpImageDescriptionV1, ImageDescriptionData> for JffState {
                 .pending_info
                 .push((info, described.description));
         }
+    }
+}
+
+/// Describe the outputs by the config: the ICC profile of the first monitor that has one, sRGB
+/// when none does or none can be read. Runs at startup, when the config is reloaded and when
+/// monitors come and go.
+pub fn sync_output_color(state: &mut JffState) {
+    let description = state
+        .outputs
+        .iter()
+        .find_map(|output| {
+            let name = output.name();
+            let path = state.config.output(&name)?.icc_profile.as_deref()?;
+            match crate::feature::icc::load_description(path) {
+                Ok(description) => {
+                    tracing::debug!("monitor {name}: color description from {}", path.display());
+                    Some(description)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "monitor {name}: cannot describe {}: {err:#}",
+                        path.display()
+                    );
+                    None
+                }
+            }
+        })
+        .unwrap_or_else(ImageDescription::srgb);
+    set_output_color(state, description);
+}
+
+/// Make `description` the outputs' and tell the clients that follow it, if it is a change.
+fn set_output_color(state: &mut JffState, description: ImageDescription) {
+    let Some(identity) = state.color_management.set_output_description(description) else {
+        return;
+    };
+    tracing::info!("the outputs' color description changed");
+    let manager = &mut state.color_management;
+    manager.outputs.retain(|o| o.is_alive());
+    manager.feedbacks.retain(|f| f.is_alive());
+    for output in &manager.outputs {
+        output.image_description_changed();
+    }
+    for feedback in &manager.feedbacks {
+        feedback.preferred_changed(identity);
     }
 }
 

@@ -88,6 +88,9 @@ pub fn run() -> anyhow::Result<()> {
     let shm_formats: Vec<_> = state.backend.renderer().shm_formats().collect();
     state.shm_state.update_formats(shm_formats);
 
+    // outputs are described by their ICC profile, if the config gives them one
+    crate::protocol::color_management::sync_output_color(&mut state);
+
     // wp_drm_lease_device_v1 needs the display, which the backend was made without
     if let super::Backend::Tty(tty) = &mut state.backend {
         tty.init_leasing(&state.display_handle);

@@ -10,10 +10,18 @@
 //! Primaries (gamut conversion) need a colour pipeline the GPU may not have, so they're ignored.
 //!
 //! A profile with neither `vcgt` nor the three curves is an error.
+//!
+//! [`description`] reads the same profile for `wp_color_management_v1`: what a client is told
+//! the panel looks like once those curves are applied (its primaries, tone curve and white).
 
 use std::path::Path;
 
 use anyhow::{bail, Context};
+
+use crate::primitives::color::{
+    Chromaticities, ImageDescription, Luminance, NamedTf, TransferFunction, CHROMA_SCALE,
+    EXPONENT_SCALE,
+};
 
 /// The three correction curves. Each channel has at least two entries, darkest first.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -337,6 +345,266 @@ fn parse_vcgt(tag: &[u8]) -> anyhow::Result<GammaTable> {
         }
         other => bail!("unknown vcgt type {other}"),
     }
+}
+
+// ---- what the profile says about the panel, for wp_color_management_v1 ---------------------
+
+/// The 3x3 matrix type of the helpers below, row-major.
+type Mat = [[f64; 3]; 3];
+
+/// Bradford cone response matrix, what ICC profiles adapt white points with.
+const BRADFORD: Mat = [
+    [0.8951, 0.2664, -0.1614],
+    [-0.7502, 1.7135, 0.0367],
+    [0.0389, -0.0685, 1.0296],
+];
+
+/// The ICC profile connection space white (D50), as XYZ.
+const D50: [f64; 3] = [0.9642, 1.0, 0.8249];
+
+/// D65, as XYZ. Where a profile does not say what white its panel has, this is assumed.
+const D65: [f64; 3] = [0.95047, 1.0, 1.08883];
+
+/// Read the profile at `path` as the image description of the monitor it calibrates.
+pub fn load_description(path: &Path) -> anyhow::Result<ImageDescription> {
+    let data = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    description(&data)
+}
+
+/// What clients are told about a monitor whose profile is `data`, as it looks with the curves
+/// of [`parse`] applied.
+///
+/// - Primaries and white come from `rXYZ` / `gXYZ` / `bXYZ`. Profiles store them adapted to D50,
+///   `chad` is the matrix that did it, so the panel's own values are got by undoing it. Without
+///   a `chad` the panel's white is taken to be D65, which nearly every monitor is set to.
+/// - The tone curve is sRGB when the correction was built from the panel's curves (that is what
+///   it makes the panel follow). With a `vcgt` the profile's curves describe the calibrated
+///   panel, they become the named curve closest to them, or a power curve.
+/// - `lumi` gives the white's luminance, when the profile has it.
+///
+/// What the profile does not say stays as sRGB has it. Only a file that is not an ICC profile
+/// is an error.
+pub fn description(data: &[u8]) -> anyhow::Result<ImageDescription> {
+    if data.len() < 132 || &data[36..40] != b"acsp" {
+        bail!("not an ICC profile");
+    }
+    let mut description = ImageDescription::srgb();
+    if let Some(primaries) = panel_primaries(data) {
+        description.primaries = primaries;
+    }
+    description.tf = panel_tf(data);
+    if let Some(max) = panel_max_luminance(data) {
+        description.luminance = Luminance {
+            min: description.luminance.min,
+            max,
+            reference: max,
+        };
+    }
+    Ok(description)
+}
+
+/// The tag `sig` of the profile.
+fn find_tag<'a>(data: &'a [u8], sig: &[u8; 4]) -> Option<&'a [u8]> {
+    let count = be32(data, 128)? as usize;
+    (0..count.min(1000)).find_map(|i| {
+        let entry = 132 + 12 * i;
+        if data.get(entry..entry + 4)? != sig {
+            return None;
+        }
+        let offset = be32(data, entry + 4)? as usize;
+        let size = be32(data, entry + 8)? as usize;
+        data.get(offset..offset.checked_add(size)?)
+    })
+}
+
+/// A signed 15.16 fixed point number.
+fn s15(data: &[u8], at: usize) -> Option<f64> {
+    Some(be32(data, at)? as i32 as f64 / 65536.0)
+}
+
+/// An `XYZ ` tag with its one value.
+fn xyz(tag: &[u8]) -> Option<[f64; 3]> {
+    if tag.get(0..4)? != b"XYZ " {
+        return None;
+    }
+    Some([s15(tag, 8)?, s15(tag, 12)?, s15(tag, 16)?])
+}
+
+/// A `chad` tag (`sf32`): nine numbers, row by row.
+fn chad(tag: &[u8]) -> Option<Mat> {
+    if tag.get(0..4)? != b"sf32" {
+        return None;
+    }
+    let mut matrix = [[0.0; 3]; 3];
+    for (row, values) in matrix.iter_mut().enumerate() {
+        for (column, value) in values.iter_mut().enumerate() {
+            *value = s15(tag, 8 + 4 * (row * 3 + column))?;
+        }
+    }
+    Some(matrix)
+}
+
+fn mul(m: &Mat, v: [f64; 3]) -> [f64; 3] {
+    [
+        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+    ]
+}
+
+fn mat_mul(a: &Mat, b: &Mat) -> Mat {
+    let mut out = [[0.0; 3]; 3];
+    for (row, values) in out.iter_mut().enumerate() {
+        for (column, value) in values.iter_mut().enumerate() {
+            *value = (0..3).map(|k| a[row][k] * b[k][column]).sum();
+        }
+    }
+    out
+}
+
+/// `None` for a matrix that can't be turned around.
+fn invert(m: &Mat) -> Option<Mat> {
+    let cofactor =
+        |r0: usize, r1: usize, c0: usize, c1: usize| m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0];
+    let det = m[0][0] * cofactor(1, 2, 1, 2) - m[0][1] * cofactor(1, 2, 0, 2)
+        + m[0][2] * cofactor(1, 2, 0, 1);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    Some([
+        [
+            cofactor(1, 2, 1, 2) / det,
+            -cofactor(0, 2, 1, 2) / det,
+            cofactor(0, 1, 1, 2) / det,
+        ],
+        [
+            -cofactor(1, 2, 0, 2) / det,
+            cofactor(0, 2, 0, 2) / det,
+            -cofactor(0, 1, 0, 2) / det,
+        ],
+        [
+            cofactor(1, 2, 0, 1) / det,
+            -cofactor(0, 2, 0, 1) / det,
+            cofactor(0, 1, 0, 1) / det,
+        ],
+    ])
+}
+
+/// The Bradford matrix that moves colors seen under white `from` to white `to`.
+fn adaptation(from: [f64; 3], to: [f64; 3]) -> Option<Mat> {
+    let cone_from = mul(&BRADFORD, from);
+    let cone_to = mul(&BRADFORD, to);
+    let scale = [
+        [cone_to[0] / cone_from[0], 0.0, 0.0],
+        [0.0, cone_to[1] / cone_from[1], 0.0],
+        [0.0, 0.0, cone_to[2] / cone_from[2]],
+    ];
+    Some(mat_mul(&invert(&BRADFORD)?, &mat_mul(&scale, &BRADFORD)))
+}
+
+/// CIE 1931 xy of an XYZ color, as it goes on the wire.
+fn chromaticity(v: [f64; 3]) -> Option<[i32; 2]> {
+    let sum = v[0] + v[1] + v[2];
+    if !sum.is_finite() || sum <= 0.0 {
+        return None;
+    }
+    let scale = CHROMA_SCALE as f64;
+    Some([
+        (v[0] / sum * scale).round() as i32,
+        (v[1] / sum * scale).round() as i32,
+    ])
+}
+
+/// Whether eight chromaticity numbers can be a real gamut: all inside the xy plane, and the
+/// corners spread out into a triangle.
+fn plausible(c: &Chromaticities) -> bool {
+    let inside = |p: [i32; 2]| p.iter().all(|&v| v > 0 && v < CHROMA_SCALE);
+    if ![c.red, c.green, c.blue, c.white].into_iter().all(inside) {
+        return false;
+    }
+    let scale = CHROMA_SCALE as f64;
+    let at = |p: [i32; 2]| (p[0] as f64 / scale, p[1] as f64 / scale);
+    let (r, g, b) = (at(c.red), at(c.green), at(c.blue));
+    let area = ((g.0 - r.0) * (b.1 - r.1) - (b.0 - r.0) * (g.1 - r.1)).abs() / 2.0;
+    area > 0.02
+}
+
+/// The panel's primaries and white, `None` when the profile has no colorants or they make no
+/// sense.
+fn panel_primaries(data: &[u8]) -> Option<Chromaticities> {
+    let red = xyz(find_tag(data, b"rXYZ")?)?;
+    let green = xyz(find_tag(data, b"gXYZ")?)?;
+    let blue = xyz(find_tag(data, b"bXYZ")?)?;
+    // The colorants are relative to D50. `chad` took the panel's white there, so its inverse
+    // brings them back.
+    let to_panel = match find_tag(data, b"chad").and_then(chad) {
+        Some(matrix) => invert(&matrix)?,
+        None => adaptation(D50, D65)?,
+    };
+    let primaries = Chromaticities {
+        red: chromaticity(mul(&to_panel, red))?,
+        green: chromaticity(mul(&to_panel, green))?,
+        blue: chromaticity(mul(&to_panel, blue))?,
+        white: chromaticity(mul(&to_panel, D50))?,
+    };
+    plausible(&primaries).then_some(primaries)
+}
+
+/// The largest gap between a panel curve and `curve`, over the whole range.
+fn worst_gap(trc: &Trc, curve: fn(f64) -> f64) -> f64 {
+    const STEPS: usize = 32;
+    (1..=STEPS)
+        .map(|i| {
+            let x = i as f64 / STEPS as f64;
+            (trc.eval(x) - curve(x)).abs()
+        })
+        .fold(0.0, f64::max)
+}
+
+/// The transfer function of the panel with the correction of [`parse`] applied.
+fn panel_tf(data: &[u8]) -> TransferFunction {
+    let srgb = TransferFunction::Named(NamedTf::Srgb);
+    // Built from the panel's curves, the correction makes it follow sRGB. With a `vcgt` the
+    // panel was calibrated to the curves the profile describes.
+    if find_tag(data, b"vcgt").is_none() {
+        return srgb;
+    }
+    let Some(trc) = find_tag(data, b"gTRC").and_then(|tag| parse_trc(tag).ok()) else {
+        return srgb;
+    };
+    let fits = [
+        (worst_gap(&trc, srgb_to_light), srgb),
+        (
+            worst_gap(&trc, |x| x.powf(2.2)),
+            TransferFunction::Named(NamedTf::Gamma22),
+        ),
+        (
+            worst_gap(&trc, |x| x.powf(2.8)),
+            TransferFunction::Named(NamedTf::Gamma28),
+        ),
+    ];
+    let mut best = fits[0];
+    for fit in fits {
+        if fit.0 < best.0 {
+            best = fit;
+        }
+    }
+    if best.0 < 0.01 {
+        return best.1;
+    }
+    // Not close to a named curve: the power that gives the same light at half the code value.
+    let half = trc.eval(0.5);
+    if half > 0.0 && half < 1.0 {
+        let exponent = (half.ln() / 0.5f64.ln()).clamp(1.0, 10.0);
+        return TransferFunction::Power((exponent * EXPONENT_SCALE as f64).round() as u32);
+    }
+    srgb
+}
+
+/// The luminance of the panel's white in cd/m², from `lumi`, if it is a believable one.
+fn panel_max_luminance(data: &[u8]) -> Option<u32> {
+    let y = xyz(find_tag(data, b"lumi")?)?[1];
+    (10.0..=10_000.0).contains(&y).then(|| y.round() as u32)
 }
 
 fn be16(data: &[u8], at: usize) -> Option<u16> {

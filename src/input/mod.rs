@@ -1001,6 +1001,7 @@ impl JffState {
                 self.apply_keyboard_config(&old_keyboard);
                 self.apply_workspace_count();
                 self.reconcile_outputs();
+                crate::protocol::color_management::sync_output_color(self);
                 self.apply_decoration_mode();
                 self.apply_hotkey_config();
                 self.osd.dismiss(crate::feature::osd::Icon::Error);

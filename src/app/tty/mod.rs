@@ -1811,6 +1811,7 @@ impl JffState {
             tracing::info!("monitor {} added", output.name());
             self.add_output(output);
         }
+        crate::protocol::color_management::sync_output_color(self);
         self.render();
     }
 
