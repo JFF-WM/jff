@@ -71,6 +71,39 @@ pub struct PopupGrabState {
     pub window_root: bool,
 }
 
+/// Whether a seat grab (pointer or keyboard) is somebody else's, so a menu's grab request must
+/// be refused: it is grabbed, and neither the request's serial, nor the menu's parent grab, nor
+/// the overview's own grab (which a menu opened from a panel in the overview replaces) holds it.
+pub fn seat_grab_is_foreign(
+    grabbed: bool,
+    held_by_serial: bool,
+    held_by_parent_grab: bool,
+    held_by_overview: bool,
+) -> bool {
+    grabbed && !(held_by_serial || held_by_parent_grab || held_by_overview)
+}
+
+/// Whether a menu's grab has to end because of where the keyboard is now (see
+/// `update_keyboard_focus`). `elsewhere` is the keyboard being on another surface than the
+/// menu's root, `focus_changed` that it moved there in this pass. `panel_takes_keys` is only
+/// asked for a panel's menu that has the keyboard elsewhere.
+pub fn popup_grab_outlived(
+    window_root: bool,
+    elsewhere: bool,
+    focus: &KeyboardFocus,
+    focus_changed: bool,
+    panel_takes_keys: impl FnOnce() -> bool,
+) -> bool {
+    if window_root {
+        return elsewhere;
+    }
+    // Only when the keyboard just went to the overview or the selection: a menu opened while
+    // either was already there is theirs to close (`end_overview`), not this pass's. They have
+    // no surface, so "elsewhere" is always true there and says nothing about the menu.
+    let modal = matches!(focus, KeyboardFocus::Overview | KeyboardFocus::Screenshot);
+    (focus_changed && modal) || (elsewhere && !modal && panel_takes_keys())
+}
+
 impl JffState {
     /// Raise a window and make it the one the user is working in. The keyboard follows, unless a
     /// launcher that asked for every key, or the overview, has it.
@@ -100,6 +133,10 @@ impl JffState {
     /// Work out who should have the keyboard and make it so. Cheap when nothing changed.
     pub fn update_keyboard_focus(&mut self) {
         self.refresh_popup_grab();
+        if self.popup_grab.is_none() {
+            // a menu raised in the overview took its pointer grab, and has let go of it
+            self.restore_overview_grab();
+        }
         self.forget_stale_on_demand_focus();
 
         let layout = self.layout_focus();
@@ -133,15 +170,16 @@ impl JffState {
         // A panel's menu only closes when the keyboard goes somewhere it can't follow: to the
         // overview (which reads every key itself), or, for a panel that takes keys, to another
         // surface than the panel. A panel that refuses the keyboard never has it, so a focus
-        // change says nothing about its menu. That one ends with an outside click.
+        // change says nothing about its menu. That one ends with an outside click. A menu raised
+        // from a panel while the overview is already open is fine: the keyboard did not move.
         let grab_outlived = self.popup_grab.as_ref().is_some_and(|grab| {
-            let elsewhere = Some(&grab.root) != focus.surface();
-            if grab.window_root {
-                elsewhere
-            } else {
-                matches!(focus, KeyboardFocus::Overview | KeyboardFocus::Screenshot)
-                    || (elsewhere && self.layer_takes_keys(&grab.root))
-            }
+            popup_grab_outlived(
+                grab.window_root,
+                Some(&grab.root) != focus.surface(),
+                &focus,
+                focus_changed,
+                || self.layer_takes_keys(&grab.root),
+            )
         });
         if grab_outlived {
             self.end_popup_grab();

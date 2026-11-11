@@ -21,6 +21,7 @@ mod outputs;
 mod overview_grid;
 mod overview_mode;
 mod pacing;
+mod popup_grab;
 mod region;
 mod screenshot_area;
 mod screenshot_capture;

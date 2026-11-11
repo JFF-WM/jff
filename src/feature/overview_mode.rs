@@ -801,6 +801,35 @@ impl JffState {
             .is_some_and(|ov| ov.closing.is_none())
     }
 
+    /// Serial of the pointer grab the open overview holds, to tell it from somebody else's.
+    pub fn overview_grab_serial(&self) -> Option<Serial> {
+        self.overview
+            .as_ref()
+            .filter(|ov| ov.closing.is_none())
+            .map(|ov| ov.grab_serial)
+    }
+
+    /// Give the open overview its pointer grab back after a menu's grab replaced it and ended.
+    /// Without it nothing selects thumbnails under the pointer any more. A grab that is still
+    /// there (the menu's, a move) is left alone.
+    pub fn restore_overview_grab(&mut self) {
+        let Some(serial) = self.overview_grab_serial() else {
+            return;
+        };
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        if pointer.is_grabbed() {
+            return;
+        }
+        let start_data = GrabStartData {
+            focus: None,
+            button: 0,
+            location: pointer.current_location(),
+        };
+        pointer.set_grab(self, OverviewGrab::new(start_data), serial, Focus::Clear);
+    }
+
     /// Where the pointer may go: every monitor, also while the overview is open. The overview
     /// stays on its own monitor, other monitors keep their panels and draw as usual.
     pub fn pointer_bounds(&self) -> Vec<Rect> {
@@ -1403,11 +1432,15 @@ impl JffState {
                     ov.layer_buttons.push(button);
                 }
                 // The pointer may not have moved since opening: make sure the surface under it
-                // has the pointer before the press.
+                // has the pointer before the press. The focus is given here, not left to the
+                // grab: the overview's own grab works it out itself, but a menu's grab keeps
+                // only the focus it is handed, and with none the press counts as a click outside
+                // the menu and closes it, so a button inside a menu could never open a submenu.
                 let at = pointer.current_location();
+                let focus = self.overview_layer_under(at);
                 pointer.motion(
                     self,
-                    None,
+                    focus,
                     &MotionEvent {
                         location: at,
                         serial: SERIAL_COUNTER.next_serial(),

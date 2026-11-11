@@ -97,7 +97,7 @@ use smithay::wayland::xdg_foreign::{XdgForeignHandler, XdgForeignState};
 use crate::app::Backend;
 use crate::config::{Config, KeyboardConfig, WindowFacts, WindowRule};
 use crate::desk::{Desk, Side, WindowMode};
-use crate::focus::{KeyboardFocus, PopupGrabState};
+use crate::focus::{seat_grab_is_foreign, KeyboardFocus, PopupGrabState};
 use crate::input::grabs::resize::ResizeGrab;
 use crate::primitives::geom;
 use crate::primitives::layout;
@@ -1356,12 +1356,23 @@ impl XdgShellHandler for JffState {
         // Only take over when the request matches the grab already in place (the press that
         // opened the menu), a stale or unrelated request is refused.
         let kb_mismatch = keyboard.as_ref().is_some_and(|k| {
-            k.is_grabbed()
-                && !(k.has_grab(serial) || grab.previous_serial().is_none_or(|s| k.has_grab(s)))
+            seat_grab_is_foreign(
+                k.is_grabbed(),
+                k.has_grab(serial),
+                grab.previous_serial().is_none_or(|s| k.has_grab(s)),
+                false,
+            )
         });
+        // The overview's own pointer grab is not a stranger: a menu raised from a panel while
+        // the overview is open takes its place, and it comes back when the menu ends.
+        let overview_serial = self.overview_grab_serial();
         let ptr_mismatch = pointer.as_ref().is_some_and(|p| {
-            p.is_grabbed()
-                && !(p.has_grab(serial) || grab.previous_serial().is_none_or(|s| p.has_grab(s)))
+            seat_grab_is_foreign(
+                p.is_grabbed(),
+                p.has_grab(serial),
+                grab.previous_serial().is_none_or(|s| p.has_grab(s)),
+                overview_serial.is_some_and(|s| p.has_grab(s)),
+            )
         });
         if kb_mismatch || ptr_mismatch {
             tracing::debug!(
