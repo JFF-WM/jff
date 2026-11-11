@@ -101,6 +101,7 @@ use crate::focus::{seat_grab_is_foreign, KeyboardFocus, PopupGrabState};
 use crate::input::grabs::resize::ResizeGrab;
 use crate::primitives::geom;
 use crate::primitives::layout;
+use crate::protocol::color_management::ColorManagement;
 use crate::protocol::color_representation::ColorRepresentationManager;
 use crate::protocol::ext_foreign_toplevel::ExtForeignToplevel;
 use crate::protocol::fixes::Fixes;
@@ -302,6 +303,9 @@ pub struct JffState {
     /// wp-color-representation: how a surface's buffer values are encoded, stored only so far
     /// (`protocol/color_representation.rs`).
     pub color_representation_manager: ColorRepresentationManager,
+    /// wp-color-management: image descriptions of surfaces and outputs, stored only so far
+    /// (`protocol/color_management.rs`).
+    pub color_management: ColorManagement,
     /// State of the `wlr-layer-shell` protocol (panels, launchers, wallpapers).
     pub layer_shell_state: WlrLayerShellState,
     /// The id the next window gets (see `ipc.rs`).
@@ -527,6 +531,7 @@ impl JffState {
             });
         let transient_seats = TransientSeats::new(&display_handle);
         let color_representation_manager = ColorRepresentationManager::new(&display_handle);
+        let color_management = ColorManagement::new(&display_handle);
 
         // wlr-layer-shell: lets bars, launchers, wallpapers, and notification daemons place
         // themselves on a monitor.
@@ -627,6 +632,7 @@ impl JffState {
             virtual_keyboard_state,
             transient_seats,
             color_representation_manager,
+            color_management,
             layer_shell_state,
             next_view_id: 1,
             subscribers: Vec::new(),

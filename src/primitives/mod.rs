@@ -2,6 +2,7 @@
 
 pub mod alpha;
 pub mod app_search;
+pub mod color;
 pub mod frame_clock;
 pub mod geom;
 pub mod json;

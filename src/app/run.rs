@@ -107,6 +107,8 @@ pub fn run() -> anyhow::Result<()> {
         |_, display, state| {
             // SAFETY: the display is never dropped while the loop is running.
             unsafe { display.get_mut().dispatch_clients(state).unwrap() };
+            // `done` of an information object destroys it, so it can't go out mid-request.
+            crate::protocol::color_management::flush_pending_info(state);
             // a commit, a request that moved a window, a new client...
             state.queue_redraw_all();
             Ok(PostAction::Continue)

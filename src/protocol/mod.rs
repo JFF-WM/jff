@@ -1,6 +1,7 @@
 //! One module per Wayland protocol family (handlers and their wiring).
 
 pub mod background_effect;
+pub mod color_management;
 pub mod color_representation;
 pub mod content_type;
 pub mod drm_lease;

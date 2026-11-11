@@ -4,6 +4,7 @@ mod alpha;
 mod app_index;
 mod app_search;
 mod border;
+mod color_management;
 mod color_representation;
 mod config;
 mod desk;
