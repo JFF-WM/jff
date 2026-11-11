@@ -11,7 +11,8 @@
 //! session file.
 //!
 //! The level is for jff's own code. Dependencies (smithay, calloop, …) are capped at `info`
-//! so that `debug` doesn't drown the log in their per-frame chatter.
+//! so that `debug` doesn't drown the log in their per-frame chatter. The one exception is
+//! smithay's drm compositor, which says why a surface was refused direct scanout: `trace` only.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -166,13 +167,14 @@ fn targets(level: LogLevel) -> Targets {
     Targets::new()
         .with_default(others)
         .with_target(OWN_TARGET, own)
-        // why a window was refused the primary plane (direct scanout)
+        // why a window was refused the primary plane (direct scanout): a line per element per
+        // frame, so only at `trace`
         .with_target(
             "smithay::backend::drm::compositor",
-            if matches!(level, LogLevel::Debug | LogLevel::Trace) {
+            if matches!(level, LogLevel::Trace) {
                 LevelFilter::TRACE
             } else {
-                own
+                others
             },
         )
 }
