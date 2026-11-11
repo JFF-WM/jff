@@ -38,6 +38,12 @@
 //! detached and not waited for, the reply only says it started. Intended for a panel or script
 //! running as the same user, which the socket's `0600` permissions already restrict it to.
 //!
+//! `jff msg` prints a reply as it came, one line, when its output is a pipe or a file, so
+//! `jff msg views | jq` and scripts get one JSON object per line. On a terminal it indents the
+//! JSON for reading, and so does each event of `watch` (with an empty line after it).
+//! `jff msg --pretty COMMAND` indents in any case, `jff msg --compact COMMAND` never does, the
+//! flag comes before the command. The socket itself always speaks one line.
+//!
 //! Replies look like `{"ok":true,"view":{...}}`, `{"ok":true,"views":[...]}`, or
 //! `{"ok":false,"error":"..."}`. Workspace commands reply
 //! `{"ok":true,"workspace":2,"count":9}` (the shown workspace, from 1). `status` replies
@@ -179,7 +185,7 @@
 pub mod events;
 
 use std::collections::VecDeque;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -205,7 +211,7 @@ use crate::ipc::events::{
     ClickInfo, ClickTarget, Event, Group, GroupSet, LayerInfo, OutputColor, OutputInfo, PopupInfo,
     Snapshot, View,
 };
-use crate::primitives::json::json_str;
+use crate::primitives::json::{json_str, pretty};
 use crate::protocol::layer_shell::{is_mapped, Under};
 use crate::state::JffState;
 
@@ -1330,17 +1336,56 @@ fn find_socket() -> anyhow::Result<UnixStream> {
     bail!("no running jff found (JFF_SOCKET is not set)")
 }
 
+/// The leading `--pretty` / `-p` and `--compact` / `-c` flags of `jff msg`, and the rest. The
+/// flag is `Some(true)` for pretty, `Some(false)` for compact, `None` when none was given (a
+/// terminal gets pretty, anything else compact). Only leading words count: after the command
+/// they are its arguments (`spawn-sh ls -c`). The last flag wins.
+pub fn split_style(args: &[String]) -> (Option<bool>, &[String]) {
+    let mut style = None;
+    let mut rest = args;
+    while let Some((first, tail)) = rest.split_first() {
+        match first.as_str() {
+            "--pretty" | "-p" => style = Some(true),
+            "--compact" | "-c" => style = Some(false),
+            _ => break,
+        }
+        rest = tail;
+    }
+    (style, rest)
+}
+
+/// What `jff msg` prints for the reply or event `text`: as it is, or each line of JSON in it
+/// indented. Text that is not a JSON object stays as it was.
+fn render(text: &str, pretty_print: bool) -> String {
+    if !pretty_print {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() * 2);
+    for line in text.lines() {
+        if line.starts_with('{') {
+            out.push_str(&pretty(line));
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// `jff msg <command...>`: send the command, print the reply. Returns the exit code.
 pub fn client(args: &[String]) -> anyhow::Result<i32> {
+    let (style, args) = split_style(args);
     if args.is_empty() {
         eprintln!(
-            "usage: jff msg <command> [view id]\n       jff msg watch [{}]\ncommands: {COMMANDS}",
+            "usage: jff msg [--pretty|--compact] <command> [view id]\n       \
+             jff msg [--pretty|--compact] watch [{}]\ncommands: {COMMANDS}",
             Group::NAMES.replace(", ", "|")
         );
         return Ok(2);
     }
+    let pretty_print = style.unwrap_or_else(|| io::stdout().is_terminal());
     if args[0] == "watch" {
-        return watch_client(args);
+        return watch_client(args, pretty_print);
     }
     let mut stream = find_socket()?;
     stream.write_all(args.join(" ").as_bytes())?;
@@ -1349,7 +1394,7 @@ pub fn client(args: &[String]) -> anyhow::Result<i32> {
 
     let mut reply = String::new();
     stream.read_to_string(&mut reply)?;
-    print!("{reply}");
+    print!("{}", render(&reply, pretty_print));
     Ok(if reply.starts_with("{\"ok\":true") {
         0
     } else {
@@ -1359,7 +1404,7 @@ pub fn client(args: &[String]) -> anyhow::Result<i32> {
 
 /// `jff msg watch [group...]`: print every line jff sends as it arrives. Returns the exit code:
 /// 0 when the connection closed or stdout did (`| head -1`), 1 for an error reply.
-fn watch_client(args: &[String]) -> anyhow::Result<i32> {
+fn watch_client(args: &[String], pretty_print: bool) -> anyhow::Result<i32> {
     let mut stream = find_socket()?;
     stream.write_all(args.join(" ").as_bytes())?;
     stream.write_all(b"\n")?;
@@ -1385,7 +1430,16 @@ fn watch_client(args: &[String]) -> anyhow::Result<i32> {
         }
         // `write_all` and `flush` instead of `print!`: a closed stdout is an error to handle,
         // not a panic.
-        let written = stdout.write_all(&line).and_then(|()| stdout.flush());
+        let written = if pretty_print {
+            // An empty line after each event, since an event is now many lines.
+            let text = render(&String::from_utf8_lossy(&line), true);
+            stdout
+                .write_all(text.as_bytes())
+                .and_then(|()| stdout.write_all(b"\n"))
+        } else {
+            stdout.write_all(&line)
+        };
+        let written = written.and_then(|()| stdout.flush());
         match written {
             Ok(()) => {}
             Err(err) if err.kind() == io::ErrorKind::BrokenPipe => return Ok(0),

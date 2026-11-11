@@ -9,9 +9,10 @@ use std::os::unix::net::UnixStream;
 use jff_wm::desk::Goto;
 use jff_wm::ipc::events::{Group, GroupSet};
 use jff_wm::ipc::{
-    parse_request, ClickButton, Maximize, Outbox, Request, Subscriber, COMMANDS, MAX_PENDING,
+    parse_request, split_style, ClickButton, Maximize, Outbox, Request, Subscriber, COMMANDS,
+    MAX_PENDING,
 };
-use jff_wm::primitives::json::{json_opt, json_str};
+use jff_wm::primitives::json::{json_opt, json_str, pretty};
 
 #[test]
 fn requests_are_parsed() {
@@ -423,4 +424,82 @@ fn outputs_takes_no_arguments() {
     assert_eq!(parse_request(" outputs \n"), Ok(Request::Outputs));
     assert!(parse_request("outputs DP-1").is_err());
     assert!(COMMANDS.contains("outputs"));
+}
+
+fn words(line: &str) -> Vec<String> {
+    line.split_whitespace().map(str::to_string).collect()
+}
+
+#[test]
+fn pretty_puts_one_member_per_line() {
+    assert_eq!(
+        pretty("{\"ok\":true,\"views\":[],\"a\":{},\"b\":[1,{\"c\":null}]}"),
+        "{\n  \"ok\": true,\n  \"views\": [],\n  \"a\": {},\n  \"b\": [\n    1,\n    {\n      \"c\": null\n    }\n  ]\n}"
+    );
+}
+
+#[test]
+fn pretty_leaves_strings_alone() {
+    // Brackets, commas, colons, an escaped quote and an escaped backslash inside a string.
+    let json = "{\"title\":\"a, {b}: [c] \\\" \\\\\",\"n\":1}";
+    assert_eq!(
+        pretty(json),
+        "{\n  \"title\": \"a, {b}: [c] \\\" \\\\\",\n  \"n\": 1\n}"
+    );
+    // A string that ends in an escaped backslash does end there.
+    assert_eq!(
+        pretty("{\"a\":\"\\\\\",\"b\":2}"),
+        "{\n  \"a\": \"\\\\\",\n  \"b\": 2\n}"
+    );
+}
+
+#[test]
+fn pretty_does_not_change_the_json() {
+    let compact =
+        "{\"event\":\"snapshot\",\"views\":[{\"id\":1,\"title\":\"x y\"}],\"locked\":false}";
+    let again: String = {
+        // Take every whitespace outside of strings out again.
+        let mut out = String::new();
+        let (mut in_string, mut escaped) = (false, false);
+        for c in pretty(compact).chars() {
+            if in_string {
+                out.push(c);
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+            } else if c == '"' {
+                in_string = true;
+                out.push(c);
+            } else if !c.is_whitespace() {
+                out.push(c);
+            }
+        }
+        out
+    };
+    assert_eq!(again, compact);
+}
+
+#[test]
+fn the_style_flags_come_before_the_command() {
+    let args = words("views");
+    assert_eq!(split_style(&args), (None, &args[..]));
+
+    let args = words("--pretty views");
+    assert_eq!(split_style(&args), (Some(true), &args[1..]));
+
+    let args = words("-c status");
+    assert_eq!(split_style(&args), (Some(false), &args[1..]));
+
+    // The last one wins, and a flag after the command is the command's.
+    let args = words("-p --compact outputs");
+    assert_eq!(split_style(&args), (Some(false), &args[2..]));
+    let args = words("spawn-sh ls -c");
+    assert_eq!(split_style(&args), (None, &args[..]));
+
+    let args = words("--pretty");
+    assert!(split_style(&args).1.is_empty());
 }
