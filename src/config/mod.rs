@@ -11,6 +11,14 @@
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
+//! `color-management { … }` (`off`: jff does not offer wp-color-management and draws every
+//! surface as it always did, `convert-srgb`: surfaces with no color description, which are sRGB,
+//! are converted to the monitor's colors too, which is what stops them looking oversaturated on a
+//! wide-gamut panel (give it an `icc-profile`), `fullscreen-passthrough`: a fullscreen window is
+//! never converted, so it can still be scanned out) and `color-management "off"` inside an
+//! `output` (that monitor is not managed): surfaces a client tagged with another gamut or curve
+//! than the monitor's are converted to it, and with `convert-srgb` the untagged ones too.
+//!
 //! Two things that bite when editing the file by hand:
 //! - `adaptive-sync` takes a quoted string (`"off"` / `"fullscreen"` / `"always"`), not a
 //!   bare flag.
@@ -136,6 +144,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "outputs",
     "window-rule",
     "color-representation",
+    "color-management",
     "binds",
 ];
 
@@ -254,6 +263,25 @@ pub enum Vrr {
     Always,
 }
 
+/// The `color-management { … }` block: how surfaces that clients tagged with their colors are
+/// shown (wp-color-management).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ColorManagementConfig {
+    /// `off`: the protocol is not offered and no surface is converted. The protocol is set up at
+    /// startup, so a change of this one takes effect after a restart.
+    pub off: bool,
+    /// `fullscreen-passthrough`: a fullscreen window is shown as its client drew it, whatever it
+    /// is tagged with. It stays eligible for direct scanout, at the price of wrong colors if
+    /// the tag is not the monitor's.
+    pub fullscreen_passthrough: bool,
+    /// `convert-srgb`: a surface with no color description (plain sRGB) is converted to the
+    /// monitor's colors like a tagged one. That is what stops sRGB content looking oversaturated
+    /// on a wide-gamut panel (give the monitor an `icc-profile`). Off by default: such a
+    /// surface is then drawn as it always was, which keeps it eligible for direct scanout and
+    /// costs the GPU nothing.
+    pub convert_srgb: bool,
+}
+
 /// What the user asked for one monitor.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OutputConfig {
@@ -270,6 +298,8 @@ pub struct OutputConfig {
     pub vrr: Vrr,
     /// Set the connector's `content type` to Game while a fullscreen window says it is a game.
     pub content_type_hint: bool,
+    /// `color-management "off"`: surfaces on this monitor are not converted to its colors.
+    pub color_management_off: bool,
 }
 
 /// Keyboard layout and key repeat.
@@ -909,6 +939,8 @@ pub struct Config {
     /// `color-representation { yuv }`: draw YUV buffers with the matrix and range the client
     /// declared (wp-color-representation).
     color_representation_yuv: bool,
+    /// `color-management { … }`.
+    color_management: ColorManagementConfig,
 }
 
 /// Held while dragging with the mouse, moves or resizes a window.
@@ -956,6 +988,7 @@ impl Default for Config {
                 autostart: Vec::new(),
                 window_rules: Vec::new(),
                 color_representation_yuv: false,
+                color_management: ColorManagementConfig::default(),
             }
         })
     }
@@ -1203,6 +1236,22 @@ impl Config {
                 }
             }
         }
+        let mut color_management = ColorManagementConfig::default();
+        if let Some(node) = doc.get("color-management") {
+            if !positional(node).is_empty() {
+                bail!("color-management takes a block: color-management {{ off; }}");
+            }
+            for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+                match child.name().value() {
+                    "off" => color_management.off = flag_value(child)?,
+                    "fullscreen-passthrough" => {
+                        color_management.fullscreen_passthrough = flag_value(child)?
+                    }
+                    "convert-srgb" => color_management.convert_srgb = flag_value(child)?,
+                    other => bail!("unknown color-management setting {other:?}"),
+                }
+            }
+        }
         let mut window_rules = Vec::new();
         for node in doc.nodes() {
             if node.name().value() == "window-rule" {
@@ -1241,6 +1290,7 @@ impl Config {
             autostart,
             window_rules,
             color_representation_yuv,
+            color_management,
         })
     }
 
@@ -1331,6 +1381,11 @@ impl Config {
     /// Whether `color-representation { yuv }` is on.
     pub fn color_representation_yuv(&self) -> bool {
         self.color_representation_yuv
+    }
+
+    /// The `color-management { … }` block (everything off or unset by default).
+    pub fn color_management(&self) -> ColorManagementConfig {
+        self.color_management
     }
 
     /// The `window-rule` blocks, in file order.
@@ -2049,6 +2104,7 @@ fn parse_output(node: &KdlNode) -> anyhow::Result<OutputConfig> {
                     _ => bail!("adaptive-sync takes one value: adaptive-sync \"fullscreen\""),
                 };
             }
+            "color-management" => config.color_management_off = !flag_value(child)?,
             "icc-profile" => {
                 let path = match args.as_slice() {
                     [value] => value

@@ -30,11 +30,11 @@ use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
 };
-use smithay::backend::renderer::element::{AsRenderElements, Id, Kind, RenderElement};
+use smithay::backend::renderer::element::{AsRenderElements, Element, Id, Kind, RenderElement};
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::{Bind, ExportMem, Offscreen, TextureMapping};
-use smithay::desktop::Window;
+use smithay::desktop::{PopupManager, Window};
 use smithay::input::keyboard::Keysym;
 use smithay::input::pointer::{
     AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, Focus, GestureHoldBeginEvent,
@@ -58,6 +58,7 @@ use crate::feature::screenshot::save::{notify, spawn_save, SaveJob};
 use crate::feature::window_anim::OpenFrame;
 use crate::input::BTN_LEFT;
 use crate::primitives::layout::{self, Rect};
+use crate::protocol::color_management::OutputColor;
 use crate::protocol::layer_shell::{
     layer_body_elements, layer_elements, layer_popup_elements, layers_above, BELOW_WINDOWS,
 };
@@ -65,6 +66,7 @@ use crate::render::cursor::RenderCursor;
 use crate::render::effects::background_effect::window_elements;
 use crate::render::effects::border::BorderPaint;
 use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
+use crate::render::effects::gamut;
 use crate::render::effects::rounded::is_fullscreen;
 use crate::render::elements::JffElement;
 use crate::state::JffState;
@@ -327,6 +329,11 @@ impl JffState {
             .unwrap_or_default();
         let millis = self.start_time.elapsed().as_millis() as u32;
         let fullscreen = self.fullscreen_rects();
+        // A picture in a file is sRGB: everything drawn below, layers and menus included, is
+        // converted to that, not to the panel.
+        let _color_scope = gamut::enter(crate::protocol::color_management::capture_color(
+            &self.config,
+        ));
 
         // Same order as `render_crtc`: cursor first, when asked for and drawn by jff at all.
         let cursor_near =
@@ -371,6 +378,8 @@ impl JffState {
         ));
         let radius = self.config.radius();
         let popup_radius = self.config.popup_radius();
+        // A picture in a file is sRGB: tagged windows are converted to that, not to the panel.
+        let color = crate::protocol::color_management::capture_color(&self.config);
         let border = self.config.border();
         for entry in self.desk.top_down() {
             let geo = entry.window.geometry();
@@ -398,6 +407,7 @@ impl JffState {
                 snapshot.as_ref(),
                 radius,
                 popup_radius,
+                color,
                 BorderPaint::of(border, &entry.window, self.focused_window.as_ref()),
                 OpenFrame::DONE,
                 &mut elements,
@@ -452,21 +462,67 @@ impl JffState {
         Ok((scale_factor, size))
     }
 
+    /// What the monitor `window` is on shows, `None` when there is no such monitor or it is not
+    /// color managed.
+    pub(crate) fn window_output_color(&self, window: &Window) -> Option<OutputColor> {
+        let geo = window.geometry();
+        let pos = self.desk.pos_of(|w| w == window)?;
+        let on = self.rect_for_window(pos, (geo.size.w, geo.size.h));
+        let output = self
+            .outputs
+            .iter()
+            .find(|output| output_rect(output) == on)?;
+        crate::protocol::color_management::output_color(
+            &self.config,
+            &self.color_management,
+            &output.name(),
+        )
+    }
+
     /// A picture of `window` alone (its geometry, with its menus) on a transparent background.
     /// Pixels are premultiplied.
     pub(crate) fn capture_window(&mut self, window: &Window) -> Result<Captured, String> {
+        // A picture in a file (or a stream) is sRGB.
+        let color = crate::protocol::color_management::capture_color(&self.config);
+        self.capture_window_in(window, color)
+    }
+
+    /// [`JffState::capture_window`] with the colors of the picture chosen: surfaces are converted
+    /// to `color` (`None`: left as their clients drew them). The picture of a window that is
+    /// closing is made in the colors of its monitor, so the fade can be drawn as it is.
+    pub(crate) fn capture_window_in(
+        &mut self,
+        window: &Window,
+        color: Option<OutputColor>,
+    ) -> Result<Captured, String> {
         let geo = window.geometry();
         let (scale_factor, size) = self.window_capture_size(window)?;
         let scale = Scale::from(scale_factor);
         // Draw the window with its geometry corner at (0, 0).
         let loc: Point<i32, Physical> =
             Point::<i32, Logical>::from((-geo.loc.x, -geo.loc.y)).to_physical_precise_round(scale);
+        // The window's own surfaces and those of its menus, each needing its own conversion.
+        let mut conversions = Vec::new();
+        if let (Some(toplevel), Some(color)) = (window.toplevel(), color) {
+            conversions.extend(gamut::conversions(toplevel.wl_surface(), &color));
+            for (popup, _) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
+                conversions.extend(gamut::conversions(popup.wl_surface(), &color));
+            }
+        }
         let renderer = self.backend.renderer();
         // A client's fade (wp_alpha_modifier_v1) is applied per surface on top of the 1.0, so
         // the picture shows the window as it looks on screen, translucent where it is faded.
         // The closing fade starts from this picture, so it carries on from what was shown.
-        let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+        let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
             window.render_elements(&mut *renderer, loc, scale, 1.0);
+        let mut elements: Vec<JffElement> = Vec::new();
+        for surface in surfaces {
+            let conversion = gamut::find(&conversions, surface.id());
+            match gamut::masked(&mut *renderer, None, conversion) {
+                Some(mask) => elements.push(mask.wrap(surface)),
+                None => elements.push(JffElement::from(surface)),
+            }
+        }
         render_to_rgba(
             renderer,
             (size.w, size.h),
@@ -509,6 +565,8 @@ impl JffState {
             (!blur.behind_windows).then(|| WallpaperSnapshot::for_output(&output.name()));
         let radius = self.config.radius();
         let popup_radius = self.config.popup_radius();
+        let color = crate::protocol::color_management::capture_color(&self.config);
+        let _color_scope = gamut::enter(color);
         let renderer = self.backend.renderer();
         let mut elements: Vec<JffElement> = Vec::new();
         window_elements(
@@ -522,6 +580,7 @@ impl JffState {
             snapshot.as_ref(),
             radius,
             popup_radius,
+            color,
             None,
             OpenFrame::DONE,
             &mut elements,

@@ -1313,6 +1313,14 @@ impl JffState {
         let scale = Scale::from(1.0f64);
         let rect = output_rect(&lit.output);
         let origin: Point<i32, Logical> = (rect.0, rect.1).into();
+        // What this monitor shows. Every surface drawn below (layers, popups, thumbnails, the
+        // lock screen, windows) is converted to it, not only the windows.
+        let color = crate::protocol::color_management::output_color(
+            &self.config,
+            &self.color_management,
+            &lit.output.name(),
+        );
+        let _color_scope = crate::render::effects::gamut::enter(color);
         let pointer: Point<f64, Logical> = self
             .seat
             .get_pointer()
@@ -1507,6 +1515,7 @@ impl JffState {
                         snapshot.as_ref(),
                         radius,
                         popup_radius,
+                        color,
                         BorderPaint::of(border, &entry.window, self.focused_window.as_ref()),
                         if animate {
                             crate::feature::window_anim::open_frame(

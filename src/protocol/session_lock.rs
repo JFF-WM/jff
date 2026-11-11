@@ -96,7 +96,12 @@ pub fn lock_surface_elements(
                 1.0,
                 Kind::Unspecified,
             );
-        out.extend(elements.into_iter().map(JffElement::from));
+        crate::render::effects::gamut::wrap_surfaces(
+            &mut *renderer,
+            surface.wl_surface(),
+            elements,
+            &mut out,
+        );
     }
     out
 }

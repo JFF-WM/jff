@@ -11,6 +11,10 @@
 //!
 //! * `yuv`: which surfaces need their YUV colors fixed (`color-representation { yuv }`), applied
 //!   by the same shader as `rounded`.
+//! * `gamut`: which surfaces need their colors converted to the monitor's (wp-color-management):
+//!   those a client tagged with other colors, and with `color-management { convert-srgb }` plain
+//!   sRGB ones too, converted by the same shader. Nothing runs for a surface that needs nothing,
+//!   or when `color-management` is off.
 //!
 //! Blur itself is opt-in: nothing runs unless the config has a `blur { … }` block - the
 //! renderer hands these functions `None` otherwise (see `render_for_surface`).
@@ -24,6 +28,7 @@ pub mod background_effect;
 pub mod blur;
 pub mod border;
 pub mod framebuffer_effect;
+pub mod gamut;
 pub mod rounded;
 pub mod surface_alpha;
 pub mod yuv;

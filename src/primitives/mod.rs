@@ -4,6 +4,7 @@ pub mod alpha;
 pub mod app_search;
 pub mod color;
 pub mod frame_clock;
+pub mod gamut;
 pub mod geom;
 pub mod json;
 pub mod layout;

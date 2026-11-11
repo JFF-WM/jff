@@ -44,6 +44,7 @@ use crate::primitives::alpha;
 use crate::primitives::geom;
 use crate::primitives::layout::{self, Rect};
 use crate::render::effects::background_effect::{popup_elements, render_for_surface};
+use crate::render::effects::gamut;
 use crate::render::effects::surface_alpha::window_multiplier;
 use crate::render::elements::JffElement;
 use crate::state::JffState;
@@ -188,7 +189,7 @@ pub fn layer_elements(
                     1.0,
                     Kind::Unspecified,
                 );
-            out.extend(elements.into_iter().map(JffElement::from));
+            gamut::wrap_surfaces(&mut *renderer, surface.wl_surface(), elements, &mut out);
             push_layer_blur(&mut out, surface.wl_surface(), geo, *layer, blur);
         }
     }
@@ -249,7 +250,7 @@ pub fn layer_body_elements(
                     1.0,
                     Kind::Unspecified,
                 );
-            out.extend(elements.into_iter().map(JffElement::from));
+            gamut::wrap_surfaces(&mut *renderer, surface.wl_surface(), elements, &mut out);
             push_layer_blur(&mut out, surface.wl_surface(), geo, *layer, blur);
         }
     }

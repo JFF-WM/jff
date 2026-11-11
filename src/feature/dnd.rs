@@ -3,7 +3,9 @@
 //! Smithay hands us the drag through `WaylandDndGrabHandler::dnd_requested`. We take the
 //! pointer with a `DnDGrab`, draw the icon the client attached, drop it when the drag ends.
 
-use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
+use smithay::backend::renderer::element::surface::{
+    render_elements_from_surface_tree, WaylandSurfaceRenderElement,
+};
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::input::dnd::{DnDGrab, DndGrabHandler, DndTarget, GrabType, Source};
@@ -84,7 +86,18 @@ pub fn icon_elements(
 ) -> Vec<JffElement> {
     match icon.filter(|icon| icon.alive()) {
         Some(icon) => {
-            render_elements_from_surface_tree(renderer, icon, loc, scale, 1.0, Kind::Unspecified)
+            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                render_elements_from_surface_tree(
+                    &mut *renderer,
+                    icon,
+                    loc,
+                    scale,
+                    1.0,
+                    Kind::Unspecified,
+                );
+            let mut out = Vec::new();
+            crate::render::effects::gamut::wrap_surfaces(renderer, icon, elements, &mut out);
+            out
         }
         None => Vec::new(),
     }

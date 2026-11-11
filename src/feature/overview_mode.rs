@@ -37,7 +37,7 @@ use smithay::backend::renderer::element::surface::{
 use smithay::backend::renderer::element::utils::{
     Relocate, RelocateRenderElement, RescaleRenderElement,
 };
-use smithay::backend::renderer::element::{AsRenderElements, Id, Kind};
+use smithay::backend::renderer::element::{AsRenderElements, Element, Id, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::desktop::{layer_map_for_output, Window};
@@ -72,6 +72,7 @@ use crate::protocol::layer_shell::{ABOVE_WINDOWS, BELOW_WINDOWS};
 use crate::protocol::toplevel_icon;
 use crate::render::effects::background_effect::render_for_surface_zoomed;
 use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
+use crate::render::effects::gamut;
 use crate::render::effects::rounded::{is_fullscreen, ring_element, Rounding};
 use crate::render::elements::JffElement;
 use crate::state::JffState;
@@ -559,19 +560,27 @@ fn thumb_elements(
     };
     // Alpha 1.0 is the thumbnail's own: a client's fade (wp_alpha_modifier_v1) is applied per
     // surface on top, so a faded window stays faded here, as it is what the user sees live.
+    // A thumbnail shows the colors of the live window: converted to the monitor's like it.
+    let conversions = match window.toplevel() {
+        Some(toplevel) => gamut::tree_conversions(toplevel.wl_surface()),
+        None => Vec::new(),
+    };
     let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
         window.render_elements(&mut *renderer, loc, scale, 1.0);
     for surface in surfaces {
+        let conversion = gamut::find(&conversions, surface.id());
         let shrunk = RescaleRenderElement::from_element(
             surface,
             Point::<i32, Physical>::from((0, 0)),
             thumb.scale,
         );
         let placed = RelocateRenderElement::from_element(shrunk, slot, Relocate::Relative);
-        out.push(match &rounding {
-            Some(rounding) => rounding.wrap_thumb(placed),
-            None => JffElement::Thumb(placed),
-        });
+        out.push(
+            match gamut::masked(&mut *renderer, rounding.as_ref(), conversion) {
+                Some(mask) => mask.wrap_thumb(placed),
+                None => JffElement::Thumb(placed),
+            },
+        );
     }
     // The blur goes right behind the thumbnail: after its elements in the list. The window's
     // origin sits at the slot minus its geometry offset, both shrunk with the thumbnail.
@@ -832,17 +841,21 @@ fn wallpaper_elements(
                     1.0,
                     Kind::Unspecified,
                 );
+            let conversions = gamut::tree_conversions(surface);
             for element in surfaces {
+                let conversion = gamut::find(&conversions, element.id());
                 let shrunk = RescaleRenderElement::from_element(
                     element,
                     Point::<i32, Physical>::from((0, 0)),
                     scale,
                 );
                 let placed = RelocateRenderElement::from_element(shrunk, slot, Relocate::Relative);
-                out.push(match &rounding {
-                    Some(rounding) => rounding.wrap_thumb(placed),
-                    None => JffElement::Thumb(placed),
-                });
+                out.push(
+                    match gamut::masked(&mut *renderer, rounding.as_ref(), conversion) {
+                        Some(mask) => mask.wrap_thumb(placed),
+                        None => JffElement::Thumb(placed),
+                    },
+                );
             }
         }
     }

@@ -21,8 +21,9 @@ pub const MIN_LUM_SCALE: u32 = 10_000;
 /// Exponent of a power transfer function is sent times this.
 pub const EXPONENT_SCALE: u32 = 10_000;
 
-/// How out-of-gamut colors are treated. Both offered intents give the same pixels: a plain
-/// conversion, clipped to the output's gamut.
+/// How out-of-gamut colors are treated (see `primitives/gamut.rs`): perceptual desaturates a
+/// color toward the grey of the same luminance until the output can show it, relative
+/// colorimetric clips it to the edge of the output's gamut. Colors that fit are the same for both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderIntent {
     /// 0. Mandatory.

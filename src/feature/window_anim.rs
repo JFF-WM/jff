@@ -182,7 +182,9 @@ impl JffState {
         {
             return;
         }
-        match self.capture_window(window) {
+        // The picture is made in the colors of the monitor it fades on, which draws it as it is.
+        let color = self.window_output_color(window);
+        match self.capture_window_in(window, color) {
             Ok(picture) => self.closing.push(Ghost::new(&picture, pos, workspace)),
             Err(why) => tracing::debug!("no close animation: {why}"),
         }

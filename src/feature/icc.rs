@@ -9,10 +9,16 @@
 //! mapped to the code the panel needs for that much light. Only the tone curve is handled.
 //! Primaries (gamut conversion) need a colour pipeline the GPU may not have, so they're ignored.
 //!
-//! A profile with neither `vcgt` nor the three curves is an error.
+//! A profile that has neither but describes the panel with lookup tables (`A2B` / `B2A`) gets
+//! the same treatment from a fit of the tables (see [`lut`]): the curves of each channel, and
+//! for an `A2B` the colorants too. The tables themselves are not applied pixel by pixel.
+//!
+//! A profile with none of those is an error.
 //!
 //! [`description`] reads the same profile for `wp_color_management_v1`: what a client is told
 //! the panel looks like once those curves are applied (its primaries, tone curve and white).
+
+pub mod lut;
 
 use std::path::Path;
 
@@ -115,10 +121,21 @@ pub fn parse(data: &[u8]) -> anyhow::Result<GammaTable> {
             kind: Kind::ToneCurves,
         });
     }
-    bail!("the profile has neither vcgt calibration curves nor tone curves")
+    // A profile that describes the panel with lookup tables only: the tone curves fitted to them.
+    if let Some(model) = lut::panel_model(data) {
+        let [red, green, blue] = model.trcs();
+        return Ok(GammaTable {
+            red: correction(&red),
+            green: correction(&green),
+            blue: correction(&blue),
+            kind: Kind::ToneCurves,
+        });
+    }
+    bail!("the profile has neither vcgt calibration curves, tone curves nor lookup tables")
 }
 
 /// A panel tone response curve: code value (0..=1) to light (0..=1).
+#[derive(Clone, Debug)]
 enum Trc {
     /// `curv`, tabulated.
     Table(Vec<f64>),
@@ -532,9 +549,15 @@ fn plausible(c: &Chromaticities) -> bool {
 /// The panel's primaries and white, `None` when the profile has no colorants or they make no
 /// sense.
 fn panel_primaries(data: &[u8]) -> Option<Chromaticities> {
-    let red = xyz(find_tag(data, b"rXYZ")?)?;
-    let green = xyz(find_tag(data, b"gXYZ")?)?;
-    let blue = xyz(find_tag(data, b"bXYZ")?)?;
+    let tagged = || -> Option<[[f64; 3]; 3]> {
+        Some([
+            xyz(find_tag(data, b"rXYZ")?)?,
+            xyz(find_tag(data, b"gXYZ")?)?,
+            xyz(find_tag(data, b"bXYZ")?)?,
+        ])
+    };
+    // Without colorant tags, the colorants of a fitted lookup table stand in.
+    let [red, green, blue] = tagged().or_else(|| lut::panel_model(data)?.colorants)?;
     // The colorants are relative to D50. `chad` took the panel's white there, so its inverse
     // brings them back.
     let to_panel = match find_tag(data, b"chad").and_then(chad) {

@@ -143,6 +143,15 @@ impl JffState {
         let locked = self.session_lock.is_locked();
         // Blur is opt-in: `None` keeps every blur call below out of the frame.
         let blur = (!self.config.blur().off).then(|| self.config.blur());
+        // What the monitor shows: every surface drawn below is converted to it, not just windows.
+        let frame_color = layer_output.as_ref().and_then(|output| {
+            crate::protocol::color_management::output_color(
+                &self.config,
+                &self.color_management,
+                &output.name(),
+            )
+        });
+        let _color_scope = crate::render::effects::gamut::enter(frame_color);
         let Backend::Winit(winit) = &mut self.backend else {
             return;
         };
@@ -241,6 +250,13 @@ impl JffState {
                 } else {
                     let radius = self.config.radius();
                     let popup_radius = self.config.popup_radius();
+                    let color = layer_output.as_ref().and_then(|output| {
+                        crate::protocol::color_management::output_color(
+                            &self.config,
+                            &self.color_management,
+                            &output.name(),
+                        )
+                    });
                     let border = self.config.border();
                     let animate = self.config.window_animations();
                     let (open_time, close_time) = self.config.window_animation_times();
@@ -273,6 +289,7 @@ impl JffState {
                             snapshot.as_ref(),
                             radius,
                             popup_radius,
+                            color,
                             BorderPaint::of(border, &entry.window, self.focused_window.as_ref()),
                             if animate {
                                 crate::feature::window_anim::open_frame(

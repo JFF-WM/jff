@@ -303,8 +303,8 @@ pub struct JffState {
     /// wp-color-representation: how a surface's buffer values are encoded, stored only so far
     /// (`protocol/color_representation.rs`).
     pub color_representation_manager: ColorRepresentationManager,
-    /// wp-color-management: image descriptions of surfaces and outputs, stored only so far
-    /// (`protocol/color_management.rs`).
+    /// wp-color-management: image descriptions of surfaces and outputs, and what each monitor
+    /// shows (`protocol/color_management.rs`).
     pub color_management: ColorManagement,
     /// State of the `wlr-layer-shell` protocol (panels, launchers, wallpapers).
     pub layer_shell_state: WlrLayerShellState,
@@ -531,7 +531,8 @@ impl JffState {
             });
         let transient_seats = TransientSeats::new(&display_handle);
         let color_representation_manager = ColorRepresentationManager::new(&display_handle);
-        let color_management = ColorManagement::new(&display_handle);
+        let color_management =
+            ColorManagement::new(&display_handle, !config.color_management().off);
 
         // wlr-layer-shell: lets bars, launchers, wallpapers, and notification daemons place
         // themselves on a monitor.

@@ -27,13 +27,14 @@ use super::border::{border_element, BorderPaint};
 use super::framebuffer_effect::{FramebufferEffect, FramebufferEffectElement, WallpaperSnapshot};
 use super::rounded::{is_fullscreen, Rounding};
 use super::surface_alpha::multiplier_of;
-use super::yuv;
+use super::{gamut, yuv};
 use crate::config;
 use crate::feature::window_anim::OpenFrame;
 use crate::primitives::alpha;
 use crate::primitives::region::region_to_non_overlapping_rects;
 use crate::primitives::region::TransformedRegion;
 use crate::protocol::background_effect::get_cached_blur_region;
+use crate::protocol::color_management::OutputColor;
 use crate::render::elements::JffElement;
 
 #[derive(Debug)]
@@ -313,7 +314,7 @@ pub fn popup_elements(
                 1.0,
                 Kind::Unspecified,
             );
-        out.extend(elements.into_iter().map(JffElement::from));
+        gamut::wrap_surfaces(&mut *renderer, popup.wl_surface(), elements, out);
         if let Some(blur) = blur {
             let mask = Rounding::new(&mut *renderer, popup_geo, radius);
             render_for_surface_zoomed(
@@ -340,6 +341,11 @@ pub fn popup_elements(
 /// `border` is the outline around the window (see `border`), `None` for none. `alpha` is the
 /// look of the window while it opens (`OpenFrame::DONE` once it has). The client's own
 /// multiplier (wp_alpha_modifier_v1) is applied by Smithay on top of it, per surface.
+///
+/// `color` is what the monitor shows (`None` when it is not color managed): surfaces a client
+/// tagged with other colors are converted to it, and so are those with no tag when the monitor
+/// asks for it (`convert-srgb`). That holds for the popups, and for a window that is opening
+/// (drawn scaled) too.
 pub fn window_elements(
     renderer: &mut GlesRenderer,
     window: &Window,
@@ -348,10 +354,13 @@ pub fn window_elements(
     snapshot: Option<&WallpaperSnapshot>,
     radius: i32,
     popup_radius: i32,
+    color: Option<OutputColor>,
     border: Option<BorderPaint>,
     open: OpenFrame,
     out: &mut Vec<JffElement>,
 ) {
+    // Popups and the scaled picture of a window that is opening convert their surfaces to this.
+    let _color = gamut::enter(color);
     let alpha = open.alpha;
     // A window that is still opening has no outline (it would show at full strength behind a
     // half-transparent or moving window). Its blur fades in with it, see `open.alpha`.
@@ -400,7 +409,17 @@ pub fn window_elements(
     let fixes = toplevel
         .map(|toplevel| yuv::corrections(toplevel.wl_surface()))
         .unwrap_or_default();
-    let fixing = !fixes.is_empty();
+    // Surfaces a client tagged with colors other than the monitor's are converted to them. A
+    // fullscreen window may be left alone, to keep it eligible for direct scanout.
+    let conversions = match (toplevel, color) {
+        (Some(toplevel), Some(color))
+            if !(color.fullscreen_passthrough && is_fullscreen(window)) =>
+        {
+            gamut::conversions(toplevel.wl_surface(), &color)
+        }
+        _ => Vec::new(),
+    };
+    let fixing = !fixes.is_empty() || !conversions.is_empty();
 
     // Without blur, rounding and color fixes (or for an X11 window) there's nothing to
     // interleave.
@@ -443,11 +462,23 @@ pub fn window_elements(
             .iter()
             .find(|(id, _)| id == element.id())
             .map(|(_, fix)| *fix);
-        match (&rounding, &passthrough, fix) {
-            (Some(rounding), _, Some(fix)) => rounding.clone().with_correction(fix).wrap(element),
-            (Some(rounding), _, None) => rounding.wrap(element),
-            (None, Some(mask), Some(fix)) => mask.clone().with_correction(fix).wrap(element),
-            (None, _, _) => JffElement::from(element),
+        let conversion = conversions
+            .iter()
+            .find(|(id, _)| id == element.id())
+            .map(|(_, conversion)| *conversion);
+        // A surface with nothing to fix or convert, on a square window, is drawn as it is.
+        match rounding.as_ref().or(passthrough.as_ref()) {
+            Some(mask) if rounding.is_some() || fix.is_some() || conversion.is_some() => {
+                let mut mask = mask.clone();
+                if let Some(fix) = fix {
+                    mask = mask.with_correction(fix);
+                }
+                if let Some(conversion) = conversion {
+                    mask = mask.with_conversion(conversion);
+                }
+                mask.wrap(element)
+            }
+            _ => JffElement::from(element),
         }
     }));
     if let Some(blur) = blur {
@@ -504,19 +535,30 @@ fn scaled_window(
             (f64::from(radius) * open.scale).round() as i32,
         )
     };
+    // The colors of its surfaces are converted while it grows, like once it has settled.
+    let passthrough = gamut::active().is_some_and(|color| color.fullscreen_passthrough);
+    let conversions = match window.toplevel() {
+        Some(toplevel) if !(passthrough && is_fullscreen(window)) => {
+            gamut::tree_conversions(toplevel.wl_surface())
+        }
+        _ => Vec::new(),
+    };
     let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
         window.render_elements(&mut *renderer, from, scale, open.alpha);
     for surface in surfaces {
+        let conversion = gamut::find(&conversions, surface.id());
         let shrunk = RescaleRenderElement::from_element(
             surface,
             Point::<i32, Physical>::from((0, 0)),
             open.scale,
         );
         let placed = RelocateRenderElement::from_element(shrunk, slot, Relocate::Relative);
-        out.push(match &rounding {
-            Some(rounding) => rounding.wrap_thumb(placed),
-            None => JffElement::Thumb(placed),
-        });
+        out.push(
+            match gamut::masked(&mut *renderer, rounding.as_ref(), conversion) {
+                Some(mask) => mask.wrap_thumb(placed),
+                None => JffElement::Thumb(placed),
+            },
+        );
     }
     // The blur follows the shrunk window and fades in with it, right behind it in the list.
     if let (Some(blur), Some(toplevel)) = (blur, window.toplevel()) {

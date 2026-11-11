@@ -1409,3 +1409,43 @@ fn check_config_warns_about_log_settings_that_do_nothing() {
         .is_empty());
     assert!(Config::check_text("log { enable; }").unwrap().is_empty());
 }
+
+#[test]
+fn color_management_is_on_unless_turned_off() {
+    let config = Config::default();
+    assert!(!config.color_management().off);
+    assert!(!config.color_management().fullscreen_passthrough);
+    assert!(TOP_LEVEL_NODES.contains(&"color-management"));
+    let off = Config::parse("color-management { off; }").unwrap();
+    assert!(off.color_management().off);
+    assert!(!off.color_management().fullscreen_passthrough);
+    let passthrough = Config::parse("color-management { fullscreen-passthrough; }").unwrap();
+    assert!(!passthrough.color_management().off);
+    assert!(passthrough.color_management().fullscreen_passthrough);
+    assert!(!config.color_management().convert_srgb);
+    let convert = Config::parse("color-management { convert-srgb; }").unwrap();
+    assert!(convert.color_management().convert_srgb);
+    assert!(!convert.color_management().off);
+    let kept = Config::parse("color-management { off #false; }").unwrap();
+    assert!(!kept.color_management().off);
+    assert!(Config::parse("color-management { hdr; }").is_err());
+    // The per-monitor form is not a top-level setting, and is not silently ignored there.
+    assert!(Config::parse(r#"color-management "off""#).is_err());
+}
+
+#[test]
+fn a_monitor_can_turn_color_management_off() {
+    let config = Config::parse(
+        r#"outputs {
+            output "DP-1" { color-management "off"; }
+            output "DP-2" { color-management; }
+            output "DP-3" { mode "1920x1080@60"; }
+        }"#,
+    )
+    .unwrap();
+    assert!(config.output("DP-1").unwrap().color_management_off);
+    assert!(!config.output("DP-2").unwrap().color_management_off);
+    assert!(!config.output("DP-3").unwrap().color_management_off);
+    assert!(config.output("DP-4").is_none());
+    assert!(Config::parse(r#"outputs { output "DP-1" { color-management "maybe"; } }"#).is_err());
+}

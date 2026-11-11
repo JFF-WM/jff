@@ -38,6 +38,21 @@ uniform vec3 ycc_b;
 uniform vec3 ycc_off;
 uniform float ycc_on;
 
+// Color management (wp-color-management): the surface's own gamut and curve to the output's.
+// Straight (not premultiplied) color is decoded with `cm_decode`, mapped in linear light by the
+// matrix whose rows are cm_r, cm_g, cm_b, brought into the output's gamut (`cm_map` 0: clipped,
+// 1: desaturated toward the grey of the same luminance, `cm_luma` is the output's luminance row)
+// and encoded with `cm_encode`. A curve is (kind, exponent): kind 1 is the piecewise sRGB curve,
+// anything else a pure power. Off when cm_on is 0.
+uniform vec3 cm_r;
+uniform vec3 cm_g;
+uniform vec3 cm_b;
+uniform vec2 cm_decode;
+uniform vec2 cm_encode;
+uniform float cm_map;
+uniform vec3 cm_luma;
+uniform float cm_on;
+
 // How much of the pixel at `p` lies inside the rounded rectangle: 1 inside, 0 outside, and a
 // one-pixel soft edge in between.
 float rounded_coverage(vec2 p) {
@@ -47,6 +62,45 @@ float rounded_coverage(vec2 p) {
     vec2 q = abs(p - center) - (half_size - vec2(r));
     float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
     return clamp(0.5 - dist, 0.0, 1.0);
+}
+
+// Encoded value to linear light, for the curve described by `curve`.
+vec3 cm_to_light(vec3 v, vec2 curve) {
+    v = clamp(v, 0.0, 1.0);
+    if (curve.x > 0.5) {
+        vec3 low = v / 12.92;
+        vec3 high = pow((v + 0.055) / 1.055, vec3(2.4));
+        return mix(high, low, step(v, vec3(0.04045)));
+    }
+    return pow(v, vec3(curve.y));
+}
+
+// Linear light to encoded value. Light outside 0 to 1 is clipped first.
+vec3 cm_from_light(vec3 l, vec2 curve) {
+    l = clamp(l, 0.0, 1.0);
+    if (curve.x > 0.5) {
+        vec3 low = l * 12.92;
+        vec3 high = 1.055 * pow(l, vec3(1.0 / 2.4)) - 0.055;
+        return mix(high, low, step(l, vec3(0.0031308)));
+    }
+    return pow(l, vec3(1.0 / curve.y));
+}
+
+// Light in the output's primaries to light the output can show. Colors that fit are untouched;
+// the others are clipped, or moved along the line to the grey of the same luminance until the
+// first channel to leave the gamut is exactly on its edge.
+vec3 cm_map_gamut(vec3 c) {
+    if (cm_map < 0.5)
+        return clamp(c, 0.0, 1.0);
+    float y = clamp(dot(cm_luma, c), 0.0, 1.0);
+    float low = min(c.r, min(c.g, c.b));
+    float high = max(c.r, max(c.g, c.b));
+    float keep = 1.0;
+    if (low < 0.0)
+        keep = min(keep, y / (y - low));
+    if (high > 1.0)
+        keep = min(keep, (1.0 - y) / (high - y));
+    return clamp(vec3(y) + (c - vec3(y)) * keep, 0.0, 1.0);
 }
 
 void main() {
@@ -60,6 +114,15 @@ void main() {
         color.rgb = clamp(vec3(dot(ycc_r, c), dot(ycc_g, c), dot(ycc_b, c)) + ycc_off, 0.0, 1.0);
     }
 #endif
+
+    if (cm_on > 0.5) {
+        // The curves are not linear, so they work on the straight color, not the premultiplied one.
+        vec3 straight = color.a > 0.0 ? color.rgb / color.a : color.rgb;
+        vec3 light = cm_to_light(straight, cm_decode);
+        light = vec3(dot(cm_r, light), dot(cm_g, light), dot(cm_b, light));
+        light = cm_map_gamut(light);
+        color.rgb = cm_from_light(light, cm_encode) * color.a;
+    }
 
     // Only the window's own rectangle is shaped; what a client draws outside it (a shadow) is
     // left alone.

@@ -1,12 +1,18 @@
 //! wp-color-management-v1: clients describe the colors of a surface, and ask what the output
 //! (and so their surface) prefers.
 //!
-//! Stage 1 keeps the books and changes no pixel. A surface's image description and rendering
-//! intent are double-buffered like the rest of its state: requests change the pending state, a
+//! This module keeps the books: a surface's image description and rendering intent are
+//! double-buffered like the rest of its state. Requests change the pending state, a
 //! `wl_surface.commit` makes it current, and [`surface_color`] reads the current one. Only
 //! parametric descriptions exist: ICC profiles, mastering display metadata and the Windows
 //! formats are refused with `unsupported_feature`. The rules for building a description, and
 //! what is offered, are in `primitives/color.rs`.
+//!
+//! The renderer reads the books through [`surface_color_in`] and draws a surface whose
+//! description is not its monitor's through the color conversion of `primitives/gamut.rs` (see
+//! `render/effects/gamut.rs`). [`output_color`] says what a monitor is converted to, or that it
+//! is not managed (`color-management` in the config). A surface with no description, or plain
+//! sRGB, is not touched.
 //!
 //! The global is version 1 of the protocol: descriptions are announced with `ready` and a 32
 //! bit identity. Moving to version 2 or 3 means `ready2`, `preferred_changed2` and the
@@ -14,12 +20,15 @@
 //!
 //! An output is described as sRGB, unless the config gives a monitor an ICC profile: then it is
 //! described as that profile says (its primaries, tone curve and white, see
-//! `feature::icc::description`), and [`sync_output_color`] keeps it up to date. All outputs
-//! share one description, the profile of the first monitor that has one, so the preferred
-//! description of any surface is that one. When it changes, `image_description_changed` and
+//! `feature::icc::description`), and [`sync_output_color`] keeps it up to date. What clients are
+//! told is one description for all outputs, the profile of the first monitor that has one, so
+//! the preferred description of any surface is that one. What the renderer converts to is the
+//! description of the monitor itself, so a monitor with no profile is still shown as sRGB. When
+//! the description clients are told changes, `image_description_changed` and
 //! `preferred_changed` go to the objects that asked, which is why those are kept in
 //! [`ColorManagement`].
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -51,6 +60,7 @@ use smithay::reexports::wayland_server::{
 };
 use smithay::wayland::compositor::{with_states, Cacheable, SurfaceData};
 
+use crate::config::Config;
 use crate::primitives::color::{
     CreateError, Identities, ImageDescription, InfoEvent, ParamsBuilder, RenderIntent,
     SUPPORTED_FEATURES, SUPPORTED_INTENTS, SUPPORTED_PRIMARIES, SUPPORTED_TFS,
@@ -72,11 +82,58 @@ pub struct SurfaceColor {
     pub intent: RenderIntent,
 }
 
+/// What drawing the surfaces of one monitor needs to know about color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputColor {
+    /// The colors the monitor shows: what tagged surfaces are converted to.
+    pub target: ImageDescription,
+    /// A fullscreen window is shown as its client drew it, so it stays eligible for direct
+    /// scanout (`color-management { fullscreen-passthrough }`).
+    pub fullscreen_passthrough: bool,
+    /// Surfaces with no description (plain sRGB) are converted too
+    /// (`color-management { convert-srgb }`).
+    pub convert_srgb: bool,
+}
+
+/// What to convert the surfaces of the monitor `output` to, `None` when it is not managed: the
+/// config has `color-management { off }`, or `color-management "off"` for that monitor. Cheap
+/// enough to ask every frame, so a change of the config applies at once.
+pub fn output_color(config: &Config, color: &ColorManagement, output: &str) -> Option<OutputColor> {
+    let settings = config.color_management();
+    if settings.off
+        || config
+            .output(output)
+            .is_some_and(|c| c.color_management_off)
+    {
+        return None;
+    }
+    Some(OutputColor {
+        target: color.monitor_description(output),
+        fullscreen_passthrough: settings.fullscreen_passthrough,
+        convert_srgb: settings.convert_srgb,
+    })
+}
+
+/// What to convert to for a picture that is saved to a file (a screenshot): sRGB, which is what
+/// image files are taken to be. `None` when color management is off.
+pub fn capture_color(config: &Config) -> Option<OutputColor> {
+    (!config.color_management().off).then(|| OutputColor {
+        target: ImageDescription::srgb(),
+        fullscreen_passthrough: false,
+        // The target is sRGB: plain sRGB surfaces are already what the picture should hold.
+        convert_srgb: false,
+    })
+}
+
 /// The `wp_color_manager_v1` global and the numbering of descriptions.
 pub struct ColorManagement {
-    _global: GlobalId,
+    /// `None` when the config turns the protocol off.
+    _global: Option<GlobalId>,
     identities: Identities,
     output: Arc<Described>,
+    /// The colors of each monitor that has an ICC profile, by connector name. A monitor that
+    /// is not in it is sRGB.
+    monitors: HashMap<String, ImageDescription>,
     /// Information objects waiting for their events. `done` is a destructor event: sent while
     /// the `get_information` request that made the object is still being dispatched, it
     /// destroys the object before the backend has attached its data to it (a use-after-free).
@@ -91,16 +148,20 @@ pub struct ColorManagement {
 }
 
 impl ColorManagement {
-    pub fn new(display: &DisplayHandle) -> Self {
+    /// `enabled` is false for `color-management { off }`: the global is then not created, and
+    /// clients never see the protocol.
+    pub fn new(display: &DisplayHandle, enabled: bool) -> Self {
         let mut identities = Identities::new();
         let output = Arc::new(Described {
             description: ImageDescription::srgb(),
             identity: identities.next().unwrap_or(1),
         });
         Self {
-            _global: display.create_global::<JffState, WpColorManagerV1, ()>(1, ()),
+            _global: enabled
+                .then(|| display.create_global::<JffState, WpColorManagerV1, ()>(1, ())),
             identities,
             output,
+            monitors: HashMap::new(),
             pending_info: Vec::new(),
             outputs: Vec::new(),
             feedbacks: Vec::new(),
@@ -111,6 +172,14 @@ impl ColorManagement {
     /// All outputs have the same one for now.
     pub fn output_description(&self) -> Arc<Described> {
         self.output.clone()
+    }
+
+    /// The colors of the monitor `name`: what its ICC profile says, sRGB without one.
+    pub fn monitor_description(&self, name: &str) -> ImageDescription {
+        self.monitors
+            .get(name)
+            .copied()
+            .unwrap_or_else(ImageDescription::srgb)
     }
 
     /// Give the outputs a new description. Returns its identity, `None` when it is the one they
@@ -542,32 +611,39 @@ impl Dispatch<WpImageDescriptionV1, ImageDescriptionData> for JffState {
     }
 }
 
-/// Describe the outputs by the config: the ICC profile of the first monitor that has one, sRGB
-/// when none does or none can be read. Runs at startup, when the config is reloaded and when
-/// monitors come and go.
+/// Describe the outputs by the config: each monitor by its ICC profile, sRGB when it has none or
+/// the profile can't be read. Clients are told the description of the first monitor that has a
+/// profile (sRGB when none does). Runs at startup, when the config is reloaded and when monitors
+/// come and go.
 pub fn sync_output_color(state: &mut JffState) {
-    let description = state
+    let mut monitors = HashMap::new();
+    for output in &state.outputs {
+        let name = output.name();
+        let Some(path) = state
+            .config
+            .output(&name)
+            .and_then(|config| config.icc_profile.as_deref())
+        else {
+            continue;
+        };
+        match crate::feature::icc::load_description(path) {
+            Ok(description) => {
+                tracing::debug!("monitor {name}: color description from {}", path.display());
+                monitors.insert(name, description);
+            }
+            Err(err) => tracing::warn!(
+                "monitor {name}: cannot describe {}: {err:#}",
+                path.display()
+            ),
+        }
+    }
+    let told = state
         .outputs
         .iter()
-        .find_map(|output| {
-            let name = output.name();
-            let path = state.config.output(&name)?.icc_profile.as_deref()?;
-            match crate::feature::icc::load_description(path) {
-                Ok(description) => {
-                    tracing::debug!("monitor {name}: color description from {}", path.display());
-                    Some(description)
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "monitor {name}: cannot describe {}: {err:#}",
-                        path.display()
-                    );
-                    None
-                }
-            }
-        })
+        .find_map(|output| monitors.get(&output.name()).copied())
         .unwrap_or_else(ImageDescription::srgb);
-    set_output_color(state, description);
+    state.color_management.monitors = monitors;
+    set_output_color(state, told);
 }
 
 /// Make `description` the outputs' and tell the clients that follow it, if it is a change.

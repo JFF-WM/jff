@@ -12,7 +12,8 @@
 //!
 //! Opt-in: with `radius 0` (the default) or for a fullscreen window nothing here is used, so
 //! the plain path and direct scanout stay intact. A rounded surface is never scanned out
-//! directly, since the shader has to run on it.
+//! directly, since the shader has to run on it. The same goes for a surface that needs its
+//! colors fixed or converted: only those are drawn through the shader.
 //!
 //! The mask works in framebuffer pixels (`gl_FragCoord`), not texture coordinates, so it
 //! doesn't care how the client buffer is cropped, scaled or damaged. That's also why the
@@ -37,6 +38,7 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Transform};
 
+use crate::primitives::gamut::Conversion;
 use crate::primitives::yuv::Correction;
 use crate::render::elements::JffElement;
 
@@ -65,6 +67,14 @@ fn program(renderer: &mut GlesRenderer) -> Option<GlesTexProgram> {
                 UniformName::new("ycc_b", UniformType::_3f),
                 UniformName::new("ycc_off", UniformType::_3f),
                 UniformName::new("ycc_on", UniformType::_1f),
+                UniformName::new("cm_r", UniformType::_3f),
+                UniformName::new("cm_g", UniformType::_3f),
+                UniformName::new("cm_b", UniformType::_3f),
+                UniformName::new("cm_decode", UniformType::_2f),
+                UniformName::new("cm_encode", UniformType::_2f),
+                UniformName::new("cm_map", UniformType::_1f),
+                UniformName::new("cm_luma", UniformType::_3f),
+                UniformName::new("cm_on", UniformType::_1f),
             ],
         )
         .map_err(|err| tracing::warn!("error compiling the rounded corner shader: {err:#}"))
@@ -118,6 +128,8 @@ pub struct Rounding {
     radius: i32,
     /// Fixes the colors of a YUV buffer the driver converted with another matrix or range.
     correction: Option<Correction>,
+    /// Converts the surface's colors to those of the output (wp-color-management).
+    conversion: Option<Conversion>,
 }
 
 impl Rounding {
@@ -129,12 +141,19 @@ impl Rounding {
             geo: Rectangle::new((-100_000, -100_000).into(), (200_000, 200_000).into()),
             radius: 0,
             correction: None,
+            conversion: None,
         })
     }
 
     /// The same, and also fix the colors of a YUV buffer with `correction`.
     pub fn with_correction(mut self, correction: Correction) -> Self {
         self.correction = Some(correction);
+        self
+    }
+
+    /// The same, and also convert the surface's colors to the output's with `conversion`.
+    pub fn with_conversion(mut self, conversion: Conversion) -> Self {
+        self.conversion = Some(conversion);
         self
     }
 
@@ -159,6 +178,7 @@ impl Rounding {
             geo,
             radius,
             correction: None,
+            conversion: None,
         })
     }
 
@@ -167,12 +187,14 @@ impl Rounding {
         E: Element + RenderElement<GlesRenderer>,
     {
         RoundedElement {
-            // A new correction is a new id, like a new radius: the window is repainted.
+            // A new correction or conversion is a new id, like a new radius: the window is
+            // repainted.
             id: element_id(
                 element.id(),
                 thumb,
                 self.radius
-                    .wrapping_add(self.correction.map_or(0, |fix| fix.tag())),
+                    .wrapping_add(self.correction.map_or(0, |fix| fix.tag()))
+                    .wrapping_add(self.conversion.map_or(0, |conversion| conversion.tag())),
             ),
             inner: element,
             rounding: self.clone(),
@@ -208,6 +230,19 @@ impl Rounding {
                 Uniform::new("ycc_on", 1.0f32),
             ]),
             None => uniforms.push(Uniform::new("ycc_on", 0.0f32)),
+        }
+        match self.conversion {
+            Some(conversion) => uniforms.extend([
+                Uniform::new("cm_r", conversion.rows[0]),
+                Uniform::new("cm_g", conversion.rows[1]),
+                Uniform::new("cm_b", conversion.rows[2]),
+                Uniform::new("cm_decode", conversion.decode.shader_params()),
+                Uniform::new("cm_encode", conversion.encode.shader_params()),
+                Uniform::new("cm_map", conversion.map.shader_param()),
+                Uniform::new("cm_luma", conversion.luma),
+                Uniform::new("cm_on", 1.0f32),
+            ]),
+            None => uniforms.push(Uniform::new("cm_on", 0.0f32)),
         }
         frame.override_default_tex_program(self.program.clone(), uniforms);
     }
