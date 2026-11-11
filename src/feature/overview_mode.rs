@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::Fourcc;
-use smithay::backend::input::{ButtonState, InputTime};
+use smithay::backend::input::{AxisSource, ButtonState, InputTime};
 use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
 };
@@ -930,7 +930,7 @@ impl JffState {
             return;
         }
         // Nothing to switch between without windows.
-        self.open_overview_with(false);
+        self.open_overview_with(false, None);
         if !self.overview_active() {
             return;
         }
@@ -1006,11 +1006,12 @@ impl JffState {
     /// Open the overview. No-op while a move or resize is going on. With no windows it still
     /// opens: it is where you start an app from.
     pub fn open_overview(&mut self) {
-        self.open_overview_with(true);
+        self.open_overview_with(true, None);
     }
 
-    /// [`JffState::open_overview`], `allow_empty` says whether it opens without windows.
-    fn open_overview_with(&mut self, allow_empty: bool) {
+    /// [`JffState::open_overview`], `allow_empty` says whether it opens without windows and
+    /// `on` which monitor it opens on (`None`: the one the pointer or the focused window is on).
+    fn open_overview_with(&mut self, allow_empty: bool, on: Option<Output>) {
         if self.overview_active() {
             return;
         }
@@ -1035,7 +1036,7 @@ impl JffState {
         if pointer.is_grabbed() {
             return; // a move or a resize has the pointer
         }
-        let Some(output) = self.overview_output() else {
+        let Some(output) = on.or_else(|| self.overview_output()) else {
             return;
         };
         let rect = output_rect(&output);
@@ -1269,6 +1270,76 @@ impl JffState {
         }
         self.layer_under(p, &BELOW_WINDOWS)
             .map(|(_, surface, loc)| (surface, loc))
+    }
+
+    /// Whether `p` is part of the overview proper: on its monitor, clear of what panels reserve and of any panel or menu drawn over it.
+    fn overview_scroll_area(&self, p: Point<f64, Logical>) -> bool {
+        let Some(ov) = self.overview.as_ref() else {
+            return false;
+        };
+        let rect = output_rect(&ov.output);
+        let zone = layer_map_for_output(&ov.output).non_exclusive_zone();
+        let (x, y) = (p.x - f64::from(rect.0), p.y - f64::from(rect.1));
+        let inside = x >= f64::from(zone.loc.x)
+            && y >= f64::from(zone.loc.y)
+            && x < f64::from(zone.loc.x + zone.size.w)
+            && y < f64::from(zone.loc.y + zone.size.h);
+        inside
+            && self.layer_under(p, &ABOVE_WINDOWS).is_none()
+            && self.layer_popup_under(p, &BELOW_WINDOWS).is_none()
+    }
+
+    /// Scroll over the overview switches workspace, one step per wheel notch or touchpad gesture. True when the event was used up here, false when it belongs to whatever is under the pointer (a panel's volume control, say).
+    pub fn overview_scroll(
+        &mut self,
+        source: AxisSource,
+        amount: f64,
+        v120: Option<f64>,
+        stop: bool,
+    ) -> bool {
+        if !self.overview_active() {
+            return false;
+        }
+        let Some(pointer) = self.seat.get_pointer() else {
+            return false;
+        };
+        if !self.overview_scroll_area(pointer.current_location()) {
+            self.overview_scroll.reset();
+            return false;
+        }
+        // While typing a search the thumbnails are results, not a workspace: nothing to switch.
+        if self
+            .overview
+            .as_ref()
+            .is_some_and(|ov| !ov.search.query.is_empty())
+        {
+            return true;
+        }
+        let steps = match source {
+            AxisSource::Wheel | AxisSource::WheelTilt => self
+                .overview_scroll
+                .wheel(v120.unwrap_or(amount * 120.0 / 15.0)),
+            _ => self.overview_scroll.touch(amount, stop),
+        };
+        if steps == 0 {
+            return true;
+        }
+        // The monitor that was scrolled on, not whichever the pointer or the keyboard focus is
+        // on once the workspace has changed.
+        let Some(output) = self.overview.as_ref().map(|ov| ov.output.clone()) else {
+            return false;
+        };
+        let name = output.name();
+        let before = self.desk.current_on(&name);
+        let last = self.workspace_count().max(1) - 1;
+        let target = (before as i64 + i64::from(steps)).clamp(0, last as i64) as usize;
+        if target == before {
+            return true;
+        }
+        // Switching closes the overview: open it again on the new workspace.
+        self.switch_workspace_on(&name, target);
+        self.open_overview_with(true, Some(output));
+        true
     }
 
     /// The window whose thumbnail is under `p`.

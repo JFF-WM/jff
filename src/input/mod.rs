@@ -131,6 +131,17 @@ impl JffState {
                 self.hotkey_input_seen(None);
                 let pointer = self.seat.get_pointer().unwrap();
                 let source = event.source();
+                // Over the overview itself scroll switches workspace, over a panel it goes on to the panel.
+                let amount_y = event.amount(Axis::Vertical).unwrap_or_else(|| {
+                    event.amount_v120(Axis::Vertical).unwrap_or(0.0) * 15.0 / 120.0
+                });
+                let stop_y = amount_y == 0.0
+                    && (source == AxisSource::Finger || source == AxisSource::Continuous)
+                    && event.amount(Axis::Vertical) == Some(0.0);
+                if self.overview_scroll(source, amount_y, event.amount_v120(Axis::Vertical), stop_y)
+                {
+                    return;
+                }
                 let mut frame = AxisFrame::new(event.time()).source(source);
 
                 for axis in [Axis::Horizontal, Axis::Vertical] {

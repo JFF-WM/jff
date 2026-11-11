@@ -26,6 +26,7 @@ mod region;
 mod screenshot_area;
 mod screenshot_capture;
 mod screenshot_save;
+mod scroll_steps;
 mod window_anim;
 mod xx_hotkey;
 mod yuv;

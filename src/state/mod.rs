@@ -324,6 +324,8 @@ pub struct JffState {
     pub resize: Option<crate::input::grabs::resize::ActiveResize>,
     /// The window overview, while open (or animating closed).
     pub overview: Option<crate::feature::overview_mode::Overview>,
+    /// Scroll over the overview not yet turned into a workspace step. Outlives the overview, which reopens after each step.
+    pub overview_scroll: crate::primitives::scroll_steps::ScrollSteps,
     /// Whether the pointer may start a hot corner dwell on its next entry into a corner. Cleared
     /// when the dwell fires (or the entry was blocked), set again once the pointer leaves.
     pub hot_corner_armed: bool,
@@ -636,6 +638,7 @@ impl JffState {
             popups: PopupManager::default(),
             resize: None,
             overview: None,
+            overview_scroll: Default::default(),
             hot_corner_armed: true,
             hot_corner_timer: None,
             closing: Vec::new(),
