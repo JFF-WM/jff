@@ -1486,3 +1486,98 @@ fn sdr_white_is_a_luminance_in_range() {
         assert!(Config::parse(&text).is_err(), "sdr-white {bad}");
     }
 }
+
+#[test]
+fn hdr_peak_is_a_luminance_in_range() {
+    let config = Config::parse(
+        r#"outputs {
+            output "DP-1" { hdr; hdr-peak 400; }
+            output "DP-2" { hdr; }
+            output "DP-3" { hdr; hdr-peak 100; }
+            output "DP-4" { hdr; hdr-peak 10000; }
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(config.output("DP-1").unwrap().hdr_peak, Some(400));
+    assert_eq!(config.output("DP-2").unwrap().hdr_peak, None);
+    assert_eq!(config.output("DP-3").unwrap().hdr_peak, Some(100));
+    assert_eq!(config.output("DP-4").unwrap().hdr_peak, Some(10000));
+    for bad in ["0", "99", "10001", "-400", "400.5", "\"bright\"", "1 2", ""] {
+        let text = format!(r#"outputs {{ output "DP-1" {{ hdr-peak {bad}; }} }}"#);
+        assert!(Config::parse(&text).is_err(), "hdr-peak {bad}");
+    }
+}
+
+#[test]
+fn the_luminance_settings_fail_the_same_way() {
+    for (key, range) in [
+        ("sdr-white", "from 10 to 1000"),
+        ("hdr-peak", "from 100 to 10000"),
+    ] {
+        for bad in ["1", "\"x\"", "1 2", ""] {
+            let text = format!(r#"outputs {{ output "DP-1" {{ {key} {bad}; }} }}"#);
+            let message = format!("{:#}", Config::parse(&text).unwrap_err());
+            assert!(message.contains(key), "{message}");
+            assert!(message.contains(range), "{message}");
+        }
+    }
+}
+
+#[test]
+fn a_later_luminance_replaces_an_earlier_one() {
+    let config = Config::parse(
+        r#"outputs { output "DP-1" { hdr; sdr-white 120; sdr-white 160; hdr-peak 300; hdr-peak 450; } }"#,
+    )
+    .unwrap();
+    assert_eq!(config.output("DP-1").unwrap().sdr_white, Some(160));
+    assert_eq!(config.output("DP-1").unwrap().hdr_peak, Some(450));
+}
+
+#[test]
+fn check_warns_about_luminances_without_hdr() {
+    let warnings = Config::check_text(
+        r#"outputs {
+            output "DP-1" { sdr-white 160; }
+            output "DP-2" { hdr-peak 400; }
+            output "DP-3" { hdr "off"; sdr-white 160; hdr-peak 400; }
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(warnings.len(), 3, "{warnings:?}");
+    assert!(warnings[0].contains("\"DP-1\"") && warnings[0].contains("sdr-white"));
+    assert!(warnings[1].contains("\"DP-2\"") && warnings[1].contains("hdr-peak"));
+    assert!(warnings[2].contains("sdr-white and hdr-peak"));
+    assert!(warnings.iter().all(|w| w.contains("no `hdr`")));
+}
+
+#[test]
+fn check_warns_about_hdr_on_a_dark_monitor() {
+    let warnings = Config::check_text(r#"outputs { output "DP-1" { off; hdr; } }"#).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("`off`"));
+}
+
+#[test]
+fn check_warns_when_the_peak_leaves_no_room_for_sdr_white() {
+    // Under 2 times the default SDR white of 203.
+    let tight = Config::check_text(r#"outputs { output "DP-1" { hdr; hdr-peak 300; } }"#).unwrap();
+    assert_eq!(tight.len(), 1, "{tight:?}");
+    assert!(tight[0].contains("sdr-white 203") && tight[0].contains("hdr-peak 300"));
+    // The same peak is fine once SDR white is lowered, and so is a brighter panel.
+    let lowered =
+        Config::check_text(r#"outputs { output "DP-1" { hdr; hdr-peak 300; sdr-white 120; } }"#)
+            .unwrap();
+    assert!(lowered.is_empty(), "{lowered:?}");
+    let bright =
+        Config::check_text(r#"outputs { output "DP-1" { hdr; hdr-peak 1000; } }"#).unwrap();
+    assert!(bright.is_empty(), "{bright:?}");
+}
+
+#[test]
+fn check_is_quiet_about_a_complete_hdr_setup() {
+    let text = r#"outputs { output "DP-1" { hdr; sdr-white 120; hdr-peak 400; } }"#;
+    assert!(Config::check_text(text).unwrap().is_empty());
+    assert!(Config::check_text(r#"outputs { output "DP-1" { hdr; } }"#)
+        .unwrap()
+        .is_empty());
+}

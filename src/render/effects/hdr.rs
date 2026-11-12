@@ -134,6 +134,7 @@ pub struct HdrFrame {
 }
 
 impl HdrFrame {
+    /// A frame for `output` at its current mode, drawn out through `pass`. `Err` says why it could not be made.
     pub fn new(
         renderer: &mut GlesRenderer,
         output: &Output,

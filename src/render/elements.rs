@@ -39,5 +39,6 @@ render_elements! {
     Border = BorderElement,
     LinearMemory = RoundedMemoryElement,
     LinearScaledMemory = RoundedScaledMemoryElement,
+    /// The working-space texture of an HDR output, drawn through the final pass.
     Hdr = HdrFrameElement,
 }

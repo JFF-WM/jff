@@ -1,4 +1,5 @@
-//! Background blur: the compositor blurs whatever sits behind a surface that asked for it.
+//! Everything jff draws on top of plain surfaces, one module per effect. Most are opt-in and
+//! cost nothing while their setting is off.
 //!
 //! * `blur`: the dual Kawase blur (texture chain + two small GL programs).
 //! * `framebuffer_effect`: a render element that copies the pixels already drawn behind it,
@@ -16,7 +17,12 @@
 //!   sRGB ones too, converted by the same shader. Nothing runs for a surface that needs nothing,
 //!   or when `color-management` is off.
 //!
-//! * `hdr`: an HDR output (`output { hdr, }`) is composited in a linear fp16 texture, every surface converted into it by the same shader, and a final pass codes it as PQ.
+//! * `hdr`: an output with `hdr` in its `output` block is composited in a linear fp16 texture
+//!   (BT.2020, 1.0 at `sdr-white`), every surface converted into it by the same shader, and a final
+//!   pass maps it to the monitor's peak (the EDID's or `hdr-peak`) and codes it as PQ. Blur,
+//!   rounded corners, borders and the overview thumbnails are drawn into that texture like on any
+//!   output, with their colors and the blurred copy in the working space. Outputs without `hdr`
+//!   never touch it.
 //!
 //! Blur itself is opt-in: nothing runs unless the config has a `blur { … }` block - the
 //! renderer hands these functions `None` otherwise (see `render_for_surface`).

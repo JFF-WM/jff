@@ -1,6 +1,10 @@
-//! Colors of surfaces (wp-color-management, stage 2): which surfaces need their colors converted
-//! to the monitor's, and how. The conversion itself runs in `rounded.frag`, see
+//! Colors of surfaces (wp-color-management): which surfaces need their colors converted to the
+//! monitor's, and how. The conversion itself runs in `rounded.frag`, see
 //! [`Rounding::with_conversion`](super::rounded::Rounding::with_conversion).
+//!
+//! On an HDR monitor the target is its working space: every surface is converted into it, and
+//! [`working`], [`tint`] and [`framebuffer_format`] tell what else drawn into that frame (borders,
+//! blur) has to match.
 //!
 //! Almost everything jff draws is a tree of Wayland surfaces: windows, their popups, layer
 //! surfaces and their menus, the lock screen, input method candidates, overview thumbnails and
@@ -104,10 +108,7 @@ pub fn srgb_to_working(space: WorkingSpace, rgb: [f32; 3]) -> [f32; 3] {
     Conversion::to_working(&ImageDescription::srgb(), space.sdr_white as f32).apply(rgb)
 }
 
-/// The surfaces of the tree of `root` that are not shown as they are, with the conversion each
-/// needs, by the id their render element has. Surfaces with no description are plain sRGB: they
-/// are in it only with `convert_srgb`, otherwise they are drawn as they always were. Empty (and
-/// cheap) for a window that never used the protocol, on a monitor that is sRGB.
+/// The conversion each surface of the tree of `root` needs, by its element id: every surface for an HDR frame, else those not shown as they are (plain sRGB ones only with `convert_srgb`).
 pub fn conversions(root: &WlSurface, color: &OutputColor) -> Vec<(Id, Conversion)> {
     let mut found = Vec::new();
     // An HDR frame has no surface that is drawn as it is: all of them are brought into the working space.

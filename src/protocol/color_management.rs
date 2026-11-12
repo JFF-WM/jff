@@ -11,8 +11,14 @@
 //! The renderer reads the books through [`surface_color_in`] and draws a surface whose
 //! description is not its monitor's through the color conversion of `primitives/gamut.rs` (see
 //! `render/effects/gamut.rs`). [`output_color`] says what a monitor is converted to, or that it
-//! is not managed (`color-management` in the config). A surface with no description, or plain
-//! sRGB, is not touched.
+//! is not managed (`color-management` in the config). On an SDR monitor a surface with no
+//! description, or plain sRGB, is not touched unless `convert-srgb` is set.
+//!
+//! A monitor in HDR mode (`hdr` in its `output`, see [`hdr_color`]) is different: every surface
+//! is converted into a linear working space ([`WorkingSpace`], BT.2020 with 1.0 at the monitor's
+//! `sdr-white`), and the final pass of `render/effects/hdr.rs` maps it to the monitor's peak and
+//! codes it as PQ. Nothing is left as the client drew it, so `fullscreen-passthrough` does not
+//! apply there and such a monitor is never scanned out directly.
 //!
 //! The global is version 1 of the protocol: descriptions are announced with `ready` and a 32
 //! bit identity. Moving to version 2 or 3 means `ready2`, `preferred_changed2` and the
@@ -23,8 +29,8 @@
 //! `feature::icc::description`), and [`sync_output_color`] keeps it up to date. What clients are
 //! told is one description for all outputs, the profile of the first monitor that has one, so
 //! the preferred description of any surface is that one, except on a monitor in HDR mode: that
-//! one is described as what it is (PQ in BT.2020, its peak and its SDR white), and the surfaces
-//! on it are told so. What the renderer converts to is the
+//! one is described as what it is (PQ in BT.2020, its peak, which is the EDID's or `hdr-peak`, and
+//! its SDR white), and the surfaces on it are told so. What the renderer converts to is the
 //! description of the monitor itself, so a monitor with no profile is still shown as sRGB. When
 //! the description clients are told changes, `image_description_changed` and
 //! `preferred_changed` go to the objects that asked, which is why those are kept in
@@ -658,10 +664,7 @@ impl Dispatch<WpImageDescriptionV1, ImageDescriptionData> for JffState {
     }
 }
 
-/// Describe the outputs by the config: each monitor by its ICC profile, sRGB when it has none or
-/// the profile can't be read. Clients are told the description of the first monitor that has a
-/// profile (sRGB when none does). Runs at startup, when the config is reloaded and when monitors
-/// come and go.
+/// Bring what clients are told in line with the config and the monitors: ICC profiles, the first profile as the shared description, and the HDR descriptions. Runs at startup, on reload and when monitors come and go.
 pub fn sync_output_color(state: &mut JffState) {
     let mut monitors = HashMap::new();
     for output in &state.outputs {
@@ -696,8 +699,7 @@ pub fn sync_output_color(state: &mut JffState) {
     }
 }
 
-/// The monitors in HDR mode and what they show, from the backend. Returns whether what clients
-/// are told about them changed.
+/// Take the HDR descriptions from the backend and say whether what clients are told about them changed.
 fn sync_hdr_descriptions(state: &mut JffState) -> bool {
     let wanted = match &state.backend {
         crate::app::Backend::Tty(tty) => tty.hdr_descriptions(),

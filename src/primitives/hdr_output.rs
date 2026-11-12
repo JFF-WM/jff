@@ -16,6 +16,9 @@ pub const DEFAULT_SDR_WHITE: u32 = 203;
 /// Smallest and largest `sdr-white` accepted, in cd/m².
 pub const SDR_WHITE_RANGE: std::ops::RangeInclusive<u32> = 10..=1000;
 
+/// Smallest and largest `hdr-peak` accepted, in cd/m².
+pub const HDR_PEAK_RANGE: std::ops::RangeInclusive<u32> = 100..=10_000;
+
 /// Below this ratio of peak to SDR white the panel has little room for highlights.
 pub const LOW_HEADROOM: f32 = 2.0;
 
@@ -53,7 +56,7 @@ pub fn chromaticities_of(primaries: &Primaries) -> Chromaticities {
     }
 }
 
-/// Whether an SDR white of `sdr_white` leaves less than [`LOW_HEADROOM`] times of room under `peak`.
+/// Whether `peak` is under [`LOW_HEADROOM`] times `sdr_white`, which leaves little room for highlights.
 pub fn low_headroom(sdr_white: f32, peak: f32) -> bool {
     peak < sdr_white * LOW_HEADROOM
 }
@@ -79,9 +82,9 @@ pub struct FinalPass {
     pub to_panel: [[f32; 3]; 3],
     /// The panel's primaries to BT.2020.
     pub from_panel: [[f32; 3]; 3],
-    /// Luminance row of BT.2020.
+    /// Y of BT.2020's red, green and blue.
     pub luma_2020: [f32; 3],
-    /// Luminance row of the panel's primaries.
+    /// Y of the panel's red, green and blue.
     pub luma_panel: [f32; 3],
     /// The panel's gamut is known: colors outside it are desaturated into it.
     pub map_gamut: bool,

@@ -24,14 +24,24 @@ pub struct KernelSupport {
 /// Why an output stays SDR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unavailable {
+    /// The connector's EDID is missing or not an EDID.
     NoEdid,
+    /// The EDID has no HDR static metadata block.
     NoHdrBlock,
+    /// The monitor does not take PQ with static metadata type 1.
     NoPq,
+    /// The EDID does not list BT.2020 RGB colorimetry.
     NoBt2020Rgb,
+    /// The connector has no `HDR_OUTPUT_METADATA` property.
     NoMetadataProperty,
+    /// The connector's `Colorspace` property has no `BT2020_RGB`.
     NoBt2020Colorspace,
     /// The link cannot be asked for 10 bits, the most it takes is this many.
     BpcTooLow(u32),
+    /// The output is rotated, which the HDR frame does not handle yet.
+    Rotated,
+    /// The renderer cannot draw into a 16-bit float texture.
+    NoFloatTarget,
 }
 
 impl std::fmt::Display for Unavailable {
@@ -55,6 +65,10 @@ impl std::fmt::Display for Unavailable {
                     "the connector's max bpc goes up to {max}, HDR wants {HDR_BPC}"
                 )
             }
+            Unavailable::Rotated => f.write_str("HDR does not work with a rotated output yet"),
+            Unavailable::NoFloatTarget => {
+                f.write_str("the renderer cannot draw into a 16-bit float texture")
+            }
         }
     }
 }
@@ -64,7 +78,7 @@ impl std::fmt::Display for Unavailable {
 pub struct Plan {
     /// Mastering peak luminance, cd/m².
     pub max_luminance: u16,
-    /// Mastering minimum luminance, 0.0001 cd/m².
+    /// Mastering minimum luminance, in units of 0.0001 cd/m².
     pub min_luminance: u16,
     /// Maximum content light level, cd/m².
     pub max_cll: u16,
@@ -72,12 +86,102 @@ pub struct Plan {
     pub max_fall: u16,
     /// Value for `max bpc`, `None` when the connector has no such property.
     pub max_bpc: Option<u32>,
-    /// The EDID gave a peak. When not, [`FALLBACK_PEAK_NITS`] stands in for it.
-    pub peak_from_edid: bool,
+    /// Where the peak in `max_luminance` comes from.
+    pub peak_source: PeakSource,
 }
 
-/// Decide whether `edid` and the connector allow HDR10, and with which metadata.
-pub fn plan(edid: Option<&Edid>, kernel: &KernelSupport) -> Result<Plan, Unavailable> {
+/// Where the peak luminance of an output comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeakSource {
+    /// The monitor's EDID states it.
+    Edid,
+    /// The `hdr-peak` setting.
+    Override,
+    /// Neither gave one, [`FALLBACK_PEAK_NITS`] stands in.
+    Assumed,
+}
+
+impl std::fmt::Display for PeakSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PeakSource::Edid => "from the EDID",
+            PeakSource::Override => "from hdr-peak",
+            PeakSource::Assumed => "assumed, the EDID has none",
+        })
+    }
+}
+
+/// What became of an output's `hdr` setting, for the log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Status {
+    /// `hdr` is not set.
+    Off,
+    /// `hdr` is set and the output stays SDR, for this reason.
+    Sdr(Unavailable),
+    /// The output is signalled as HDR10.
+    Hdr10 {
+        /// Peak the frame is mapped to, cd/m².
+        peak: u16,
+        peak_source: PeakSource,
+        /// Luminance of SDR white, cd/m².
+        sdr_white: u32,
+        /// Value set on `max bpc`, `None` when the connector has no such property.
+        max_bpc: Option<u32>,
+    },
+}
+
+impl Status {
+    /// HDR10 as planned, with SDR white at `sdr_white` cd/m².
+    pub fn hdr10(plan: &Plan, sdr_white: u32) -> Self {
+        Status::Hdr10 {
+            peak: plan.max_luminance,
+            peak_source: plan.peak_source,
+            sdr_white,
+            max_bpc: plan.max_bpc,
+        }
+    }
+
+    /// HDR10 with so little room above SDR white that highlights barely show.
+    pub fn low_headroom(&self) -> bool {
+        match self {
+            Status::Hdr10 {
+                peak, sdr_white, ..
+            } => super::hdr_output::low_headroom(*sdr_white as f32, f32::from(*peak)),
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Status::Off => f.write_str("HDR off"),
+            Status::Sdr(reason) => write!(f, "staying SDR, {reason}"),
+            Status::Hdr10 {
+                peak,
+                peak_source,
+                sdr_white,
+                max_bpc,
+            } => {
+                write!(
+                    f,
+                    "HDR10, peak {peak} cd/m² ({peak_source}), SDR white {sdr_white} cd/m², "
+                )?;
+                match max_bpc {
+                    Some(bpc) => write!(f, "{bpc} bpc"),
+                    None => f.write_str("default bpc"),
+                }
+            }
+        }
+    }
+}
+
+/// Decide whether `edid` and the connector allow HDR10, and with which metadata. `peak_override` (cd/m²) replaces the peak the EDID states.
+pub fn plan(
+    edid: Option<&Edid>,
+    kernel: &KernelSupport,
+    peak_override: Option<u32>,
+) -> Result<Plan, Unavailable> {
     let edid = edid.ok_or(Unavailable::NoEdid)?;
     let hdr = edid.hdr.as_ref().ok_or(Unavailable::NoHdrBlock)?;
     if !hdr.eotfs.pq || !hdr.type1 {
@@ -98,8 +202,12 @@ pub fn plan(edid: Option<&Edid>, kernel: &KernelSupport) -> Result<Plan, Unavail
         None => None,
     };
 
-    let peak = hdr.max_luminance.unwrap_or(FALLBACK_PEAK_NITS);
-    let average = hdr.max_frame_average.unwrap_or(peak);
+    let (peak, peak_source) = match (peak_override, hdr.max_luminance) {
+        (Some(nits), _) => (f64::from(nits), PeakSource::Override),
+        (None, Some(nits)) => (nits, PeakSource::Edid),
+        (None, None) => (FALLBACK_PEAK_NITS, PeakSource::Assumed),
+    };
+    let average = hdr.max_frame_average.map_or(peak, |nits| nits.min(peak));
     let minimum = hdr.min_luminance.unwrap_or(0.0);
     Ok(Plan {
         max_luminance: nits_to_u16(peak),
@@ -107,7 +215,7 @@ pub fn plan(edid: Option<&Edid>, kernel: &KernelSupport) -> Result<Plan, Unavail
         max_cll: nits_to_u16(peak),
         max_fall: nits_to_u16(average),
         max_bpc,
-        peak_from_edid: hdr.max_luminance.is_some(),
+        peak_source,
     })
 }
 

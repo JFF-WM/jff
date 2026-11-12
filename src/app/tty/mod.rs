@@ -67,7 +67,7 @@ use crate::primitives::color::{
 };
 use crate::primitives::edid::{self, Edid};
 use crate::primitives::frame_clock::{next_presentation_time, wait_until, FALLBACK_REFRESH};
-use crate::primitives::hdr::{self, KernelSupport};
+use crate::primitives::hdr::{self, KernelSupport, Status, Unavailable};
 use crate::primitives::hdr_output::{self, FinalPass};
 use crate::primitives::layout;
 use crate::protocol::color_management::WorkingSpace;
@@ -261,6 +261,10 @@ struct TtyOutput {
     color_dirty: bool,
     /// The frame is drawn through the HDR path while this is set.
     hdr: Option<HdrOutput>,
+    /// What the last sync decided about HDR, kept to log only when it changes.
+    hdr_status: Status,
+    /// The swapchain was made with the 10-bit formats first, which only a monitor that asked for `hdr` when it was lit gets.
+    hdr_formats: bool,
     /// Feedback carrying this monitor's scanout tranche (see [`build_dmabuf_feedback`]).
     dmabuf_feedback: Option<SurfaceDmabufFeedback>,
     /// Last frame had a client buffer on the primary plane (shown by `jff msg watch`).
@@ -567,12 +571,32 @@ fn hdr_color_state(plan: &hdr::Plan) -> ConnectorColorState {
     }
 }
 
+/// Log a change of what an output does about HDR: once per change, never per frame.
+fn log_hdr_status(name: &str, status: &Status, swapchain: Fourcc) {
+    match status {
+        Status::Off => tracing::info!("monitor {name}: {status}"),
+        Status::Sdr(_) => tracing::warn!("monitor {name}: {status}"),
+        Status::Hdr10 { .. } => {
+            tracing::info!(
+                "monitor {name}: {status}, swapchain {swapchain:?}, working space {:?}",
+                hdr_frame::WORKING_FORMAT
+            );
+            if status.low_headroom() {
+                tracing::warn!(
+                    "monitor {name}: SDR white leaves little headroom under this peak, lower `sdr-white` or raise `hdr-peak` for more"
+                );
+            }
+        }
+    }
+}
+
 /// Check the monitor and the connector for HDR10 and plan its metadata.
 fn hdr_target(
     compositor: &GbmDrmCompositor,
     connector: connector::Handle,
     edid: Option<&Edid>,
-) -> Result<hdr::Plan, hdr::Unavailable> {
+    peak_override: Option<u32>,
+) -> Result<hdr::Plan, Unavailable> {
     let kernel = KernelSupport {
         hdr_metadata: compositor
             .hdr_metadata_supported(connector)
@@ -582,7 +606,7 @@ fn hdr_target(
             .is_ok_and(|all| all.contains(&Colorspace::Bt2020Rgb)),
         max_bpc: compositor.max_bpc_range(connector).ok().flatten(),
     };
-    hdr::plan(edid, &kernel)
+    hdr::plan(edid, &kernel, peak_override)
 }
 
 /// Set the connector's `content type` property to Game, or back to no data.
@@ -839,8 +863,10 @@ impl Tty {
             let Some(mode) = pick_mode(&info, wanted.and_then(|c| c.mode)) else {
                 continue;
             };
+            let hdr_wanted = wanted.is_some_and(|c| c.hdr);
             match self.outputs.iter().find(|(_, o)| o.connector == conn) {
-                Some((&crtc, lit)) if lit.mode == mode => {
+                // a swapchain made without the 10-bit formats would band under PQ, so `hdr` turned on by a reload lights the monitor again
+                Some((&crtc, lit)) if lit.mode == mode && (lit.hdr_formats || !hdr_wanted) => {
                     used.insert(crtc);
                 }
                 _ => candidates.push((info, name, mode)),
@@ -976,6 +1002,8 @@ impl Tty {
             color_target: ConnectorColorState::default(),
             color_dirty: false,
             hdr: None,
+            hdr_status: Status::Off,
+            hdr_formats: hdr_wanted,
             content_hint: false,
             content_game: false,
             compositor,
@@ -1018,7 +1046,7 @@ impl Tty {
         }
     }
 
-    /// Re-read each lit monitor's EDID and `hdr` setting and work out what its connector should signal. Staged in [`JffState::render_crtc`].
+    /// Re-read each lit monitor's EDID and HDR settings and work out what its connector should signal. Staged in [`JffState::render_crtc`].
     fn sync_hdr(&mut self, config: &Config) {
         let Tty {
             drm,
@@ -1028,60 +1056,62 @@ impl Tty {
         } = &mut *self;
         for lit in outputs.values_mut() {
             let name = lit.output.name();
-            lit.edid = read_edid(drm, lit.connector);
-            if let Some(info) = &lit.edid {
-                tracing::debug!(
-                    "monitor {name}: EDID primaries {:?}, colorimetry {:?}, HDR block {:?}",
-                    info.primaries,
-                    info.colorimetry,
-                    info.hdr
-                );
+            let edid = read_edid(drm, lit.connector);
+            if edid != lit.edid {
+                if let Some(info) = &edid {
+                    tracing::debug!(
+                        "monitor {name}: EDID primaries {:?}, colorimetry {:?}, HDR block {:?}",
+                        info.primaries,
+                        info.colorimetry,
+                        info.hdr
+                    );
+                }
+                lit.edid = edid;
             }
             let output_config = config.output(&name);
+            let sdr_white = output_config
+                .and_then(|c| c.sdr_white)
+                .unwrap_or(hdr_output::DEFAULT_SDR_WHITE);
+            let peak_override = output_config.and_then(|c| c.hdr_peak);
             let mut hdr = None;
-            let target = if output_config.is_some_and(|c| c.hdr) {
-                match hdr_target(&lit.compositor, lit.connector, lit.edid.as_ref()) {
+            let mut target = ConnectorColorState::default();
+            let status = if !output_config.is_some_and(|c| c.hdr) {
+                Status::Off
+            } else {
+                match hdr_target(
+                    &lit.compositor,
+                    lit.connector,
+                    lit.edid.as_ref(),
+                    peak_override,
+                ) {
                     Ok(_) if lit.output.current_transform() != Transform::Normal => {
-                        tracing::warn!("monitor {name}: staying SDR, HDR does not work with a rotated output yet");
-                        ConnectorColorState::default()
+                        Status::Sdr(Unavailable::Rotated)
                     }
                     Ok(_) if !hdr_frame::supported(renderer) => {
-                        tracing::warn!("monitor {name}: staying SDR, the renderer cannot draw into a 16-bit float texture");
-                        ConnectorColorState::default()
+                        Status::Sdr(Unavailable::NoFloatTarget)
                     }
                     Ok(plan) => {
-                        let sdr_white = output_config
-                            .and_then(|c| c.sdr_white)
-                            .unwrap_or(hdr_output::DEFAULT_SDR_WHITE as u32);
-                        let peak = f32::from(plan.max_luminance);
-                        if hdr_output::low_headroom(sdr_white as f32, peak) {
-                            tracing::warn!(
-                                "monitor {name}: SDR white at {sdr_white} cd/m² leaves little headroom on a {peak} cd/m² panel, lower `sdr-white` for more"
-                            );
-                        }
                         let panel = lit
                             .edid
                             .as_ref()
                             .and_then(|e| e.primaries.as_ref())
                             .map(hdr_output::chromaticities_of);
-                        let pass = FinalPass::new(sdr_white as f32, peak, panel.as_ref());
-                        tracing::info!(
-                            "monitor {name}: HDR10, peak {} cd/m²{}, SDR white {sdr_white} cd/m², {} bpc",
-                            plan.max_luminance,
-                            if plan.peak_from_edid { "" } else { " (assumed, the EDID has none)" },
-                            plan.max_bpc.map_or("default".into(), |b| b.to_string()),
+                        let pass = FinalPass::new(
+                            sdr_white as f32,
+                            f32::from(plan.max_luminance),
+                            panel.as_ref(),
                         );
                         hdr = Some((WorkingSpace { sdr_white }, pass));
-                        hdr_color_state(&plan)
+                        target = hdr_color_state(&plan);
+                        Status::hdr10(&plan, sdr_white)
                     }
-                    Err(reason) => {
-                        tracing::warn!("monitor {name}: staying SDR, {reason}");
-                        ConnectorColorState::default()
-                    }
+                    Err(reason) => Status::Sdr(reason),
                 }
-            } else {
-                ConnectorColorState::default()
             };
+            if status != lit.hdr_status {
+                log_hdr_status(&name, &status, lit.compositor.format());
+                lit.hdr_status = status;
+            }
             let unchanged = match (&lit.hdr, &hdr) {
                 (None, None) => true,
                 (Some(old), Some((space, pass))) => old.space == *space && old.pass == *pass,
@@ -1103,7 +1133,7 @@ impl Tty {
         }
     }
 
-    /// What clients are told about each monitor drawn in HDR: PQ in BT.2020 up to the panel's peak, with SDR white at its configured level.
+    /// What clients are told about each monitor drawn in HDR: PQ in BT.2020 up to its peak (the EDID's or `hdr-peak`), with SDR white at its configured level.
     pub fn hdr_descriptions(&self) -> Vec<(String, ImageDescription)> {
         self.outputs
             .values()

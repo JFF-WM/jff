@@ -5,7 +5,8 @@ use jff_wm::primitives::color::{
 };
 use jff_wm::primitives::gamut::{Conversion, Curve};
 use jff_wm::primitives::hdr_output::{
-    low_headroom, pq_decode, pq_encode, tone_map, FinalPass, PQ_PEAK,
+    low_headroom, pq_decode, pq_encode, tone_map, FinalPass, DEFAULT_SDR_WHITE, HDR_PEAK_RANGE,
+    PQ_PEAK, SDR_WHITE_RANGE,
 };
 
 const PEAK: f32 = 301.8;
@@ -229,4 +230,26 @@ fn edid_primaries_become_millionths() {
     });
     assert_eq!(c.red, [640_000, 330_000]);
     assert_eq!(c.white, [312_700, 329_000]);
+}
+
+#[test]
+fn the_accepted_ranges_fit_together() {
+    assert!(HDR_PEAK_RANGE.contains(&(PEAK as u32)));
+    assert!(SDR_WHITE_RANGE.contains(&DEFAULT_SDR_WHITE));
+    assert!(*HDR_PEAK_RANGE.end() as f32 <= PQ_PEAK);
+    assert!(HDR_PEAK_RANGE.start() > SDR_WHITE_RANGE.start());
+}
+
+#[test]
+fn a_higher_peak_leaves_more_room_for_highlights() {
+    let bright = [4.0; 3];
+    let under_300 = FinalPass::new(100.0, 300.0, None).apply(bright);
+    let under_400 = FinalPass::new(100.0, 400.0, None).apply(bright);
+    assert!(under_400[0] > under_300[0]);
+    // Light under the knee does not care about the peak.
+    let dim = [1.0; 3];
+    assert_eq!(
+        FinalPass::new(100.0, 300.0, None).apply(dim),
+        FinalPass::new(100.0, 400.0, None).apply(dim)
+    );
 }

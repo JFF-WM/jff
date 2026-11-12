@@ -19,7 +19,9 @@
 //! `output` (that monitor is not managed): surfaces a client tagged with another gamut or curve
 //! than the monitor's are converted to it, and with `convert-srgb` the untagged ones too.
 //! `hdr` inside an `output` signals that monitor as HDR10 (PQ, BT.2020) when its EDID and the connector allow it, and is off by default.
-//! `sdr-white` sets the luminance in cd/m² that SDR white is shown at on an HDR monitor (203 by default).
+//! `sdr-white` sets the luminance in cd/m² that SDR white is shown at on an HDR monitor (203 by default, 10 to 1000).
+//! `hdr-peak` replaces the peak luminance the EDID states (100 to 10000 cd/m²): the frame is mapped to it and it is what the monitor is told and what clients are told.
+//! `sdr-white` and `hdr-peak` only apply to a monitor with `hdr`, `jff check-config` warns when they stand alone.
 //!
 //! Two things that bite when editing the file by hand:
 //! - `adaptive-sync` takes a quoted string (`"off"` / `"fullscreen"` / `"always"`), not a
@@ -31,6 +33,7 @@
 //! `DEFAULT_CONFIG` is what runs when the user has no file. It has to parse: `Config::default`
 //! goes through `parse()` and logs an error if it fails.
 
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -39,7 +42,7 @@ use kdl::{KdlDocument, KdlNode, KdlValue};
 use smithay::input::keyboard::{xkb, Keysym, ModifiersState, XkbConfig};
 
 use crate::desk::{Goto, Side};
-use crate::primitives::hdr_output::SDR_WHITE_RANGE;
+use crate::primitives::hdr_output::{self, HDR_PEAK_RANGE, SDR_WHITE_RANGE};
 
 /// Default number of workspaces.
 pub const DEFAULT_WORKSPACES: usize = 9;
@@ -307,6 +310,46 @@ pub struct OutputConfig {
     pub hdr: bool,
     /// Luminance SDR white is shown at on an HDR monitor, in cd/m². The default is 203.
     pub sdr_white: Option<u32>,
+    /// Peak luminance of an HDR monitor in cd/m², used instead of the one its EDID states.
+    pub hdr_peak: Option<u32>,
+}
+
+impl OutputConfig {
+    /// Things in the HDR settings that load fine but do nothing, or leave the panel little room, for `jff check-config`.
+    fn hdr_warnings(&self) -> Vec<String> {
+        let name = &self.name;
+        let mut warnings = Vec::new();
+        if !self.hdr {
+            let stray: Vec<&str> = [
+                ("sdr-white", self.sdr_white.is_some()),
+                ("hdr-peak", self.hdr_peak.is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(key, set)| set.then_some(key))
+            .collect();
+            if !stray.is_empty() {
+                warnings.push(format!(
+                    "output {name:?} has {} but no `hdr`, so it does nothing",
+                    stray.join(" and ")
+                ));
+            }
+        } else {
+            if self.off {
+                warnings.push(format!(
+                    "output {name:?} is `off`, so its `hdr` does nothing"
+                ));
+            }
+            if let Some(peak) = self.hdr_peak {
+                let white = self.sdr_white.unwrap_or(hdr_output::DEFAULT_SDR_WHITE);
+                if hdr_output::low_headroom(white as f32, peak as f32) {
+                    warnings.push(format!(
+                        "output {name:?}: sdr-white {white} under hdr-peak {peak} leaves little room for highlights, lower `sdr-white` for more"
+                    ));
+                }
+            }
+        }
+        warnings
+    }
 }
 
 /// Keyboard layout and key repeat.
@@ -1079,6 +1122,9 @@ impl Config {
                 "border animate is set but nothing will move: {why}"
             ));
         }
+        for output in &config.outputs {
+            warnings.extend(output.hdr_warnings());
+        }
         for (i, rule) in config.window_rules().iter().enumerate() {
             let n = i + 1;
             if !rule.has_actions() {
@@ -1577,6 +1623,29 @@ fn int_arg(node: &KdlNode, max: i32) -> anyhow::Result<i32> {
             .filter(|n| (0..=max).contains(n))
             .with_context(|| format!("{name} takes a number from 0 to {max}")),
         _ => bail!("{name} takes one number from 0 to {max}"),
+    }
+}
+
+/// One integer argument in `range`, a luminance in cd/m² like `sdr-white 203`.
+fn nits_arg(node: &KdlNode, range: &RangeInclusive<u32>, example: u32) -> anyhow::Result<u32> {
+    let name = node.name().value();
+    match positional(node).as_slice() {
+        [value] => value
+            .as_integer()
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| range.contains(n))
+            .with_context(|| {
+                format!(
+                    "{name} takes cd/m² from {} to {}: {name} {example}",
+                    range.start(),
+                    range.end()
+                )
+            }),
+        _ => bail!(
+            "{name} takes one value in cd/m² from {} to {}: {name} {example}",
+            range.start(),
+            range.end()
+        ),
     }
 }
 
@@ -2113,20 +2182,8 @@ fn parse_output(node: &KdlNode) -> anyhow::Result<OutputConfig> {
             }
             "color-management" => config.color_management_off = !flag_value(child)?,
             "hdr" => config.hdr = flag_value(child)?,
-            "sdr-white" => {
-                let nits = match args.as_slice() {
-                    [value] => value.as_integer().and_then(|n| u32::try_from(n).ok()),
-                    _ => None,
-                };
-                match nits.filter(|n| SDR_WHITE_RANGE.contains(n)) {
-                    Some(nits) => config.sdr_white = Some(nits),
-                    None => bail!(
-                        "sdr-white takes cd/m² from {} to {}: sdr-white 203",
-                        SDR_WHITE_RANGE.start(),
-                        SDR_WHITE_RANGE.end()
-                    ),
-                }
-            }
+            "sdr-white" => config.sdr_white = Some(nits_arg(child, &SDR_WHITE_RANGE, 203)?),
+            "hdr-peak" => config.hdr_peak = Some(nits_arg(child, &HDR_PEAK_RANGE, 400)?),
             "icc-profile" => {
                 let path = match args.as_slice() {
                     [value] => value
