@@ -12,7 +12,8 @@ use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags, PrimaryPlaneE
 use smithay::backend::renderer::PresentationMode;
 use smithay::backend::drm::exporter::gbm::{GbmFramebufferExporter, NodeFilter};
 use smithay::backend::drm::{
-    DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata, DrmEventTime, DrmNode, VrrSupport,
+    Colorspace, ConnectorColorState, DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata,
+    DrmEventTime, DrmNode, HdrOutputMetadata, VrrSupport,
 };
 use smithay::backend::egl::{EGLContext, EGLDevice, EGLDisplay};
 use smithay::backend::input::InputEvent;
@@ -61,7 +62,9 @@ use crate::desk::Desk;
 use crate::feature::outputs::{output_rect, Monitor, MonitorMode};
 use crate::feature::overview_mode::{overview_drag_elements, overview_elements};
 use crate::feature::screenshot::screenshot_elements;
+use crate::primitives::edid::{self, Edid};
 use crate::primitives::frame_clock::{next_presentation_time, wait_until, FALLBACK_REFRESH};
+use crate::primitives::hdr::{self, KernelSupport};
 use crate::primitives::layout;
 use crate::protocol::layer_shell::{
     fullscreen_covers, layer_body_elements, layer_elements, layer_popup_elements, layers_above,
@@ -228,6 +231,12 @@ struct TtyOutput {
     gamma_pending: bool,
     /// The display's gamma table was written, so clear it if the profile goes away.
     gamma_applied: bool,
+    /// Color facts from the monitor's EDID, read again whenever the config is synced.
+    edid: Option<Edid>,
+    /// What the connector should signal: HDR10 when `hdr` is configured and possible, else the default.
+    color_target: ConnectorColorState,
+    /// `color_target` has not been staged on the compositor yet (see [`JffState::render_crtc`]).
+    color_dirty: bool,
     /// Feedback carrying this monitor's scanout tranche (see [`build_dmabuf_feedback`]).
     dmabuf_feedback: Option<SurfaceDmabufFeedback>,
     /// Last frame had a client buffer on the primary plane (shown by `jff msg watch`).
@@ -503,6 +512,53 @@ fn is_non_desktop(drm: &DrmDevice, connector: connector::Handle) -> bool {
             .is_ok_and(|info| info.name().to_bytes() == b"non-desktop")
             && value != 0
     })
+}
+
+/// The connector's EDID, parsed. `None` when it has none or it is not an EDID.
+fn read_edid(drm: &DrmDevice, connector: connector::Handle) -> Option<Edid> {
+    let props = drm.get_properties(connector).ok()?;
+    let (handles, values) = props.as_props_and_values();
+    let blob = handles.iter().zip(values).find_map(|(&handle, &value)| {
+        let info = drm.get_property(handle).ok()?;
+        (info.name().to_bytes() == b"EDID").then_some(value)
+    })?;
+    if blob == 0 {
+        return None;
+    }
+    let bytes = drm.get_property_blob(blob).ok()?;
+    edid::parse(&bytes).ok()
+}
+
+/// The connector state that signals HDR10: BT.2020 RGB, PQ, and the plan's metadata.
+fn hdr_color_state(plan: &hdr::Plan) -> ConnectorColorState {
+    ConnectorColorState {
+        colorspace: Colorspace::Bt2020Rgb,
+        hdr_metadata: Some(HdrOutputMetadata::pq_bt2020(
+            plan.max_luminance,
+            plan.min_luminance,
+            plan.max_cll,
+            plan.max_fall,
+        )),
+        max_bpc: plan.max_bpc,
+    }
+}
+
+/// Check the monitor and the connector for HDR10 and plan its metadata.
+fn hdr_target(
+    compositor: &GbmDrmCompositor,
+    connector: connector::Handle,
+    edid: Option<&Edid>,
+) -> Result<hdr::Plan, hdr::Unavailable> {
+    let kernel = KernelSupport {
+        hdr_metadata: compositor
+            .hdr_metadata_supported(connector)
+            .unwrap_or(false),
+        bt2020_rgb: compositor
+            .supported_colorspaces(connector)
+            .is_ok_and(|all| all.contains(&Colorspace::Bt2020Rgb)),
+        max_bpc: compositor.max_bpc_range(connector).ok().flatten(),
+    };
+    hdr::plan(edid, &kernel)
 }
 
 /// Set the connector's `content type` property to Game, or back to no data.
@@ -886,6 +942,9 @@ impl Tty {
             vrr_support,
             vrr_mode: Vrr::default(),
             vrr_on: false,
+            edid: None,
+            color_target: ConnectorColorState::default(),
+            color_dirty: false,
             content_hint: false,
             content_game: false,
             compositor,
@@ -925,6 +984,47 @@ impl Tty {
                 }
             });
             lit.gamma_pending = true;
+        }
+    }
+
+    /// Re-read each lit monitor's EDID and `hdr` setting and work out what its connector should signal. Staged in [`JffState::render_crtc`].
+    fn sync_hdr(&mut self, config: &Config) {
+        let Tty { drm, outputs, .. } = &mut *self;
+        for lit in outputs.values_mut() {
+            let name = lit.output.name();
+            lit.edid = read_edid(drm, lit.connector);
+            if let Some(info) = &lit.edid {
+                tracing::debug!(
+                    "monitor {name}: EDID primaries {:?}, colorimetry {:?}, HDR block {:?}",
+                    info.primaries,
+                    info.colorimetry,
+                    info.hdr
+                );
+            }
+            let target = if config.output(&name).is_some_and(|c| c.hdr) {
+                match hdr_target(&lit.compositor, lit.connector, lit.edid.as_ref()) {
+                    Ok(plan) => {
+                        tracing::info!(
+                            "monitor {name}: HDR10 signalled, peak {} cd/m²{}, {} bpc. Until the HDR render path exists the picture is not encoded for it and looks wrong",
+                            plan.max_luminance,
+                            if plan.peak_from_edid { "" } else { " (assumed, the EDID has none)" },
+                            plan.max_bpc.map_or("default".into(), |b| b.to_string()),
+                        );
+                        hdr_color_state(&plan)
+                    }
+                    Err(reason) => {
+                        tracing::warn!("monitor {name}: staying SDR, {reason}");
+                        ConnectorColorState::default()
+                    }
+                }
+            } else {
+                ConnectorColorState::default()
+            };
+            if target != lit.color_target {
+                lit.color_target = target;
+                lit.color_dirty = true;
+                lit.queue_redraw();
+            }
         }
     }
 
@@ -1088,6 +1188,7 @@ pub fn init(
     }
     // curves can only be set after the first frame, see `apply_gamma`
     tty.sync_gamma(config);
+    tty.sync_hdr(config);
     Ok((Backend::Tty(tty), outputs))
 }
 
@@ -1289,6 +1390,19 @@ impl JffState {
                     );
                     lit.vrr_support = VrrSupport::NotSupported;
                 }
+            }
+        }
+
+        // The HDR signalling goes out with the next frame, as part of its modeset commit.
+        if lit.color_dirty {
+            lit.color_dirty = false;
+            if let Err(err) = lit.compositor.use_color_state(lit.color_target) {
+                tracing::warn!(
+                    "monitor {}: cannot signal HDR, back to SDR: {err}",
+                    lit.output.name()
+                );
+                lit.color_target = ConnectorColorState::default();
+                let _ = lit.compositor.use_color_state(lit.color_target);
             }
         }
 
@@ -1804,6 +1918,7 @@ impl JffState {
         };
         // also runs on reload-config, where a profile may have changed
         tty.sync_gamma(&self.config);
+        tty.sync_hdr(&self.config);
         let monitors_changed = tty.monitors() != known.as_slice();
         if removed.is_empty() && added.is_empty() {
             // a disabled monitor can still have been plugged or unplugged
@@ -1875,6 +1990,8 @@ impl JffState {
                     // after the first frame
                     lit.gamma_pending = true;
                     lit.gamma_applied = true;
+                    // reset_state read back whatever the other VT left on the connector
+                    lit.color_dirty = true;
                 }
                 // Monitors may have been swapped while another VT was in front.
                 self.scan_tty_outputs();

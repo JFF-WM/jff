@@ -18,6 +18,7 @@
 //! never converted, so it can still be scanned out) and `color-management "off"` inside an
 //! `output` (that monitor is not managed): surfaces a client tagged with another gamut or curve
 //! than the monitor's are converted to it, and with `convert-srgb` the untagged ones too.
+//! `hdr` inside an `output` signals that monitor as HDR10 (PQ, BT.2020) when its EDID and the connector allow it, and is off by default.
 //!
 //! Two things that bite when editing the file by hand:
 //! - `adaptive-sync` takes a quoted string (`"off"` / `"fullscreen"` / `"always"`), not a
@@ -300,6 +301,8 @@ pub struct OutputConfig {
     pub content_type_hint: bool,
     /// `color-management "off"`: surfaces on this monitor are not converted to its colors.
     pub color_management_off: bool,
+    /// Signal the monitor as HDR10 when it and the connector can do it, SDR otherwise.
+    pub hdr: bool,
 }
 
 /// Keyboard layout and key repeat.
@@ -2105,6 +2108,7 @@ fn parse_output(node: &KdlNode) -> anyhow::Result<OutputConfig> {
                 };
             }
             "color-management" => config.color_management_off = !flag_value(child)?,
+            "hdr" => config.hdr = flag_value(child)?,
             "icc-profile" => {
                 let path = match args.as_slice() {
                     [value] => value

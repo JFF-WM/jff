@@ -1449,3 +1449,23 @@ fn a_monitor_can_turn_color_management_off() {
     assert!(config.output("DP-4").is_none());
     assert!(Config::parse(r#"outputs { output "DP-1" { color-management "maybe"; } }"#).is_err());
 }
+
+#[test]
+fn a_monitor_can_ask_for_hdr() {
+    let config = Config::parse(
+        r#"outputs {
+            output "DP-1" { hdr; }
+            output "DP-2" { hdr "off"; }
+            output "DP-3" { hdr #true; }
+            output "DP-4" { mode "1920x1080@60"; }
+        }"#,
+    )
+    .unwrap();
+    assert!(config.output("DP-1").unwrap().hdr);
+    assert!(!config.output("DP-2").unwrap().hdr);
+    assert!(config.output("DP-3").unwrap().hdr);
+    assert!(!config.output("DP-4").unwrap().hdr);
+    assert!(!config.output("DP-5").map_or(false, |c| c.hdr));
+    assert!(Config::parse(r#"outputs { output "DP-1" { hdr "maybe"; } }"#).is_err());
+    assert!(Config::parse(r#"outputs { output "DP-1" { hdr 1 2; } }"#).is_err());
+}
