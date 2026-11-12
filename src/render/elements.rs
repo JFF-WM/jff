@@ -11,7 +11,10 @@ use smithay::backend::renderer::gles::GlesRenderer;
 
 use crate::render::effects::border::BorderElement;
 use crate::render::effects::framebuffer_effect::FramebufferEffectElement;
-use crate::render::effects::rounded::{RoundedSurfaceElement, RoundedThumbElement};
+use crate::render::effects::hdr::HdrFrameElement;
+use crate::render::effects::rounded::{
+    RoundedMemoryElement, RoundedScaledMemoryElement, RoundedSurfaceElement, RoundedThumbElement,
+};
 
 render_elements! {
     /// Everything drawn (TTY and winit): the cursor, then windows.
@@ -34,4 +37,7 @@ render_elements! {
     Ring = PixelShaderElement,
     /// A window's border: a ring that keeps its id while it changes colour or turns.
     Border = BorderElement,
+    LinearMemory = RoundedMemoryElement,
+    LinearScaledMemory = RoundedScaledMemoryElement,
+    Hdr = HdrFrameElement,
 }

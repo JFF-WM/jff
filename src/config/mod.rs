@@ -19,6 +19,7 @@
 //! `output` (that monitor is not managed): surfaces a client tagged with another gamut or curve
 //! than the monitor's are converted to it, and with `convert-srgb` the untagged ones too.
 //! `hdr` inside an `output` signals that monitor as HDR10 (PQ, BT.2020) when its EDID and the connector allow it, and is off by default.
+//! `sdr-white` sets the luminance in cd/m² that SDR white is shown at on an HDR monitor (203 by default).
 //!
 //! Two things that bite when editing the file by hand:
 //! - `adaptive-sync` takes a quoted string (`"off"` / `"fullscreen"` / `"always"`), not a
@@ -38,6 +39,7 @@ use kdl::{KdlDocument, KdlNode, KdlValue};
 use smithay::input::keyboard::{xkb, Keysym, ModifiersState, XkbConfig};
 
 use crate::desk::{Goto, Side};
+use crate::primitives::hdr_output::SDR_WHITE_RANGE;
 
 /// Default number of workspaces.
 pub const DEFAULT_WORKSPACES: usize = 9;
@@ -303,6 +305,8 @@ pub struct OutputConfig {
     pub color_management_off: bool,
     /// Signal the monitor as HDR10 when it and the connector can do it, SDR otherwise.
     pub hdr: bool,
+    /// Luminance SDR white is shown at on an HDR monitor, in cd/m². The default is 203.
+    pub sdr_white: Option<u32>,
 }
 
 /// Keyboard layout and key repeat.
@@ -2109,6 +2113,20 @@ fn parse_output(node: &KdlNode) -> anyhow::Result<OutputConfig> {
             }
             "color-management" => config.color_management_off = !flag_value(child)?,
             "hdr" => config.hdr = flag_value(child)?,
+            "sdr-white" => {
+                let nits = match args.as_slice() {
+                    [value] => value.as_integer().and_then(|n| u32::try_from(n).ok()),
+                    _ => None,
+                };
+                match nits.filter(|n| SDR_WHITE_RANGE.contains(n)) {
+                    Some(nits) => config.sdr_white = Some(nits),
+                    None => bail!(
+                        "sdr-white takes cd/m² from {} to {}: sdr-white 203",
+                        SDR_WHITE_RANGE.start(),
+                        SDR_WHITE_RANGE.end()
+                    ),
+                }
+            }
             "icc-profile" => {
                 let path = match args.as_slice() {
                     [value] => value

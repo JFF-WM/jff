@@ -62,10 +62,15 @@ use crate::desk::Desk;
 use crate::feature::outputs::{output_rect, Monitor, MonitorMode};
 use crate::feature::overview_mode::{overview_drag_elements, overview_elements};
 use crate::feature::screenshot::screenshot_elements;
+use crate::primitives::color::{
+    ImageDescription, Luminance, NamedPrimaries, NamedTf, TransferFunction,
+};
 use crate::primitives::edid::{self, Edid};
 use crate::primitives::frame_clock::{next_presentation_time, wait_until, FALLBACK_REFRESH};
 use crate::primitives::hdr::{self, KernelSupport};
+use crate::primitives::hdr_output::{self, FinalPass};
 use crate::primitives::layout;
+use crate::protocol::color_management::WorkingSpace;
 use crate::protocol::layer_shell::{
     fullscreen_covers, layer_body_elements, layer_elements, layer_popup_elements, layers_above,
     BELOW_WINDOWS,
@@ -75,10 +80,19 @@ use crate::render::cursor::RenderCursor;
 use crate::render::effects::background_effect::window_elements;
 use crate::render::effects::border::BorderPaint;
 use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
+use crate::render::effects::hdr::{self as hdr_frame, HdrFrame};
 use crate::render::elements::JffElement;
 use crate::state::JffState;
 
 const COLOR_FORMATS: [Fourcc; 2] = [Fourcc::Argb8888, Fourcc::Abgr8888];
+
+/// For a monitor that is asked to be HDR: 10 bits per color first, so PQ does not band.
+const COLOR_FORMATS_HDR: [Fourcc; 4] = [
+    Fourcc::Argb2101010,
+    Fourcc::Abgr2101010,
+    Fourcc::Argb8888,
+    Fourcc::Abgr8888,
+];
 
 /// How far outside a monitor a cursor can still be partly visible on it.
 const CURSOR_MARGIN: i32 = 256;
@@ -203,6 +217,14 @@ fn send_surface_feedback(
     }
 }
 
+/// How a monitor in HDR mode is drawn.
+struct HdrOutput {
+    space: WorkingSpace,
+    pass: FinalPass,
+    /// The offscreen target, made on the first frame and again when the mode or the pass changes.
+    frame: Option<HdrFrame>,
+}
+
 /// A lit monitor and its frame loop state.
 struct TtyOutput {
     compositor: GbmDrmCompositor,
@@ -237,6 +259,8 @@ struct TtyOutput {
     color_target: ConnectorColorState,
     /// `color_target` has not been staged on the compositor yet (see [`JffState::render_crtc`]).
     color_dirty: bool,
+    /// The frame is drawn through the HDR path while this is set.
+    hdr: Option<HdrOutput>,
     /// Feedback carrying this monitor's scanout tranche (see [`build_dmabuf_feedback`]).
     dmabuf_feedback: Option<SurfaceDmabufFeedback>,
     /// Last frame had a client buffer on the primary plane (shown by `jff msg watch`).
@@ -846,7 +870,8 @@ impl Tty {
                 tracing::warn!("no free CRTC for monitor {name}");
                 continue;
             };
-            match self.light_up(&info, &name, crtc, mode) {
+            let hdr_wanted = config.output(&name).is_some_and(|c| c.hdr);
+            match self.light_up(&info, &name, crtc, mode, hdr_wanted) {
                 Ok(lit) => {
                     used.insert(crtc);
                     added.push(lit.output.clone());
@@ -865,6 +890,7 @@ impl Tty {
         name: &str,
         crtc: crtc::Handle,
         drm_mode: DrmMode,
+        hdr_wanted: bool,
     ) -> anyhow::Result<TtyOutput> {
         tracing::info!(
             "monitor {name}: {}x{}@{}",
@@ -914,7 +940,11 @@ impl Tty {
             None,
             allocator,
             GbmFramebufferExporter::new(self.gbm.clone(), NodeFilter::All),
-            COLOR_FORMATS.iter().copied(),
+            if hdr_wanted {
+                COLOR_FORMATS_HDR.iter().copied()
+            } else {
+                COLOR_FORMATS.iter().copied()
+            },
             render_formats,
             self.drm.cursor_size(),
             Some(self.gbm.clone()),
@@ -945,6 +975,7 @@ impl Tty {
             edid: None,
             color_target: ConnectorColorState::default(),
             color_dirty: false,
+            hdr: None,
             content_hint: false,
             content_game: false,
             compositor,
@@ -989,7 +1020,12 @@ impl Tty {
 
     /// Re-read each lit monitor's EDID and `hdr` setting and work out what its connector should signal. Staged in [`JffState::render_crtc`].
     fn sync_hdr(&mut self, config: &Config) {
-        let Tty { drm, outputs, .. } = &mut *self;
+        let Tty {
+            drm,
+            outputs,
+            renderer,
+            ..
+        } = &mut *self;
         for lit in outputs.values_mut() {
             let name = lit.output.name();
             lit.edid = read_edid(drm, lit.connector);
@@ -1001,15 +1037,41 @@ impl Tty {
                     info.hdr
                 );
             }
-            let target = if config.output(&name).is_some_and(|c| c.hdr) {
+            let output_config = config.output(&name);
+            let mut hdr = None;
+            let target = if output_config.is_some_and(|c| c.hdr) {
                 match hdr_target(&lit.compositor, lit.connector, lit.edid.as_ref()) {
+                    Ok(_) if lit.output.current_transform() != Transform::Normal => {
+                        tracing::warn!("monitor {name}: staying SDR, HDR does not work with a rotated output yet");
+                        ConnectorColorState::default()
+                    }
+                    Ok(_) if !hdr_frame::supported(renderer) => {
+                        tracing::warn!("monitor {name}: staying SDR, the renderer cannot draw into a 16-bit float texture");
+                        ConnectorColorState::default()
+                    }
                     Ok(plan) => {
+                        let sdr_white = output_config
+                            .and_then(|c| c.sdr_white)
+                            .unwrap_or(hdr_output::DEFAULT_SDR_WHITE as u32);
+                        let peak = f32::from(plan.max_luminance);
+                        if hdr_output::low_headroom(sdr_white as f32, peak) {
+                            tracing::warn!(
+                                "monitor {name}: SDR white at {sdr_white} cd/m² leaves little headroom on a {peak} cd/m² panel, lower `sdr-white` for more"
+                            );
+                        }
+                        let panel = lit
+                            .edid
+                            .as_ref()
+                            .and_then(|e| e.primaries.as_ref())
+                            .map(hdr_output::chromaticities_of);
+                        let pass = FinalPass::new(sdr_white as f32, peak, panel.as_ref());
                         tracing::info!(
-                            "monitor {name}: HDR10 signalled, peak {} cd/m²{}, {} bpc. Until the HDR render path exists the picture is not encoded for it and looks wrong",
+                            "monitor {name}: HDR10, peak {} cd/m²{}, SDR white {sdr_white} cd/m², {} bpc",
                             plan.max_luminance,
                             if plan.peak_from_edid { "" } else { " (assumed, the EDID has none)" },
                             plan.max_bpc.map_or("default".into(), |b| b.to_string()),
                         );
+                        hdr = Some((WorkingSpace { sdr_white }, pass));
                         hdr_color_state(&plan)
                     }
                     Err(reason) => {
@@ -1020,12 +1082,47 @@ impl Tty {
             } else {
                 ConnectorColorState::default()
             };
+            let unchanged = match (&lit.hdr, &hdr) {
+                (None, None) => true,
+                (Some(old), Some((space, pass))) => old.space == *space && old.pass == *pass,
+                _ => false,
+            };
+            if !unchanged {
+                lit.hdr = hdr.map(|(space, pass)| HdrOutput {
+                    space,
+                    pass,
+                    frame: None,
+                });
+                lit.queue_redraw();
+            }
             if target != lit.color_target {
                 lit.color_target = target;
                 lit.color_dirty = true;
                 lit.queue_redraw();
             }
         }
+    }
+
+    /// What clients are told about each monitor drawn in HDR: PQ in BT.2020 up to the panel's peak, with SDR white at its configured level.
+    pub fn hdr_descriptions(&self) -> Vec<(String, ImageDescription)> {
+        self.outputs
+            .values()
+            .filter_map(|lit| {
+                let hdr = lit.hdr.as_ref()?;
+                let description = ImageDescription {
+                    primaries: NamedPrimaries::Bt2020.chromaticities(),
+                    tf: TransferFunction::Named(NamedTf::St2084Pq),
+                    luminance: Luminance {
+                        min: Luminance::PQ.min,
+                        max: hdr.pass.peak as u32,
+                        reference: hdr.space.sdr_white,
+                    },
+                    max_cll: None,
+                    max_fall: None,
+                };
+                Some((lit.output.name(), description))
+            })
+            .collect()
     }
 
     /// Apply pending curves, only on monitors that have shown a frame and have no flip in
@@ -1402,6 +1499,7 @@ impl JffState {
                     lit.output.name()
                 );
                 lit.color_target = ConnectorColorState::default();
+                lit.hdr = None;
                 let _ = lit.compositor.use_color_state(lit.color_target);
             }
         }
@@ -1434,6 +1532,11 @@ impl JffState {
             &self.color_management,
             &lit.output.name(),
         );
+        let hdr_space = lit.hdr.as_ref().map(|hdr| hdr.space);
+        let color = match hdr_space {
+            Some(space) => Some(crate::protocol::color_management::hdr_color(color, space)),
+            None => color,
+        };
         let _color_scope = crate::render::effects::gamut::enter(color);
         let pointer: Point<f64, Logical> = self
             .seat
@@ -1552,7 +1655,10 @@ impl JffState {
                 }
             }
             // With a fullscreen window on top only the overlay layer stays in front of it.
-            direct_scanout = overview_here.is_none() && fullscreen_covers(&self.desk, rect);
+            // The HDR path composites everything into its own texture, so nothing goes to a plane.
+            direct_scanout = hdr_space.is_none()
+                && overview_here.is_none()
+                && fullscreen_covers(&self.desk, rect);
             // Blur is opt-in, and never with a window going straight to the primary plane: the
             // blur needs the frame composited.
             let blur = (!direct_scanout && !self.config.blur().off).then(|| self.config.blur());
@@ -1706,25 +1812,77 @@ impl JffState {
             PresentationMode::VSync
         };
 
-        let mut queued = false;
-        match lit.compositor.render_frame(
-            &mut *renderer,
-            &elements,
-            if locked || direct_scanout {
+        // HDR: composite in the working space, then hand the output's compositor the one
+        // element that encodes the result for the signal.
+        let mut hdr_states = None;
+        let mut hdr_failed = false;
+        if let Some(hdr) = lit.hdr.as_mut() {
+            let space = hdr.space;
+            let pass = hdr.pass;
+            let linear = hdr_frame::linearize(&mut *renderer, std::mem::take(&mut elements), space);
+            if !hdr
+                .frame
+                .as_ref()
+                .is_some_and(|f| f.fits(&lit.output, &pass))
+            {
+                hdr.frame = match HdrFrame::new(&mut *renderer, &lit.output, pass) {
+                    Ok(frame) => Some(frame),
+                    Err(err) => {
+                        tracing::warn!(
+                            "monitor {}: cannot make the HDR target: {err}",
+                            lit.output.name()
+                        );
+                        None
+                    }
+                };
+            }
+            let background = if locked {
                 LOCKED_BACKGROUND
             } else {
                 BACKGROUND
-            },
-            frame_flags,
-            presentation,
-        ) {
-            Ok(res) => {
-                let is_empty = res.is_empty;
-                // debug log for direct scanout changes
-                let on_plane = matches!(res.primary_element, PrimaryPlaneElement::Element(_));
-                if on_plane != lit.scanning_out {
-                    lit.scanning_out = on_plane;
-                    tracing::debug!(
+            };
+            let clear = hdr_frame::clear_color(space, background);
+            match hdr
+                .frame
+                .as_mut()
+                .map(|f| f.render(&mut *renderer, &linear, clear))
+            {
+                Some(Ok((element, states))) => {
+                    elements.push(JffElement::Hdr(element));
+                    hdr_states = Some(states);
+                }
+                Some(Err(err)) => {
+                    tracing::warn!(
+                        "monitor {}: error drawing the HDR frame: {err}",
+                        lit.output.name()
+                    );
+                    hdr.frame = None;
+                    hdr_failed = true;
+                }
+                None => hdr_failed = true,
+            }
+        }
+
+        let mut queued = false;
+        if !hdr_failed {
+            match lit.compositor.render_frame(
+                &mut *renderer,
+                &elements,
+                if locked || direct_scanout {
+                    LOCKED_BACKGROUND
+                } else {
+                    BACKGROUND
+                },
+                frame_flags,
+                presentation,
+            ) {
+                Ok(res) => {
+                    let is_empty = res.is_empty;
+                    // debug log for direct scanout changes
+                    let on_plane = matches!(res.primary_element, PrimaryPlaneElement::Element(_));
+                    if on_plane != lit.scanning_out {
+                        lit.scanning_out = on_plane;
+                        tracing::debug!(
                         "monitor {}: primary plane now shows {} (fullscreen cover: {direct_scanout})",
                         lit.output.name(),
                         if on_plane {
@@ -1733,36 +1891,37 @@ impl JffState {
                             "the composited frame"
                         },
                     );
-                }
-                if res.needs_sync() {
-                    if let PrimaryPlaneElement::Swapchain(element) = res.primary_element {
-                        if let Err(err) = element.sync.wait() {
-                            tracing::warn!("error waiting for frame completion: {err:?}");
+                    }
+                    if res.needs_sync() {
+                        if let PrimaryPlaneElement::Swapchain(element) = res.primary_element {
+                            if let Err(err) = element.sync.wait() {
+                                tracing::warn!("error waiting for frame completion: {err:?}");
+                            }
+                        }
+                    }
+                    if !is_empty {
+                        if let Some(dmabuf_feedback) = &lit.dmabuf_feedback {
+                            send_surface_feedback(
+                                &self.desk,
+                                &lit.output,
+                                hdr_states.as_ref().unwrap_or(&res.states),
+                                dmabuf_feedback,
+                                direct_scanout,
+                            );
+                        }
+                        let feedback = crate::protocol::presentation::take_feedback(
+                            &self.desk,
+                            &lit.output,
+                            hdr_states.as_ref().unwrap_or(&res.states),
+                        );
+                        match lit.compositor.queue_frame(feedback) {
+                            Ok(()) => queued = true,
+                            Err(err) => tracing::warn!("error queueing frame: {err}"),
                         }
                     }
                 }
-                if !is_empty {
-                    if let Some(dmabuf_feedback) = &lit.dmabuf_feedback {
-                        send_surface_feedback(
-                            &self.desk,
-                            &lit.output,
-                            &res.states,
-                            dmabuf_feedback,
-                            direct_scanout,
-                        );
-                    }
-                    let feedback = crate::protocol::presentation::take_feedback(
-                        &self.desk,
-                        &lit.output,
-                        &res.states,
-                    );
-                    match lit.compositor.queue_frame(feedback) {
-                        Ok(()) => queued = true,
-                        Err(err) => tracing::warn!("error queueing frame: {err}"),
-                    }
-                }
+                Err(err) => tracing::warn!("error rendering frame: {err}"),
             }
-            Err(err) => tracing::warn!("error rendering frame: {err}"),
         }
 
         if queued {
@@ -1920,6 +2079,7 @@ impl JffState {
         tty.sync_gamma(&self.config);
         tty.sync_hdr(&self.config);
         let monitors_changed = tty.monitors() != known.as_slice();
+        crate::protocol::color_management::sync_output_color(self);
         if removed.is_empty() && added.is_empty() {
             // a disabled monitor can still have been plugged or unplugged
             if monitors_changed {

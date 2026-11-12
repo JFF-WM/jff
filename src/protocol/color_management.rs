@@ -22,7 +22,9 @@
 //! described as that profile says (its primaries, tone curve and white, see
 //! `feature::icc::description`), and [`sync_output_color`] keeps it up to date. What clients are
 //! told is one description for all outputs, the profile of the first monitor that has one, so
-//! the preferred description of any surface is that one. What the renderer converts to is the
+//! the preferred description of any surface is that one, except on a monitor in HDR mode: that
+//! one is described as what it is (PQ in BT.2020, its peak and its SDR white), and the surfaces
+//! on it are told so. What the renderer converts to is the
 //! description of the monitor itself, so a monitor with no profile is still shown as sRGB. When
 //! the description clients are told changes, `image_description_changed` and
 //! `preferred_changed` go to the objects that asked, which is why those are kept in
@@ -58,6 +60,7 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
+use smithay::desktop::utils::surface_primary_scanout_output;
 use smithay::wayland::compositor::{with_states, Cacheable, SurfaceData};
 
 use crate::config::Config;
@@ -93,6 +96,15 @@ pub struct OutputColor {
     /// Surfaces with no description (plain sRGB) are converted too
     /// (`color-management { convert-srgb }`).
     pub convert_srgb: bool,
+    /// The monitor is shown as HDR: every surface is drawn into a linear working space instead, see [`WorkingSpace`].
+    pub hdr: Option<WorkingSpace>,
+}
+
+/// The linear space an HDR monitor's frame is composited in: BT.2020 primaries, 1.0 is SDR white, and a final pass turns it into the signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkingSpace {
+    /// Luminance of 1.0, in cd/m².
+    pub sdr_white: u32,
 }
 
 /// What to convert the surfaces of the monitor `output` to, `None` when it is not managed: the
@@ -111,7 +123,24 @@ pub fn output_color(config: &Config, color: &ColorManagement, output: &str) -> O
         target: color.monitor_description(output),
         fullscreen_passthrough: settings.fullscreen_passthrough,
         convert_srgb: settings.convert_srgb,
+        hdr: None,
     })
+}
+
+/// What an HDR monitor's frame is drawn as: `base`, or plain sRGB when the monitor is not color managed, with every surface going to the working space of `space`.
+pub fn hdr_color(base: Option<OutputColor>, space: WorkingSpace) -> OutputColor {
+    let base = base.unwrap_or(OutputColor {
+        target: ImageDescription::srgb(),
+        fullscreen_passthrough: false,
+        convert_srgb: false,
+        hdr: None,
+    });
+    OutputColor {
+        // a fullscreen window is not shown as its client drew it: it is encoded for the signal like the rest
+        fullscreen_passthrough: false,
+        hdr: Some(space),
+        ..base
+    }
 }
 
 /// What to convert to for a picture that is saved to a file (a screenshot): sRGB, which is what
@@ -122,6 +151,7 @@ pub fn capture_color(config: &Config) -> Option<OutputColor> {
         fullscreen_passthrough: false,
         // The target is sRGB: plain sRGB surfaces are already what the picture should hold.
         convert_srgb: false,
+        hdr: None,
     })
 }
 
@@ -134,6 +164,8 @@ pub struct ColorManagement {
     /// The colors of each monitor that has an ICC profile, by connector name. A monitor that
     /// is not in it is sRGB.
     monitors: HashMap<String, ImageDescription>,
+    /// What clients are told about each monitor in HDR mode, by connector name.
+    hdr: HashMap<String, Arc<Described>>,
     /// Information objects waiting for their events. `done` is a destructor event: sent while
     /// the `get_information` request that made the object is still being dispatched, it
     /// destroys the object before the backend has attached its data to it (a use-after-free).
@@ -162,16 +194,16 @@ impl ColorManagement {
             identities,
             output,
             monitors: HashMap::new(),
+            hdr: HashMap::new(),
             pending_info: Vec::new(),
             outputs: Vec::new(),
             feedbacks: Vec::new(),
         }
     }
 
-    /// The description of an output, which is also the preferred one of the surfaces on it.
-    /// All outputs have the same one for now.
-    pub fn output_description(&self) -> Arc<Described> {
-        self.output.clone()
+    /// The description of the output `name`, which is also the preferred one of the surfaces on it.
+    pub fn output_description(&self, name: &str) -> Arc<Described> {
+        self.hdr.get(name).unwrap_or(&self.output).clone()
     }
 
     /// The colors of the monitor `name`: what its ICC profile says, sRGB without one.
@@ -469,7 +501,8 @@ impl Dispatch<WpColorManagementOutputV1, ColorOutput> for JffState {
                 );
                 return;
             }
-            let described = state.color_management.output_description();
+            let name = data.output.as_ref().map(|o| o.name()).unwrap_or_default();
+            let described = state.color_management.output_description(&name);
             init_ready(data_init, image_description, described, true);
         }
     }
@@ -498,7 +531,14 @@ impl Dispatch<WpColorManagementSurfaceFeedbackV1, ColorFeedback> for JffState {
             resource.post_error(Error::Inert, "the wl_surface is gone");
             return;
         }
-        let described = state.color_management.output_description();
+        // The monitor the surface is shown on, the first one before it has been drawn.
+        let name = with_states(&data.surface, |states| {
+            surface_primary_scanout_output(&data.surface, states)
+        })
+        .or_else(|| state.outputs.first().cloned())
+        .map(|output| output.name())
+        .unwrap_or_default();
+        let described = state.color_management.output_description(&name);
         init_ready(data_init, image_description, described, true);
     }
 }
@@ -650,24 +690,73 @@ pub fn sync_output_color(state: &mut JffState) {
         .find_map(|output| monitors.get(&output.name()).copied())
         .unwrap_or_else(ImageDescription::srgb);
     state.color_management.monitors = monitors;
-    set_output_color(state, told);
+    let hdr_changed = sync_hdr_descriptions(state);
+    if !set_output_color(state, told) && hdr_changed {
+        notify_preferred_changed(state);
+    }
 }
 
-/// Make `description` the outputs' and tell the clients that follow it, if it is a change.
-fn set_output_color(state: &mut JffState, description: ImageDescription) {
-    let Some(identity) = state.color_management.set_output_description(description) else {
-        return;
+/// The monitors in HDR mode and what they show, from the backend. Returns whether what clients
+/// are told about them changed.
+fn sync_hdr_descriptions(state: &mut JffState) -> bool {
+    let wanted = match &state.backend {
+        crate::app::Backend::Tty(tty) => tty.hdr_descriptions(),
+        _ => Vec::new(),
     };
-    tracing::info!("the outputs' color description changed");
+    let manager = &mut state.color_management;
+    let same = wanted.len() == manager.hdr.len()
+        && wanted.iter().all(|(name, description)| {
+            manager
+                .hdr
+                .get(name)
+                .is_some_and(|told| told.description == *description)
+        });
+    if same {
+        return false;
+    }
+    let mut hdr = HashMap::new();
+    for (name, description) in wanted {
+        let kept = manager
+            .hdr
+            .get(&name)
+            .filter(|told| told.description == description)
+            .cloned();
+        let Some(described) = kept.or_else(|| manager.describe(description)) else {
+            continue;
+        };
+        hdr.insert(name, described);
+    }
+    manager.hdr = hdr;
+    true
+}
+
+/// Tell every client that follows the outputs' description that it may have changed. They ask
+/// again, and get the one of the monitor the surface is on.
+fn notify_preferred_changed(state: &mut JffState) {
     let manager = &mut state.color_management;
     manager.outputs.retain(|o| o.is_alive());
     manager.feedbacks.retain(|f| f.is_alive());
     for output in &manager.outputs {
         output.image_description_changed();
     }
+    let identity = manager.output.identity;
     for feedback in &manager.feedbacks {
         feedback.preferred_changed(identity);
     }
+}
+
+/// Make `description` the outputs' and tell the clients that follow it, if it is a change.
+fn set_output_color(state: &mut JffState, description: ImageDescription) -> bool {
+    if state
+        .color_management
+        .set_output_description(description)
+        .is_none()
+    {
+        return false;
+    }
+    tracing::info!("the outputs' color description changed");
+    notify_preferred_changed(state);
+    true
 }
 
 /// Send the events of the information objects queued by `get_information`. Call it right after

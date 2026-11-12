@@ -15,6 +15,7 @@ mod gamut;
 mod geom;
 mod grab_move;
 mod hdr;
+mod hdr_output;
 mod icc;
 mod icc_lut;
 mod input_timestamps;

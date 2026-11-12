@@ -16,6 +16,8 @@
 //!   sRGB ones too, converted by the same shader. Nothing runs for a surface that needs nothing,
 //!   or when `color-management` is off.
 //!
+//! * `hdr`: an HDR output (`output { hdr, }`) is composited in a linear fp16 texture, every surface converted into it by the same shader, and a final pass codes it as PQ.
+//!
 //! Blur itself is opt-in: nothing runs unless the config has a `blur { … }` block - the
 //! renderer hands these functions `None` otherwise (see `render_for_surface`).
 //!
@@ -29,6 +31,7 @@ pub mod blur;
 pub mod border;
 pub mod framebuffer_effect;
 pub mod gamut;
+pub mod hdr;
 pub mod rounded;
 pub mod surface_alpha;
 pub mod yuv;

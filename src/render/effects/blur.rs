@@ -161,10 +161,14 @@ impl Blur {
     ) -> anyhow::Result<()> {
         let passes = options.passes();
         let size = source.size();
+        let format = source.format().unwrap_or(Fourcc::Abgr8888);
 
         if let Some(result) = self.textures.first_mut() {
             let old_size = result.size();
-            if old_size != size {
+            if result.format() != Some(format) {
+                // The output went to or came from HDR: the chain has to be float (or not) like its source.
+                self.textures.clear();
+            } else if old_size != size {
                 tracing::trace!(
                     "blur: source size changed from {}x{} to {}x{}, recreating textures",
                     old_size.w,
@@ -191,8 +195,8 @@ impl Blur {
             if i < self.textures.len() {
                 continue;
             }
-            let texture = create_texture(Fourcc::Abgr8888, this_size)
-                .context("error creating a blur texture")?;
+            let texture =
+                create_texture(format, this_size).context("error creating a blur texture")?;
             self.textures.push(texture);
         }
 

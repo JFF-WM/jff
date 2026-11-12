@@ -23,6 +23,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::{RelocateRenderElement, RescaleRenderElement};
 use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement};
@@ -74,6 +75,8 @@ fn program(renderer: &mut GlesRenderer) -> Option<GlesTexProgram> {
                 UniformName::new("cm_encode", UniformType::_2f),
                 UniformName::new("cm_map", UniformType::_1f),
                 UniformName::new("cm_luma", UniformType::_3f),
+                UniformName::new("cm_scale", UniformType::_1f),
+                UniformName::new("cm_working", UniformType::_1f),
                 UniformName::new("cm_on", UniformType::_1f),
             ],
         )
@@ -240,6 +243,8 @@ impl Rounding {
                 Uniform::new("cm_encode", conversion.encode.shader_params()),
                 Uniform::new("cm_map", conversion.map.shader_param()),
                 Uniform::new("cm_luma", conversion.luma),
+                Uniform::new("cm_scale", conversion.scale),
+                Uniform::new("cm_working", f32::from(u8::from(conversion.working))),
                 Uniform::new("cm_on", 1.0f32),
             ]),
             None => uniforms.push(Uniform::new("cm_on", 0.0f32)),
@@ -262,6 +267,22 @@ impl Rounding {
     pub fn wrap_thumb(&self, element: ThumbSurface) -> JffElement {
         JffElement::from(self.element(element, true))
     }
+
+    /// A painted picture (the cursor, a toast, an app icon) drawn through the shader.
+    pub fn wrap_memory(
+        &self,
+        element: MemoryRenderBufferRenderElement<GlesRenderer>,
+    ) -> JffElement {
+        JffElement::from(self.element(element, false))
+    }
+
+    /// A painted picture drawn at another size, through the shader.
+    pub fn wrap_scaled_memory(
+        &self,
+        element: RescaleRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>,
+    ) -> JffElement {
+        JffElement::from(self.element(element, false))
+    }
 }
 
 /// Whether `window` is fullscreen: those keep square corners (and stay eligible for direct
@@ -281,6 +302,13 @@ pub type RoundedSurfaceElement = RoundedElement<WaylandSurfaceRenderElement<Gles
 
 /// An overview thumbnail drawn through the rounded-corner shader.
 pub type RoundedThumbElement = RoundedElement<ThumbSurface>;
+
+/// A painted picture drawn through the shader.
+pub type RoundedMemoryElement = RoundedElement<MemoryRenderBufferRenderElement<GlesRenderer>>;
+
+/// A painted picture drawn at another size, through the shader.
+pub type RoundedScaledMemoryElement =
+    RoundedElement<RescaleRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>>;
 
 /// An element drawn through the rounded-corner shader.
 #[derive(Debug)]
@@ -409,6 +437,8 @@ struct RingKey {
     border: i32,
     radius: i32,
     color: [f32; 4],
+    /// Drawn for an HDR output, whose working space needs the colors converted.
+    working: bool,
 }
 
 thread_local! {
@@ -437,6 +467,7 @@ pub fn ring_element(
         border,
         radius,
         color,
+        working: super::gamut::working().is_some(),
     };
     if let Some(element) = RING.with(|ring| {
         ring.borrow()
@@ -487,6 +518,12 @@ pub fn make_ring(
     motion: RingMotion,
 ) -> Option<PixelShaderElement> {
     let program = ring_program(renderer)?;
+    // colors are sRGB in the config, an HDR output wants them in its working space
+    let color = super::gamut::tint(color);
+    let motion = RingMotion {
+        color2: super::gamut::tint(motion.color2),
+        ..motion
+    };
     Some(PixelShaderElement::new(
         program,
         area,

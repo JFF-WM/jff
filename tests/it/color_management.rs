@@ -67,12 +67,12 @@ fn offered_values_have_the_protocol_numbers() {
     }
 
     let tfs: Vec<u32> = SUPPORTED_TFS.iter().map(|tf| tf.raw()).collect();
-    assert_eq!(tfs, [9, 2, 3]);
+    assert_eq!(tfs, [9, 2, 3, 11]);
     for raw in tfs {
         assert_eq!(NamedTf::from_raw(raw).unwrap().raw(), raw);
     }
-    // BT.1886, linear, log, PQ, HLG and the rest are not offered yet.
-    for raw in [0, 1, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14] {
+    // BT.1886, linear, log, HLG and the rest are not offered.
+    for raw in [0, 1, 4, 5, 6, 7, 8, 10, 12, 13, 14] {
         assert_eq!(NamedTf::from_raw(raw), None);
     }
 }
@@ -168,7 +168,7 @@ fn each_property_is_set_once() {
 #[test]
 fn names_that_were_not_offered_are_refused() {
     let mut builder = ParamsBuilder::default();
-    for raw in [0, 1, 11, 13, 99] {
+    for raw in [0, 1, 12, 13, 99] {
         assert_eq!(error_of(builder.set_tf_named(raw)), CreatorError::InvalidTf);
     }
     for raw in [0, 2, 7, 11, 99] {
@@ -429,4 +429,21 @@ fn identity_numbers_are_never_zero_or_repeated() {
     assert_eq!(last.next(), Some(u32::MAX));
     assert_eq!(last.next(), None);
     assert_eq!(last.next(), None);
+}
+
+#[test]
+fn pq_gets_its_own_default_luminances() {
+    let mut builder = ParamsBuilder::default();
+    builder.set_tf_named(11).unwrap();
+    builder.set_primaries_named(9).unwrap();
+    let description = builder.build().unwrap();
+    assert_eq!(description.luminance, Luminance::PQ);
+    assert_eq!(
+        (
+            Luminance::PQ.min,
+            Luminance::PQ.max,
+            Luminance::PQ.reference
+        ),
+        (50, 10_000, 203)
+    );
 }

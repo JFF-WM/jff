@@ -44,6 +44,9 @@ uniform float ycc_on;
 // 1: desaturated toward the grey of the same luminance, `cm_luma` is the output's luminance row)
 // and encoded with `cm_encode`. A curve is (kind, exponent): kind 1 is the piecewise sRGB curve,
 // anything else a pure power. Off when cm_on is 0.
+// For an HDR output (cm_working 1) the result is not encoded: it is linear BT.2020 light in the
+// working space, 1.0 being the output's SDR white, with no gamut map. PQ (kind 2) decodes to a
+// fraction of 10000 cd/m², `cm_scale` turns that into the output's units (1.0 for the others).
 uniform vec3 cm_r;
 uniform vec3 cm_g;
 uniform vec3 cm_b;
@@ -51,6 +54,8 @@ uniform vec2 cm_decode;
 uniform vec2 cm_encode;
 uniform float cm_map;
 uniform vec3 cm_luma;
+uniform float cm_scale;
+uniform float cm_working;
 uniform float cm_on;
 
 // How much of the pixel at `p` lies inside the rounded rectangle: 1 inside, 0 outside, and a
@@ -64,9 +69,19 @@ float rounded_coverage(vec2 p) {
     return clamp(0.5 - dist, 0.0, 1.0);
 }
 
+// SMPTE ST 2084 code to light, as a fraction of 10000 cd/m².
+vec3 cm_pq_to_light(vec3 v) {
+    vec3 p = pow(v, vec3(1.0 / 78.84375));
+    vec3 num = max(p - vec3(0.8359375), vec3(0.0));
+    vec3 den = vec3(18.8515625) - 18.6875 * p;
+    return pow(num / den, vec3(1.0 / 0.1593017578125));
+}
+
 // Encoded value to linear light, for the curve described by `curve`.
 vec3 cm_to_light(vec3 v, vec2 curve) {
     v = clamp(v, 0.0, 1.0);
+    if (curve.x > 1.5)
+        return cm_pq_to_light(v);
     if (curve.x > 0.5) {
         vec3 low = v / 12.92;
         vec3 high = pow((v + 0.055) / 1.055, vec3(2.4));
@@ -119,9 +134,13 @@ void main() {
         // The curves are not linear, so they work on the straight color, not the premultiplied one.
         vec3 straight = color.a > 0.0 ? color.rgb / color.a : color.rgb;
         vec3 light = cm_to_light(straight, cm_decode);
-        light = vec3(dot(cm_r, light), dot(cm_g, light), dot(cm_b, light));
-        light = cm_map_gamut(light);
-        color.rgb = cm_from_light(light, cm_encode) * color.a;
+        light = vec3(dot(cm_r, light), dot(cm_g, light), dot(cm_b, light)) * cm_scale;
+        if (cm_working > 0.5) {
+            color.rgb = max(light, 0.0) * color.a;
+        } else {
+            light = cm_map_gamut(light);
+            color.rgb = cm_from_light(light, cm_encode) * color.a;
+        }
     }
 
     // Only the window's own rectangle is shaped; what a client draws outside it (a shadow) is

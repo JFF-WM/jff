@@ -9,6 +9,7 @@ pub mod frame_clock;
 pub mod gamut;
 pub mod geom;
 pub mod hdr;
+pub mod hdr_output;
 pub mod json;
 pub mod layout;
 pub mod overview_grid;

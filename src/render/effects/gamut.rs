@@ -15,6 +15,7 @@
 
 use std::cell::Cell;
 
+use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::{Element, Id};
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -23,7 +24,7 @@ use smithay::wayland::compositor::{with_surface_tree_downward, TraversalAction};
 
 use crate::primitives::color::{ImageDescription, RenderIntent};
 use crate::primitives::gamut::Conversion;
-use crate::protocol::color_management::{surface_color_in, OutputColor};
+use crate::protocol::color_management::{surface_color_in, OutputColor, WorkingSpace};
 use crate::render::effects::rounded::Rounding;
 use crate::render::elements::JffElement;
 
@@ -48,9 +49,59 @@ pub fn enter(color: Option<OutputColor>) -> Scope {
     Scope(ACTIVE.with(|active| active.replace(color)))
 }
 
+thread_local! {
+    /// The frame being drawn right now is the working-space texture of an HDR output.
+    static DRAWING_HDR: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks the HDR frame as being drawn until it is dropped.
+pub struct HdrDraw(bool);
+
+impl Drop for HdrDraw {
+    fn drop(&mut self) {
+        DRAWING_HDR.with(|drawing| drawing.set(self.0));
+    }
+}
+
+/// From here until the guard is dropped, what is drawn goes to an HDR output's working space.
+#[must_use = "the frame is only marked while the guard is alive"]
+pub fn begin_hdr_draw() -> HdrDraw {
+    HdrDraw(DRAWING_HDR.with(|drawing| drawing.replace(true)))
+}
+
+/// Format of a copy of what is on the framebuffer being drawn: float for the working space, 8 bits otherwise.
+pub fn framebuffer_format() -> Fourcc {
+    if DRAWING_HDR.with(Cell::get) {
+        super::hdr::WORKING_FORMAT
+    } else {
+        Fourcc::Abgr8888
+    }
+}
+
 /// What the frame being built is converted to.
 pub fn active() -> Option<OutputColor> {
     ACTIVE.with(Cell::get)
+}
+
+/// The working space the frame being built is composited in, `None` for an SDR frame.
+pub fn working() -> Option<WorkingSpace> {
+    active().and_then(|color| color.hdr)
+}
+
+/// A color given in sRGB (straight alpha in the fourth value) as the frame being built has it: unchanged for an SDR frame, linear light in the working space for an HDR one.
+pub fn tint(color: [f32; 4]) -> [f32; 4] {
+    match working() {
+        Some(space) => {
+            let [r, g, b] = srgb_to_working(space, [color[0], color[1], color[2]]);
+            [r, g, b, color[3]]
+        }
+        None => color,
+    }
+}
+
+/// Straight sRGB values as the working space has them.
+pub fn srgb_to_working(space: WorkingSpace, rgb: [f32; 3]) -> [f32; 3] {
+    Conversion::to_working(&ImageDescription::srgb(), space.sdr_white as f32).apply(rgb)
 }
 
 /// The surfaces of the tree of `root` that are not shown as they are, with the conversion each
@@ -59,6 +110,24 @@ pub fn active() -> Option<OutputColor> {
 /// cheap) for a window that never used the protocol, on a monitor that is sRGB.
 pub fn conversions(root: &WlSurface, color: &OutputColor) -> Vec<(Id, Conversion)> {
     let mut found = Vec::new();
+    // An HDR frame has no surface that is drawn as it is: all of them are brought into the working space.
+    if let Some(space) = color.hdr {
+        with_surface_tree_downward(
+            root,
+            (),
+            |_, _, _| TraversalAction::DoChildren(()),
+            |surface, states, _| {
+                let description = surface_color_in(states)
+                    .map_or_else(ImageDescription::srgb, |color| color.description);
+                found.push((
+                    Id::from_wayland_resource(surface),
+                    Conversion::to_working(&description, space.sdr_white as f32),
+                ));
+            },
+            |_, _, _| true,
+        );
+        return found;
+    }
     with_surface_tree_downward(
         root,
         (),

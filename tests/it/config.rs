@@ -1469,3 +1469,20 @@ fn a_monitor_can_ask_for_hdr() {
     assert!(Config::parse(r#"outputs { output "DP-1" { hdr "maybe"; } }"#).is_err());
     assert!(Config::parse(r#"outputs { output "DP-1" { hdr 1 2; } }"#).is_err());
 }
+
+#[test]
+fn sdr_white_is_a_luminance_in_range() {
+    let config = Config::parse(
+        r#"outputs {
+            output "DP-1" { hdr; sdr-white 160; }
+            output "DP-2" { hdr; }
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(config.output("DP-1").unwrap().sdr_white, Some(160));
+    assert_eq!(config.output("DP-2").unwrap().sdr_white, None);
+    for bad in ["0", "5", "1001", "-3", "\"bright\"", "1 2", ""] {
+        let text = format!(r#"outputs {{ output "DP-1" {{ sdr-white {bad}; }} }}"#);
+        assert!(Config::parse(&text).is_err(), "sdr-white {bad}");
+    }
+}

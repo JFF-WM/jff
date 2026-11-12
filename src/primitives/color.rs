@@ -270,7 +270,7 @@ impl NamedPrimaries {
 /// Primaries clients are told they can name.
 pub const SUPPORTED_PRIMARIES: &[NamedPrimaries] = &NamedPrimaries::ALL;
 
-/// Named transfer functions jff offers. The HDR ones come with stage 4.
+/// Named transfer functions jff offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NamedTf {
     /// 2. Display gamma 2.2.
@@ -279,10 +279,12 @@ pub enum NamedTf {
     Gamma28,
     /// 9. The piecewise sRGB curve (version 1 of the protocol only).
     Srgb,
+    /// 11. SMPTE ST 2084 (PQ): absolute luminance up to 10000 cd/m².
+    St2084Pq,
 }
 
 impl NamedTf {
-    pub const ALL: [Self; 3] = [Self::Srgb, Self::Gamma22, Self::Gamma28];
+    pub const ALL: [Self; 4] = [Self::Srgb, Self::Gamma22, Self::Gamma28, Self::St2084Pq];
 
     /// `None` for a value that is not an offered name.
     pub fn from_raw(raw: u32) -> Option<Self> {
@@ -295,6 +297,7 @@ impl NamedTf {
             Self::Srgb => "srgb",
             Self::Gamma22 => "gamma22",
             Self::Gamma28 => "gamma28",
+            Self::St2084Pq => "st2084_pq",
         }
     }
 
@@ -303,6 +306,7 @@ impl NamedTf {
             Self::Gamma22 => 2,
             Self::Gamma28 => 3,
             Self::Srgb => 9,
+            Self::St2084Pq => 11,
         }
     }
 }
@@ -330,6 +334,13 @@ pub struct Luminance {
 }
 
 impl Luminance {
+    /// What a PQ description has when it says nothing: 0.005 to 10000 cd/m², white at 203.
+    pub const PQ: Self = Self {
+        min: 50,
+        max: 10_000,
+        reference: 203,
+    };
+
     /// What an SDR description has when it says nothing: 0.2 to 80 cd/m², white at 80.
     pub const SDR: Self = Self {
         min: 2_000,
@@ -619,7 +630,10 @@ impl ParamsBuilder {
                 message: "the transfer function and the primaries must both be set",
             }));
         };
-        let luminance = self.luminance.unwrap_or(Luminance::SDR);
+        let luminance = self.luminance.unwrap_or(match tf {
+            TransferFunction::Named(NamedTf::St2084Pq) => Luminance::PQ,
+            _ => Luminance::SDR,
+        });
         let max_cll = self.max_cll.filter(|&v| v != 0);
         let max_fall = self.max_fall.filter(|&v| v != 0);
         if let (Some(cll), Some(fall)) = (max_cll, max_fall) {

@@ -24,9 +24,10 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use super::color::{
-    Chromaticities, ImageDescription, NamedTf, RenderIntent, TransferFunction, CHROMA_SCALE,
-    EXPONENT_SCALE,
+    Chromaticities, ImageDescription, NamedPrimaries, NamedTf, RenderIntent, TransferFunction,
+    CHROMA_SCALE, EXPONENT_SCALE,
 };
+use super::hdr_output::{pq_decode, pq_encode, HDR_REFERENCE_WHITE, PQ_PEAK};
 
 /// A 3x3 matrix, row by row.
 pub type Mat3 = [[f64; 3]; 3];
@@ -146,6 +147,13 @@ pub fn conversion_matrix(from: &Chromaticities, to: &Chromaticities) -> Option<M
     Some(mul(&invert(&target)?, &mul(&adapt, &source)))
 }
 
+/// Linear sRGB to linear BT.2020, both with a D65 white. Stands in if the primaries cannot be worked out.
+const SRGB_TO_BT2020: Mat3 = [
+    [0.627404, 0.329283, 0.043313],
+    [0.069097, 0.919540, 0.011362],
+    [0.016391, 0.088013, 0.895595],
+];
+
 /// A transfer curve as the shader evaluates it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Curve {
@@ -153,6 +161,8 @@ pub enum Curve {
     Srgb,
     /// A pure power: light is the encoded value to this exponent.
     Power(f32),
+    /// SMPTE ST 2084, decoding to a fraction of 10000 cd/m².
+    Pq,
 }
 
 impl Curve {
@@ -161,6 +171,7 @@ impl Curve {
             TransferFunction::Named(NamedTf::Srgb) => Self::Srgb,
             TransferFunction::Named(NamedTf::Gamma22) => Self::power(22_000),
             TransferFunction::Named(NamedTf::Gamma28) => Self::power(28_000),
+            TransferFunction::Named(NamedTf::St2084Pq) => Self::Pq,
             TransferFunction::Power(raw) => Self::power(raw),
         }
     }
@@ -182,6 +193,7 @@ impl Curve {
                 }
             }
             Self::Power(exponent) => v.powf(exponent),
+            Self::Pq => pq_decode(v),
         }
     }
 
@@ -198,6 +210,7 @@ impl Curve {
                 }
             }
             Self::Power(exponent) => l.powf(1.0 / exponent),
+            Self::Pq => pq_encode(l),
         }
     }
 
@@ -207,6 +220,7 @@ impl Curve {
         match self {
             Self::Srgb => [1.0, 0.0],
             Self::Power(exponent) => [0.0, exponent],
+            Self::Pq => [2.0, 0.0],
         }
     }
 }
@@ -279,6 +293,10 @@ pub struct Conversion {
     pub map: GamutMap,
     /// The output's luminance row (Y of its red, green and blue), for [`GamutMap::Compress`].
     pub luma: [f32; 3],
+    /// Multiplies linear light after the matrix: turns PQ's fraction of 10000 cd/m² into the output's white.
+    pub scale: f32,
+    /// The output is a linear working space (see [`Conversion::to_working`]): no gamut map and no encode.
+    pub working: bool,
 }
 
 impl Conversion {
@@ -313,6 +331,11 @@ impl Conversion {
                 .enumerate()
                 .any(|(j, value)| (*value - IDENTITY[i][j]).abs() > NEAR_IDENTITY)
         });
+        let scale = if decode == Curve::Pq {
+            PQ_PEAK / HDR_REFERENCE_WHITE
+        } else {
+            1.0
+        };
         if !moves_colors && decode == encode {
             return None;
         }
@@ -331,7 +354,39 @@ impl Conversion {
             encode,
             map: GamutMap::of(intent),
             luma,
+            scale,
+            working: false,
         })
+    }
+
+    /// Into the linear working space of an HDR output: BT.2020 primaries, 1.0 is the output's SDR white of `sdr_white` cd/m². Every surface needs it, plain sRGB too.
+    pub fn to_working(source: &ImageDescription, sdr_white: f32) -> Self {
+        let bt2020 = NamedPrimaries::Bt2020.chromaticities();
+        let matrix = if source.primaries == bt2020 {
+            IDENTITY
+        } else {
+            conversion_matrix(&source.primaries, &bt2020).unwrap_or(SRGB_TO_BT2020)
+        };
+        let decode = Curve::of(source.tf);
+        let mut rows = [[0.0f32; 3]; 3];
+        for (out, values) in rows.iter_mut().zip(matrix) {
+            for (slot, value) in out.iter_mut().zip(values) {
+                *slot = value as f32;
+            }
+        }
+        Self {
+            rows,
+            decode,
+            encode: Curve::Power(1.0),
+            map: GamutMap::Clip,
+            luma: [0.2627, 0.6780, 0.0593],
+            scale: if decode == Curve::Pq {
+                PQ_PEAK / sdr_white.max(1.0)
+            } else {
+                1.0
+            },
+            working: true,
+        }
     }
 
     /// The shader on one color: straight (not premultiplied) values of the surface in, values
@@ -340,7 +395,10 @@ impl Conversion {
         let light = rgb.map(|v| self.decode.decode(v));
         let mut mapped = [0.0f32; 3];
         for (value, row) in mapped.iter_mut().zip(self.rows) {
-            *value = row[0] * light[0] + row[1] * light[1] + row[2] * light[2];
+            *value = (row[0] * light[0] + row[1] * light[1] + row[2] * light[2]) * self.scale;
+        }
+        if self.working {
+            return mapped.map(|v| v.max(0.0));
         }
         map_gamut(mapped, self.luma, self.map).map(|v| self.encode.encode(v))
     }
@@ -353,6 +411,8 @@ impl Conversion {
             value.to_bits().hash(&mut hasher);
         }
         self.map.shader_param().to_bits().hash(&mut hasher);
+        self.scale.to_bits().hash(&mut hasher);
+        self.working.hash(&mut hasher);
         for value in self
             .decode
             .shader_params()

@@ -22,7 +22,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::{Element, Id, RenderElement};
 use smithay::backend::renderer::gles::{
     ffi, Capability, GlesError, GlesFrame, GlesRenderer, GlesTexture,
@@ -200,12 +199,17 @@ impl FramebufferEffectElement {
 
         {
             let mut state = snapshot.0.borrow_mut();
-            if state.texture.as_ref().is_some_and(|t| t.size() != size) {
+            let format = super::gamut::framebuffer_format();
+            if state
+                .texture
+                .as_ref()
+                .is_some_and(|t| t.size() != size || t.format() != Some(format))
+            {
                 state.texture = None;
             }
             if state.texture.is_none() {
                 let mut guard = frame.renderer();
-                let texture: GlesTexture = guard.as_mut().create_buffer(Fourcc::Abgr8888, size)?;
+                let texture: GlesTexture = guard.as_mut().create_buffer(format, size)?;
                 state.texture = Some(texture);
             }
         }
@@ -345,11 +349,16 @@ impl RenderElement<GlesRenderer> for FramebufferEffectElement {
         let source_rect = transform.transform_rect_in(clamped, &output_rect.size);
         let size: Size<i32, Buffer> = (source_rect.size.w, source_rect.size.h).into();
 
-        if inner.framebuffer.as_ref().is_some_and(|t| t.size() != size) {
+        let format = super::gamut::framebuffer_format();
+        if inner
+            .framebuffer
+            .as_ref()
+            .is_some_and(|t| t.size() != size || t.format() != Some(format))
+        {
             inner.framebuffer = None;
         }
         if inner.framebuffer.is_none() {
-            let texture: GlesTexture = renderer.create_buffer(Fourcc::Abgr8888, size)?;
+            let texture: GlesTexture = renderer.create_buffer(format, size)?;
             inner.framebuffer = Some(texture);
         }
         let framebuffer = inner.framebuffer.as_ref().expect("created above");

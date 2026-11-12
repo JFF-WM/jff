@@ -135,6 +135,8 @@ struct RingKey {
     radius: i32,
     color: [f32; 4],
     motion: RingMotion,
+    /// Drawn for an HDR output, whose working space needs the colors converted.
+    working: bool,
 }
 
 struct State {
@@ -275,6 +277,7 @@ pub fn border_element(
             // Faded only here: the fade state above keeps the colours as configured.
             color: alpha::faded(color, visible),
             motion,
+            working: super::gamut::working().is_some(),
         };
         let cached = state
             .ring
