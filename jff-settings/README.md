@@ -28,17 +28,17 @@ Needs the development packages of GTK 4.10 or newer and libadwaita 1.4 or newer.
 
 ## Pages
 
-| Page | Settings |
-| --- | --- |
-| Appearance | gaps, radius, popup radius, server-side decorations, border (width, colors, animation) |
-| Keyboard | layout, variant, options, rules, model, repeat delay and rate, Num Lock |
-| Windows | workspaces (count, per monitor), maximize new windows, drag modifier, global hotkeys, window animations |
-| Effects | blur (with its lists), on-screen display, window switcher, overview, workspace wall, hot corner |
-| Monitors | one entry per output: off, position, mode, variable refresh rate, HDR, ICC profile, game hint, color management |
-| Window rules | add, edit, reorder and remove rules: match (app id, title, tag, dialog, restored) and actions |
-| Key bindings | add, edit and remove bindings; every action jff knows, with its arguments |
-| Startup | `autostart` and `sh-autostart` lines |
-| System | screenshots, logging, color management, tearing |
+| Page         | Settings                                                                                                                          |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| Appearance   | gaps, radius, popup radius, server-side decorations, border (width, colors, animation)                                            |
+| Keyboard     | layout, variant, options, rules, model, repeat delay and rate, Num Lock                                                           |
+| Windows      | workspaces (count, per monitor), maximize new windows, drag modifier, global hotkeys, window animations                           |
+| Effects      | blur (with its lists), on-screen display, window switcher, overview, workspace wall, hot corner                                   |
+| Monitors     | one entry per output: off, position, mode, variable refresh rate, HDR (SDR white, peak), ICC profile, game hint, color management |
+| Window rules | add, edit, reorder and remove rules: match (app id, title, tag, dialog, restored) and actions                                     |
+| Key bindings | add, edit and remove bindings; every action jff knows, with its arguments                                                         |
+| Startup      | `autostart` and `sh-autostart` lines                                                                                              |
+| System       | screenshots, logging, color management, tearing                                                                                   |
 
 ## Limits
 

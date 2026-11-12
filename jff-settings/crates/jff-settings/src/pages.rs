@@ -874,9 +874,27 @@ pub fn output_fields() -> Vec<Field> {
         flag(
             &["hdr"],
             "HDR",
-            "Signals HDR10 when the monitor and connector can do it. jff doesn't encode the picture for HDR yet, so colors look wrong for now",
+            "Signals HDR10 when the monitor and connector can do it, and stays SDR when they can't",
             false,
         ),
+        int(
+            &["sdr-white"],
+            "SDR White",
+            "Brightness of SDR white on an HDR display, in cd/m². Lower it for more room for highlights",
+            10,
+            1000,
+            203,
+        )
+        .optional(),
+        int(
+            &["hdr-peak"],
+            "HDR Peak",
+            "Peak brightness in cd/m², used instead of the one the display reports",
+            100,
+            10_000,
+            400,
+        )
+        .optional(),
         text(&["icc-profile"], "ICC Profile Path"),
         field(
             &["content-type-hint"],
