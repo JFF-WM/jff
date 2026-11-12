@@ -1,0 +1,10 @@
+# Own workspace, outside jff's `src/`: the compositor gains no GTK dependency and
+# `cargo build --release` at the repo root is unchanged.
+[workspace]
+resolver = "2"
+members = ["crates/jff-settings-core", "crates/jff-settings"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"

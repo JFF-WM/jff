@@ -1,0 +1,10 @@
+# Separate workspace on purpose, outside jff's src/. That way the compositor doesn't pick up
+# GTK and `cargo build --release` in the repo root stays the same.
+[workspace]
+resolver = "2"
+members = ["crates/jff-settings-core", "crates/jff-settings"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"

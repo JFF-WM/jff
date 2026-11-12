@@ -1,0 +1,10 @@
+[package]
+name = "jff-settings-core"
+description = "GUI-free editing of jff's config.kdl (keeps comments and formatting)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# same major as the compositor, jff's config is KDL v2
+kdl = "6.7.1"
