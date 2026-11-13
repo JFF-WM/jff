@@ -51,6 +51,7 @@ fn program(renderer: &mut GlesRenderer) -> Option<GlesTexProgram> {
                 vec3("luma_2020"),
                 vec3("luma_panel"),
                 UniformName::new("map_on", UniformType::_1f),
+                UniformName::new("tone_kind", UniformType::_1f),
             ],
         )
         .map_err(|err| tracing::warn!("error compiling the HDR output shader: {err:#}"))
@@ -285,6 +286,7 @@ impl RenderElement<GlesRenderer> for HdrFrameElement {
             Uniform::new("luma_2020", pass.luma_2020),
             Uniform::new("luma_panel", pass.luma_panel),
             Uniform::new("map_on", f32::from(u8::from(pass.map_gamut))),
+            Uniform::new("tone_kind", pass.tone.shader_param()),
         ];
         frame.render_texture_from_to(
             &self.texture,

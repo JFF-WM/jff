@@ -25,6 +25,9 @@ pub const LOW_HEADROOM: f32 = 2.0;
 /// Where the tone curve starts to roll off, as a fraction of the peak.
 const KNEE: f32 = 0.75;
 
+/// Peak luminance of the content the BT.2390 curve is fitted to, in cd/m². Light above it is shown at the panel's peak.
+pub const BT2390_SOURCE_PEAK: f32 = 1000.0;
+
 const M1: f32 = 2610.0 / 16384.0;
 const M2: f32 = 2523.0 / 4096.0 * 128.0;
 const C1: f32 = 3424.0 / 4096.0;
@@ -105,6 +108,66 @@ pub fn tone_map(nits: f32, peak: f32) -> f32 {
     knee + range * (1.0 - (-(nits - knee) / range).exp())
 }
 
+/// The curve that rolls highlights off under the panel's peak.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToneMap {
+    /// Untouched up to a knee at 75 percent of the peak, then an exponential roll-off.
+    #[default]
+    Knee,
+    /// The BT.2390 EETF, a spline in the PQ domain, fitted to content up to [`BT2390_SOURCE_PEAK`].
+    Bt2390,
+}
+
+impl ToneMap {
+    /// The names the config takes, in the order of the variants.
+    pub const NAMES: [&'static str; 2] = ["knee", "bt2390"];
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "knee" => Some(Self::Knee),
+            "bt2390" => Some(Self::Bt2390),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Knee => "knee",
+            Self::Bt2390 => "bt2390",
+        }
+    }
+
+    /// The number the shader takes: 1 for BT.2390, 0 for the knee.
+    pub fn shader_param(self) -> f32 {
+        match self {
+            Self::Knee => 0.0,
+            Self::Bt2390 => 1.0,
+        }
+    }
+}
+
+/// Luminance of a pixel, in cd/m², squeezed under `peak` with the BT.2390 EETF: untouched up to its knee, then a Hermite spline in the PQ domain that ends on the peak. Black is taken as 0 on both sides, so there is no black lift, and light above [`BT2390_SOURCE_PEAK`] is shown at the peak.
+pub fn bt2390_tone_map(nits: f32, peak: f32) -> f32 {
+    let nits = nits.max(0.0);
+    if peak >= BT2390_SOURCE_PEAK {
+        return nits.min(peak);
+    }
+    let source = pq_encode(BT2390_SOURCE_PEAK / PQ_PEAK);
+    let max_lum = pq_encode(peak / PQ_PEAK) / source;
+    let knee = (1.5 * max_lum - 0.5).max(0.0);
+    let e = pq_encode(nits.min(BT2390_SOURCE_PEAK) / PQ_PEAK) / source;
+    if e <= knee {
+        return nits;
+    }
+    let t = (e - knee) / (1.0 - knee);
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let shaped = (2.0 * t3 - 3.0 * t2 + 1.0) * knee
+        + (t3 - 2.0 * t2 + t) * (1.0 - knee)
+        + (-2.0 * t3 + 3.0 * t2) * max_lum;
+    (pq_decode(shaped * source) * PQ_PEAK).min(peak)
+}
+
 /// What the final pass of an HDR output does, worked out once per output and per setting.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FinalPass {
@@ -122,6 +185,8 @@ pub struct FinalPass {
     pub luma_panel: [f32; 3],
     /// The panel's gamut is known: colors outside it are desaturated into it.
     pub map_gamut: bool,
+    /// How luminance above the knee is rolled off.
+    pub tone: ToneMap,
 }
 
 fn narrow(m: &Mat3) -> [[f32; 3]; 3] {
@@ -156,7 +221,13 @@ impl FinalPass {
             luma_2020,
             luma_panel,
             map_gamut,
+            tone: ToneMap::default(),
         }
+    }
+
+    /// The same pass with another tone curve.
+    pub fn with_tone_map(self, tone: ToneMap) -> Self {
+        Self { tone, ..self }
     }
 
     /// The shader on one pixel: linear BT.2020 (1.0 is SDR white) in, PQ code values out.
@@ -164,7 +235,11 @@ impl FinalPass {
         let mut nits = working.map(|v| v.max(0.0) * self.sdr_white);
         let y = dot(self.luma_2020, nits);
         if y > 1e-6 {
-            let scale = tone_map(y, self.peak) / y;
+            let mapped = match self.tone {
+                ToneMap::Knee => tone_map(y, self.peak),
+                ToneMap::Bt2390 => bt2390_tone_map(y, self.peak),
+            };
+            let scale = mapped / y;
             nits = nits.map(|v| v * scale);
         }
         if self.map_gamut {

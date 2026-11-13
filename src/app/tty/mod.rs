@@ -1093,6 +1093,9 @@ impl Tty {
                 .and_then(|c| c.sdr_white)
                 .unwrap_or(hdr_output::DEFAULT_SDR_WHITE);
             let peak_override = output_config.and_then(|c| c.hdr_peak);
+            let tone = output_config
+                .and_then(|c| c.hdr_tone_map)
+                .unwrap_or_default();
             let mut hdr = None;
             let mut target = ConnectorColorState::default();
             let status = if !output_config.is_some_and(|c| c.hdr) {
@@ -1117,7 +1120,8 @@ impl Tty {
                             sdr_white as f32,
                             f32::from(plan.max_luminance),
                             panel.as_ref(),
-                        );
+                        )
+                        .with_tone_map(tone);
                         hdr = Some((WorkingSpace { sdr_white }, pass));
                         target = hdr_color_state(&plan);
                         Status::hdr10(&plan, sdr_white)

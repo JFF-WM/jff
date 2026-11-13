@@ -17,6 +17,7 @@ use jff_wm::config::{
 };
 use jff_wm::config::{RuleOutput, WindowFacts, WindowMatch};
 use jff_wm::desk::{Goto, Side};
+use jff_wm::primitives::hdr_output::ToneMap;
 
 fn mods(ctrl: bool, alt: bool, shift: bool, logo: bool) -> ModifiersState {
     ModifiersState {
@@ -1580,4 +1581,80 @@ fn check_is_quiet_about_a_complete_hdr_setup() {
     assert!(Config::check_text(r#"outputs { output "DP-1" { hdr; } }"#)
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn hdr_tone_map_takes_a_known_curve() {
+    let config = Config::parse(
+        r#"outputs {
+            output "DP-1" { hdr; hdr-tone-map "bt2390"; }
+            output "DP-2" { hdr; hdr-tone-map "knee"; }
+            output "DP-3" { hdr; }
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.output("DP-1").unwrap().hdr_tone_map,
+        Some(ToneMap::Bt2390)
+    );
+    assert_eq!(
+        config.output("DP-2").unwrap().hdr_tone_map,
+        Some(ToneMap::Knee)
+    );
+    assert_eq!(config.output("DP-3").unwrap().hdr_tone_map, None);
+}
+
+#[test]
+fn hdr_tone_map_fails_with_the_names_it_takes() {
+    for bad in [
+        "\"linear\"",
+        "\"BT2390\"",
+        "3",
+        "#true",
+        "\"knee\" \"bt2390\"",
+        "",
+    ] {
+        let text = format!(r#"outputs {{ output "DP-1" {{ hdr-tone-map {bad}; }} }}"#);
+        let message = format!("{:#}", Config::parse(&text).unwrap_err());
+        assert!(message.contains("hdr-tone-map"), "{message}");
+        assert!(
+            message.contains("\"knee\"") && message.contains("\"bt2390\""),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn a_later_hdr_tone_map_replaces_an_earlier_one() {
+    let config = Config::parse(
+        r#"outputs { output "DP-1" { hdr; hdr-tone-map "bt2390"; hdr-tone-map "knee"; } }"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.output("DP-1").unwrap().hdr_tone_map,
+        Some(ToneMap::Knee)
+    );
+}
+
+#[test]
+fn check_warns_about_a_tone_map_without_hdr() {
+    let warnings = Config::check_text(
+        r#"outputs {
+            output "DP-1" { hdr-tone-map "bt2390"; }
+            output "DP-2" { hdr "off"; hdr-peak 400; hdr-tone-map "knee"; }
+            output "DP-3" { hdr; hdr-tone-map "bt2390"; }
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(warnings[0].contains("\"DP-1\"") && warnings[0].contains("hdr-tone-map"));
+    assert!(warnings[1].contains("hdr-peak and hdr-tone-map"));
+    assert!(warnings.iter().all(|w| w.contains("no `hdr`")));
+}
+
+#[test]
+fn check_is_quiet_about_a_tone_map_with_hdr() {
+    let text =
+        r#"outputs { output "DP-1" { hdr; sdr-white 120; hdr-peak 400; hdr-tone-map "bt2390"; } }"#;
+    assert!(Config::check_text(text).unwrap().is_empty());
 }

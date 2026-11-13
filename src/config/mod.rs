@@ -21,7 +21,8 @@
 //! `hdr` inside an `output` signals that monitor as HDR10 (PQ, BT.2020) when its EDID and the connector allow it, and is off by default.
 //! `sdr-white` sets the luminance in cd/m² that SDR white is shown at on an HDR monitor (203 by default, 10 to 1000).
 //! `hdr-peak` replaces the peak luminance the EDID states (100 to 10000 cd/m²): the frame is mapped to it and it is what the monitor is told and what clients are told.
-//! `sdr-white` and `hdr-peak` only apply to a monitor with `hdr`, `jff check-config` warns when they stand alone.
+//! `hdr-tone-map "knee"|"bt2390"` picks how the frame is rolled off under that peak (`"knee"` by default).
+//! `sdr-white`, `hdr-peak` and `hdr-tone-map` only apply to a monitor with `hdr`, `jff check-config` warns when they stand alone.
 //!
 //! Two things that bite when editing the file by hand:
 //! - `adaptive-sync` takes a quoted string (`"off"` / `"fullscreen"` / `"always"`), not a
@@ -42,7 +43,7 @@ use kdl::{KdlDocument, KdlNode, KdlValue};
 use smithay::input::keyboard::{xkb, Keysym, ModifiersState, XkbConfig};
 
 use crate::desk::{Goto, Side};
-use crate::primitives::hdr_output::{self, HDR_PEAK_RANGE, SDR_WHITE_RANGE};
+use crate::primitives::hdr_output::{self, ToneMap, HDR_PEAK_RANGE, SDR_WHITE_RANGE};
 
 /// Default number of workspaces.
 pub const DEFAULT_WORKSPACES: usize = 9;
@@ -312,6 +313,8 @@ pub struct OutputConfig {
     pub sdr_white: Option<u32>,
     /// Peak luminance of an HDR monitor in cd/m², used instead of the one its EDID states.
     pub hdr_peak: Option<u32>,
+    /// How an HDR monitor's frame is rolled off under its peak, the knee when not set.
+    pub hdr_tone_map: Option<ToneMap>,
 }
 
 impl OutputConfig {
@@ -323,6 +326,7 @@ impl OutputConfig {
             let stray: Vec<&str> = [
                 ("sdr-white", self.sdr_white.is_some()),
                 ("hdr-peak", self.hdr_peak.is_some()),
+                ("hdr-tone-map", self.hdr_tone_map.is_some()),
             ]
             .into_iter()
             .filter_map(|(key, set)| set.then_some(key))
@@ -2184,6 +2188,23 @@ fn parse_output(node: &KdlNode) -> anyhow::Result<OutputConfig> {
             "hdr" => config.hdr = flag_value(child)?,
             "sdr-white" => config.sdr_white = Some(nits_arg(child, &SDR_WHITE_RANGE, 203)?),
             "hdr-peak" => config.hdr_peak = Some(nits_arg(child, &HDR_PEAK_RANGE, 400)?),
+            "hdr-tone-map" => {
+                config.hdr_tone_map = Some(match args.as_slice() {
+                    [value] => value
+                        .as_string()
+                        .and_then(ToneMap::from_name)
+                        .with_context(|| {
+                            format!(
+                                "hdr-tone-map takes {}: hdr-tone-map \"bt2390\"",
+                                ToneMap::NAMES.map(|n| format!("\"{n}\"")).join(" or ")
+                            )
+                        })?,
+                    _ => bail!(
+                        "hdr-tone-map takes one value, {}: hdr-tone-map \"bt2390\"",
+                        ToneMap::NAMES.map(|n| format!("\"{n}\"")).join(" or ")
+                    ),
+                });
+            }
             "icc-profile" => {
                 let path = match args.as_slice() {
                     [value] => value

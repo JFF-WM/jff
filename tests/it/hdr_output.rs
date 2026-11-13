@@ -5,8 +5,9 @@ use jff_wm::primitives::color::{
 };
 use jff_wm::primitives::gamut::{Conversion, Curve};
 use jff_wm::primitives::hdr_output::{
-    hlg_display_nits, hlg_inverse_oetf, low_headroom, pq_decode, pq_encode, tone_map, FinalPass,
-    BT2020_LUMA, DEFAULT_SDR_WHITE, HDR_PEAK_RANGE, PQ_PEAK, SDR_WHITE_RANGE,
+    bt2390_tone_map, hlg_display_nits, hlg_inverse_oetf, low_headroom, pq_decode, pq_encode,
+    tone_map, FinalPass, ToneMap, BT2020_LUMA, BT2390_SOURCE_PEAK, DEFAULT_SDR_WHITE,
+    HDR_PEAK_RANGE, PQ_PEAK, SDR_WHITE_RANGE,
 };
 
 const PEAK: f32 = 301.8;
@@ -390,4 +391,117 @@ fn the_hlg_shader_params_are_kind_three_and_the_source_luma() {
     assert_eq!(curve.shader_params(), [3.0, 0.0]);
     assert_eq!(curve.shader_luma(), BT2020_LUMA);
     assert_eq!(Curve::Pq.shader_luma(), [0.0; 3]);
+}
+
+const PEAKS: [f32; 5] = [100.0, 302.0, 600.0, 999.0, 4000.0];
+
+#[test]
+fn bt2390_never_exceeds_the_peak_and_never_falls() {
+    for peak in PEAKS {
+        let mut last = 0.0;
+        for step in 0..=24_000 {
+            let nits = step as f32 * 0.5;
+            let out = bt2390_tone_map(nits, peak);
+            assert!(out <= peak, "peak {peak}: {nits} gave {out}");
+            assert!(
+                out >= last,
+                "peak {peak}: fell at {nits}, {last} then {out}"
+            );
+            last = out;
+        }
+    }
+}
+
+#[test]
+fn bt2390_has_its_endpoints() {
+    for peak in PEAKS {
+        assert_eq!(bt2390_tone_map(0.0, peak), 0.0);
+        // the source's own peak lands on the panel's peak, and so does anything above it
+        let top = bt2390_tone_map(BT2390_SOURCE_PEAK, peak);
+        assert!(
+            (top - peak.min(BT2390_SOURCE_PEAK)).abs() < 0.5,
+            "peak {peak}: {top}"
+        );
+        // (the PQ round trip in f32 is good to about 3e-5 of the value)
+        assert!((bt2390_tone_map(10_000.0, peak) - peak).abs() < 1e-3 * peak);
+    }
+    // a negative value is black
+    assert_eq!(bt2390_tone_map(-5.0, 302.0), 0.0);
+}
+
+#[test]
+fn bt2390_is_the_identity_under_its_knee() {
+    // Knees in cd/m² for a source of 1000: about 28 at a peak of 100, 163 at 302, 464 at 600.
+    for (peak, knee) in [
+        (100.0, 27.0),
+        (302.0, 162.0),
+        (600.0, 463.0),
+        (999.0, 997.0),
+    ] {
+        for step in 0..=100 {
+            let nits = knee * step as f32 / 100.0;
+            assert_eq!(bt2390_tone_map(nits, peak), nits, "peak {peak}");
+        }
+        // and it bends above it
+        assert!(bt2390_tone_map(knee * 1.5 + 20.0, peak) < knee * 1.5 + 20.0);
+    }
+}
+
+#[test]
+fn bt2390_is_continuous_at_its_knee() {
+    // the spline starts on the identity, so the step across the knee is no bigger than the step in the input, up to the f32 round trip
+    let peak = 302.0;
+    let mut last = bt2390_tone_map(100.0, peak);
+    for step in 1..=400 {
+        let nits = 100.0 + step as f32 * 0.25;
+        let out = bt2390_tone_map(nits, peak);
+        assert!(out - last <= 0.25 + 0.02, "jump at {nits}: {last} to {out}");
+        last = out;
+    }
+}
+
+#[test]
+fn bt2390_leaves_a_bright_enough_panel_alone() {
+    for peak in [1000.0, 1500.0, 4000.0] {
+        for nits in [0.0, 100.0, 500.0, 1000.0] {
+            assert_eq!(bt2390_tone_map(nits, peak), nits.min(peak));
+        }
+    }
+}
+
+#[test]
+fn the_final_pass_follows_the_tone_curve_it_is_given() {
+    let knee = FinalPass::new(203.0, 302.0, None);
+    assert_eq!(knee.tone, ToneMap::Knee);
+    let bt2390 = knee.with_tone_map(ToneMap::Bt2390);
+    assert_ne!(knee, bt2390);
+    assert_eq!(bt2390.with_tone_map(ToneMap::Knee), knee);
+    // under both knees the two agree: 0.25 of SDR white is 51 cd/m²
+    let dim = [0.25; 3];
+    assert_eq!(knee.apply(dim), bt2390.apply(dim));
+    // above them they differ, and neither goes past the panel's peak code
+    let bright = [4.0; 3];
+    assert_ne!(knee.apply(bright), bt2390.apply(bright));
+    let peak_code = pq_encode(302.0 / PQ_PEAK);
+    for pass in [knee, bt2390] {
+        for v in pass.apply(bright) {
+            assert!(v <= peak_code + 1e-4, "{v} over {peak_code}");
+        }
+    }
+}
+
+#[test]
+fn the_tone_curve_names_round_trip() {
+    for (name, tone) in ToneMap::NAMES
+        .into_iter()
+        .zip([ToneMap::Knee, ToneMap::Bt2390])
+    {
+        assert_eq!(ToneMap::from_name(name), Some(tone));
+        assert_eq!(tone.name(), name);
+    }
+    assert_eq!(ToneMap::from_name("BT2390"), None);
+    assert_eq!(ToneMap::from_name(""), None);
+    assert_eq!(ToneMap::default(), ToneMap::Knee);
+    assert_eq!(ToneMap::Knee.shader_param(), 0.0);
+    assert_eq!(ToneMap::Bt2390.shader_param(), 1.0);
 }
