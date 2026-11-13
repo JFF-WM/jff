@@ -311,3 +311,9 @@ fn a_link_of_ten_bits_or_more_does_not_band() {
 fn the_bpc_reason_names_the_least_it_wants() {
     assert!(Unavailable::BpcTooLow(6).to_string().contains("at least 8"));
 }
+
+#[test]
+fn a_refused_signal_reads_in_plain_words() {
+    assert!(Unavailable::SignalRejected.to_string().contains("refused"));
+    assert!(!Status::Sdr(Unavailable::SignalRejected).low_headroom());
+}

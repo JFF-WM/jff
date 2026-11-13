@@ -1620,6 +1620,10 @@ impl JffState {
                 );
                 lit.color_target = ConnectorColorState::default();
                 lit.hdr = None;
+                lit.hdr_plan = None;
+                lit.hdr_content = (None, None);
+                lit.hdr_scanout = HdrScanout::default();
+                lit.hdr_status = Status::Sdr(Unavailable::SignalRejected);
                 let _ = lit.compositor.use_color_state(lit.color_target);
             }
         }

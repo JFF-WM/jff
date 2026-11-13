@@ -45,6 +45,8 @@ pub enum Unavailable {
     BpcTooLow(u32),
     /// The renderer cannot draw into a 16-bit float texture.
     NoFloatTarget,
+    /// The kernel refused the HDR signal when it was committed.
+    SignalRejected,
 }
 
 impl std::fmt::Display for Unavailable {
@@ -74,6 +76,7 @@ impl std::fmt::Display for Unavailable {
             Unavailable::NoFloatTarget => {
                 f.write_str("the renderer cannot draw into a 16-bit float texture")
             }
+            Unavailable::SignalRejected => f.write_str("the kernel refused the HDR signal"),
         }
     }
 }
