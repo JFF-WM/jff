@@ -210,7 +210,7 @@ fn the_status_reads_as_a_log_line() {
     assert_eq!(Status::Off.to_string(), "HDR off");
     assert_eq!(
         Status::Sdr(Unavailable::NoPq).to_string(),
-        "staying SDR, the monitor does not list the PQ transfer function"
+        "staying SDR, the monitor lists neither PQ nor HLG with static metadata type 1"
     );
 }
 
