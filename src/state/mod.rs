@@ -18,7 +18,7 @@ use smithay::backend::input::{Keycode, TabletToolDescriptor};
 use smithay::input::tablet::TabletSeatHandler;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::Output;
-use smithay::reexports::calloop::{LoopHandle, LoopSignal, RegistrationToken};
+use smithay::reexports::calloop::{Interest, LoopHandle, LoopSignal, RegistrationToken};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::{
     self, WmCapabilities,
 };
@@ -716,11 +716,13 @@ impl CompositorHandler for JffState {
     }
 
     fn new_surface(&mut self, surface: &WlSurface) {
-        // Explicit sync: a commit with an acquire point is held back until the GPU finishes
-        // the client's rendering, then the compositor state is told to go on.
+        // A commit with a dmabuf is held back until the GPU has finished the client's rendering,
+        // then the compositor state is told to go on. Without that the frame that samples the
+        // buffer waits on the client's fence on the GPU, and the compositor waits on that frame:
+        // a client that is stopped or stuck mid-render would freeze everything.
         add_pre_commit_hook::<Self, _>(surface, |state, _dh, surface| {
             let mut acquire_point = None;
-            let has_dmabuf = with_states(surface, |data| {
+            let dmabuf = with_states(surface, |data| {
                 acquire_point.clone_from(
                     &data
                         .cached_state
@@ -733,28 +735,48 @@ impl CompositorHandler for JffState {
                     .pending()
                     .buffer
                     .as_ref()
-                    .is_some_and(|assignment| match assignment {
-                        BufferAssignment::NewBuffer(buffer) => get_dmabuf(buffer).is_ok(),
-                        _ => false,
+                    .and_then(|assignment| match assignment {
+                        BufferAssignment::NewBuffer(buffer) => get_dmabuf(buffer).ok().cloned(),
+                        _ => None,
                     })
             });
-            let (true, Some(acquire_point)) = (has_dmabuf, acquire_point) else {
-                return;
-            };
-            let Ok((blocker, source)) = acquire_point.generate_blocker() else {
+            let Some(dmabuf) = dmabuf else {
                 return;
             };
             let Some(client) = surface.client() else {
                 return;
             };
-            let inserted = state.loop_handle.insert_source(source, move |_, _, data| {
-                let dh = data.display_handle.clone();
-                data.client_compositor_state(&client)
-                    .blocker_cleared(data, &dh);
-                Ok(())
-            });
-            if inserted.is_ok() {
-                add_blocker(surface, blocker);
+            match acquire_point {
+                // Explicit sync: the client says which fence to wait for.
+                Some(acquire_point) => {
+                    let Ok((blocker, source)) = acquire_point.generate_blocker() else {
+                        return;
+                    };
+                    let inserted = state.loop_handle.insert_source(source, move |_, _, data| {
+                        let dh = data.display_handle.clone();
+                        data.client_compositor_state(&client)
+                            .blocker_cleared(data, &dh);
+                        Ok(())
+                    });
+                    if inserted.is_ok() {
+                        add_blocker(surface, blocker);
+                    }
+                }
+                // Implicit sync: the fences ride on the dmabuf itself, wait until it is readable.
+                None => {
+                    let Ok((blocker, source)) = dmabuf.generate_blocker(Interest::READ) else {
+                        return;
+                    };
+                    let inserted = state.loop_handle.insert_source(source, move |_, _, data| {
+                        let dh = data.display_handle.clone();
+                        data.client_compositor_state(&client)
+                            .blocker_cleared(data, &dh);
+                        Ok(())
+                    });
+                    if inserted.is_ok() {
+                        add_blocker(surface, blocker);
+                    }
+                }
             }
         });
     }
