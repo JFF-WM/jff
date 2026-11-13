@@ -217,6 +217,22 @@ fn send_surface_feedback(
     }
 }
 
+/// A failure in the HDR frame path, remembered per output so each kind is logged once.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HdrFault {
+    Target,
+    Draw,
+}
+
+/// Record `fault` and say whether it is new, that is, whether it should be logged.
+fn note_hdr_fault(last: &mut Option<HdrFault>, fault: HdrFault) -> bool {
+    if *last == Some(fault) {
+        return false;
+    }
+    *last = Some(fault);
+    true
+}
+
 /// How a monitor in HDR mode is drawn.
 struct HdrOutput {
     space: WorkingSpace,
@@ -263,6 +279,8 @@ struct TtyOutput {
     hdr: Option<HdrOutput>,
     /// What the last sync decided about HDR, kept to log only when it changes.
     hdr_status: Status,
+    /// The HDR failure logged last, cleared when a frame succeeds or the HDR settings are synced.
+    hdr_fault: Option<HdrFault>,
     /// The swapchain was made with the 10-bit formats first, which only a monitor that asked for `hdr` when it was lit gets.
     hdr_formats: bool,
     /// Feedback carrying this monitor's scanout tranche (see [`build_dmabuf_feedback`]).
@@ -1003,6 +1021,7 @@ impl Tty {
             color_dirty: false,
             hdr: None,
             hdr_status: Status::Off,
+            hdr_fault: None,
             hdr_formats: hdr_wanted,
             content_hint: false,
             content_game: false,
@@ -1056,6 +1075,7 @@ impl Tty {
         } = &mut *self;
         for lit in outputs.values_mut() {
             let name = lit.output.name();
+            lit.hdr_fault = None;
             let edid = read_edid(drm, lit.connector);
             if edid != lit.edid {
                 if let Some(info) = &edid {
@@ -1858,10 +1878,12 @@ impl JffState {
                 hdr.frame = match HdrFrame::new(&mut *renderer, &lit.output, pass) {
                     Ok(frame) => Some(frame),
                     Err(err) => {
-                        tracing::warn!(
-                            "monitor {}: cannot make the HDR target: {err}",
-                            lit.output.name()
-                        );
+                        if note_hdr_fault(&mut lit.hdr_fault, HdrFault::Target) {
+                            tracing::warn!(
+                                "monitor {}: cannot make the HDR target: {err}",
+                                lit.output.name()
+                            );
+                        }
                         None
                     }
                 };
@@ -1878,14 +1900,19 @@ impl JffState {
                 .map(|f| f.render(&mut *renderer, &linear, clear))
             {
                 Some(Ok((element, states))) => {
+                    if lit.hdr_fault.take().is_some() {
+                        tracing::info!("monitor {}: the HDR frame draws again", lit.output.name());
+                    }
                     elements.push(JffElement::Hdr(element));
                     hdr_states = Some(states);
                 }
                 Some(Err(err)) => {
-                    tracing::warn!(
-                        "monitor {}: error drawing the HDR frame: {err}",
-                        lit.output.name()
-                    );
+                    if note_hdr_fault(&mut lit.hdr_fault, HdrFault::Draw) {
+                        tracing::warn!(
+                            "monitor {}: error drawing the HDR frame: {err}",
+                            lit.output.name()
+                        );
+                    }
                     hdr.frame = None;
                     hdr_failed = true;
                 }
