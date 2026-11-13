@@ -25,8 +25,17 @@ pub const LOW_HEADROOM: f32 = 2.0;
 /// Where the tone curve starts to roll off, as a fraction of the peak.
 const KNEE: f32 = 0.75;
 
-/// Peak luminance of the content the BT.2390 curve is fitted to, in cd/m². Light above it is shown at the panel's peak.
+/// Peak luminance of the content the BT.2390 curve is fitted to on a panel under it, in cd/m².
 pub const BT2390_SOURCE_PEAK: f32 = 1000.0;
+
+/// Content peak the BT.2390 curve is fitted to for a panel of `peak`: 1000 under that, else four times the panel's up to the PQ top, so a bright panel still rolls off what is above it.
+pub fn bt2390_source_peak(peak: f32) -> f32 {
+    if peak < BT2390_SOURCE_PEAK {
+        BT2390_SOURCE_PEAK
+    } else {
+        (peak * 4.0).min(PQ_PEAK)
+    }
+}
 
 const M1: f32 = 2610.0 / 16384.0;
 const M2: f32 = 2523.0 / 4096.0 * 128.0;
@@ -114,7 +123,7 @@ pub enum ToneMap {
     /// Untouched up to a knee at 75 percent of the peak, then an exponential roll-off.
     #[default]
     Knee,
-    /// The BT.2390 EETF, a spline in the PQ domain, fitted to content up to [`BT2390_SOURCE_PEAK`].
+    /// The BT.2390 EETF, a spline in the PQ domain, fitted to content up to [`bt2390_source_peak`].
     Bt2390,
 }
 
@@ -146,16 +155,17 @@ impl ToneMap {
     }
 }
 
-/// Luminance of a pixel, in cd/m², squeezed under `peak` with the BT.2390 EETF: untouched up to its knee, then a Hermite spline in the PQ domain that ends on the peak. Black is taken as 0 on both sides, so there is no black lift, and light above [`BT2390_SOURCE_PEAK`] is shown at the peak.
+/// Luminance of a pixel, in cd/m², squeezed under `peak` with the BT.2390 EETF: untouched up to its knee, then a Hermite spline in the PQ domain that ends on the peak. Black is taken as 0 on both sides, so there is no black lift, and light above [`bt2390_source_peak`] is shown at the peak.
 pub fn bt2390_tone_map(nits: f32, peak: f32) -> f32 {
     let nits = nits.max(0.0);
-    if peak >= BT2390_SOURCE_PEAK {
+    let source_peak = bt2390_source_peak(peak);
+    if peak >= source_peak {
         return nits.min(peak);
     }
-    let source = pq_encode(BT2390_SOURCE_PEAK / PQ_PEAK);
+    let source = pq_encode(source_peak / PQ_PEAK);
     let max_lum = pq_encode(peak / PQ_PEAK) / source;
     let knee = (1.5 * max_lum - 0.5).max(0.0);
-    let e = pq_encode(nits.min(BT2390_SOURCE_PEAK) / PQ_PEAK) / source;
+    let e = pq_encode(nits.min(source_peak) / PQ_PEAK) / source;
     if e <= knee {
         return nits;
     }

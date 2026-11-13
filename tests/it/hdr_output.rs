@@ -5,9 +5,9 @@ use jff_wm::primitives::color::{
 };
 use jff_wm::primitives::gamut::{Conversion, Curve};
 use jff_wm::primitives::hdr_output::{
-    bt2390_tone_map, hlg_display_nits, hlg_inverse_oetf, low_headroom, pq_decode, pq_encode,
-    tone_map, FinalPass, ToneMap, BT2020_LUMA, BT2390_SOURCE_PEAK, DEFAULT_SDR_WHITE,
-    HDR_PEAK_RANGE, PQ_PEAK, SDR_WHITE_RANGE,
+    bt2390_source_peak, bt2390_tone_map, hlg_display_nits, hlg_inverse_oetf, low_headroom,
+    pq_decode, pq_encode, tone_map, FinalPass, ToneMap, BT2020_LUMA, BT2390_SOURCE_PEAK,
+    DEFAULT_SDR_WHITE, HDR_PEAK_RANGE, PQ_PEAK, SDR_WHITE_RANGE,
 };
 
 const PEAK: f32 = 301.8;
@@ -403,8 +403,9 @@ fn bt2390_never_exceeds_the_peak_and_never_falls() {
             let nits = step as f32 * 0.5;
             let out = bt2390_tone_map(nits, peak);
             assert!(out <= peak, "peak {peak}: {nits} gave {out}");
+            // the PQ round trip in f32 can step back by a few millionths of the peak
             assert!(
-                out >= last,
+                out >= last - 1e-4 * peak,
                 "peak {peak}: fell at {nits}, {last} then {out}"
             );
             last = out;
@@ -461,12 +462,32 @@ fn bt2390_is_continuous_at_its_knee() {
 }
 
 #[test]
-fn bt2390_leaves_a_bright_enough_panel_alone() {
-    for peak in [1000.0, 1500.0, 4000.0] {
-        for nits in [0.0, 100.0, 500.0, 1000.0] {
-            assert_eq!(bt2390_tone_map(nits, peak), nits.min(peak));
-        }
+fn bt2390_rolls_a_bright_panel_off_instead_of_clipping() {
+    // 4000 cd/m² content on a 1000 cd/m² panel keeps its order under the peak
+    let low = bt2390_tone_map(2000.0, 1000.0);
+    let mid = bt2390_tone_map(3000.0, 1000.0);
+    let top = bt2390_tone_map(4000.0, 1000.0);
+    assert!(low < mid && mid < top && top <= 1000.0, "{low} {mid} {top}");
+    // the dark half is left alone
+    for nits in [0.0, 50.0, 100.0, 203.0] {
+        assert_eq!(bt2390_tone_map(nits, 1000.0), nits);
     }
+}
+
+#[test]
+fn bt2390_leaves_a_panel_at_the_pq_top_alone() {
+    for nits in [0.0, 100.0, 1000.0, 9000.0] {
+        assert_eq!(bt2390_tone_map(nits, 10_000.0), nits);
+    }
+}
+
+#[test]
+fn the_source_peak_follows_the_panel_from_1000_up() {
+    assert_eq!(bt2390_source_peak(302.0), BT2390_SOURCE_PEAK);
+    assert_eq!(bt2390_source_peak(999.0), BT2390_SOURCE_PEAK);
+    assert_eq!(bt2390_source_peak(1000.0), 4000.0);
+    assert_eq!(bt2390_source_peak(4000.0), PQ_PEAK);
+    assert_eq!(bt2390_source_peak(PQ_PEAK), PQ_PEAK);
 }
 
 #[test]

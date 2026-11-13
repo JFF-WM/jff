@@ -65,15 +65,16 @@ float pq_decode1(float code) {
 }
 
 // Luminance in cd/m² squeezed under `peak` with the BT.2390 EETF: untouched up to its knee, then a
-// Hermite spline in the PQ domain that ends on the peak. No black lift, and light above
-// BT2390_SOURCE_PEAK is shown at the peak.
+// Hermite spline in the PQ domain that ends on the peak. No black lift, and light above the source
+// peak is shown at the peak. The source peak is `bt2390_source_peak` in primitives/hdr_output.rs.
 float bt2390_tone_map(float nits) {
-    if (peak >= BT2390_SOURCE_PEAK)
+    float source_peak = peak < BT2390_SOURCE_PEAK ? BT2390_SOURCE_PEAK : min(peak * 4.0, 10000.0);
+    if (peak >= source_peak)
         return min(nits, peak);
-    float source = pq_encode1(BT2390_SOURCE_PEAK);
+    float source = pq_encode1(source_peak);
     float max_lum = pq_encode1(peak) / source;
     float ks = max(1.5 * max_lum - 0.5, 0.0);
-    float e = pq_encode1(min(nits, BT2390_SOURCE_PEAK)) / source;
+    float e = pq_encode1(min(nits, source_peak)) / source;
     if (e <= ks)
         return nits;
     float t = (e - ks) / (1.0 - ks);
