@@ -151,7 +151,7 @@ pub fn build() -> Vec<Page> {
         Page {
             id: "displays",
             title: "Displays",
-            keywords: "monitor output resolution mode refresh rate hdr tone map bt2390 knee sdr white peak icc profile position vrr tearing color management",
+            keywords: "monitor output resolution mode refresh rate hdr tone map bt2390 knee content metadata sdr white peak icc profile position vrr tearing color management",
             body: Body::Outputs(displays()),
         },
         Page {
@@ -902,6 +902,12 @@ pub fn output_fields() -> Vec<Field> {
             "How highlights brighter than the display can show are rolled off. Only used with HDR on",
             TONE_MAP,
             "knee",
+        ),
+        flag(
+            &["hdr-content-metadata"],
+            "Use Content Brightness",
+            "Fits the roll-off to the peak the content states. Only used with HDR on",
+            true,
         ),
         text(&["icc-profile"], "ICC Profile Path"),
         field(
