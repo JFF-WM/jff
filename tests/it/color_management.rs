@@ -51,10 +51,11 @@ fn offered_values_have_the_protocol_numbers() {
             .iter()
             .map(|f| f.raw())
             .collect::<Vec<_>>(),
-        [1, 2, 3, 4, 5]
+        [1, 2, 3, 4, 5, 7]
     );
-    // No ICC (0), extended target volume (6), Windows (7, 8).
+    // No ICC (0) and no extended target volume (6), Windows-scRGB (7) is offered.
     assert!(SUPPORTED_FEATURES.contains(&Feature::Parametric));
+    assert!(SUPPORTED_FEATURES.contains(&Feature::WindowsScrgb));
 
     let primaries: Vec<u32> = SUPPORTED_PRIMARIES.iter().map(|p| p.raw()).collect();
     assert_eq!(primaries, [1, 3, 4, 6, 8, 9, 10]);
@@ -71,10 +72,55 @@ fn offered_values_have_the_protocol_numbers() {
     for raw in tfs {
         assert_eq!(NamedTf::from_raw(raw).unwrap().raw(), raw);
     }
-    // BT.1886, linear, log and the rest are not offered.
+    // BT.1886, linear, log and the rest are not offered. Extended linear (5) is not one a client
+    // can name either: only the Windows-scRGB description has it.
     for raw in [0, 1, 4, 5, 6, 7, 8, 10, 12, 14] {
         assert_eq!(NamedTf::from_raw(raw), None);
     }
+    assert_eq!(NamedTf::ExtLinear.raw(), 5);
+    assert!(!SUPPORTED_TFS.contains(&NamedTf::ExtLinear));
+}
+
+/// The numbers jff sends are the protocol's: if a wayland-protocols update renumbers the feature
+/// or the curve, `supported_feature` would announce something else.
+#[test]
+fn the_scrgb_numbers_are_the_protocols() {
+    use smithay::reexports::wayland_protocols::wp::color_management::v1::server::wp_color_manager_v1;
+
+    assert_eq!(
+        u32::from(wp_color_manager_v1::Feature::WindowsScrgb),
+        Feature::WindowsScrgb.raw()
+    );
+    assert_eq!(
+        u32::from(wp_color_manager_v1::TransferFunction::ExtLinear),
+        NamedTf::ExtLinear.raw()
+    );
+}
+
+#[test]
+fn windows_scrgb_is_srgb_primaries_with_an_extended_linear_curve() {
+    let scrgb = ImageDescription::windows_scrgb();
+    let srgb = ImageDescription::srgb();
+    assert_eq!(scrgb.primaries, srgb.primaries);
+    assert_eq!(scrgb.tf, TransferFunction::Named(NamedTf::ExtLinear));
+    // 1.0 is 80 cd/m², and that is also the reference white
+    assert_eq!(scrgb.luminance.reference, 80);
+    assert_eq!(scrgb.luminance, Luminance::SCRGB);
+    assert_eq!((scrgb.max_cll, scrgb.max_fall), (None, None));
+    assert_ne!(scrgb, srgb);
+    assert_eq!(NamedTf::ExtLinear.name(), "ext_linear");
+}
+
+#[test]
+fn the_scrgb_description_tells_what_it_is() {
+    let events = ImageDescription::windows_scrgb().info();
+    assert!(events.contains(&InfoEvent::TfNamed(NamedTf::ExtLinear.raw())));
+    assert!(events.contains(&InfoEvent::PrimariesNamed(SRGB)));
+    assert!(events.contains(&InfoEvent::Luminances {
+        min: Luminance::SCRGB.min,
+        max: Luminance::SCRGB.max,
+        reference: 80,
+    }));
 }
 
 #[test]

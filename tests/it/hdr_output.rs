@@ -526,3 +526,74 @@ fn the_tone_curve_names_round_trip() {
     assert_eq!(ToneMap::Knee.shader_param(), 0.0);
     assert_eq!(ToneMap::Bt2390.shader_param(), 1.0);
 }
+
+// ---- Windows-scRGB (create_windows_scrgb): fp16 games on an HDR output
+
+#[test]
+fn extended_linear_is_not_clamped() {
+    let curve = Curve::of(TransferFunction::Named(NamedTf::ExtLinear));
+    assert_eq!(curve, Curve::Linear);
+    assert_eq!(curve.decode(0.5), 0.5);
+    assert_eq!(curve.decode(3.0), 3.0);
+    assert_eq!(curve.decode(-0.25), -0.25);
+    assert_eq!(curve.shader_params(), [4.0, 0.0]);
+    assert!(!curve.is_absolute());
+    // as an output curve it would only clip, an HDR output is encoded by its final pass
+    assert_eq!(curve.encode(2.0), 1.0);
+}
+
+#[test]
+fn scrgb_reference_white_lands_below_sdr_white_and_highlights_keep_their_nits() {
+    let scrgb = ImageDescription::windows_scrgb();
+    let conversion = Conversion::to_working(&scrgb, 203.0);
+    assert_eq!(conversion.decode, Curve::Linear);
+    // 1.0 is 80 cd/m², the working space counts in units of 203 cd/m²
+    close(conversion.apply([1.0; 3]), [80.0 / 203.0; 3], 1e-4);
+    // 203 cd/m² is 203 / 80 in scRGB, and SDR white in the working space
+    close(conversion.apply([203.0 / 80.0; 3]), [1.0; 3], 1e-4);
+    // a 1000 cd/m² highlight is not clipped on its way in
+    close(
+        conversion.apply([1000.0 / 80.0; 3]),
+        [1000.0 / 203.0; 3],
+        1e-3,
+    );
+    // moving SDR white moves where scRGB's 1.0 lands, light stays where it is in cd/m²
+    let other = Conversion::to_working(&scrgb, 100.0);
+    close(other.apply([1.0; 3]), [0.8; 3], 1e-4);
+}
+
+#[test]
+fn scrgb_colors_outside_the_srgb_gamut_are_not_lost_before_the_matrix() {
+    let conversion = Conversion::to_working(&ImageDescription::windows_scrgb(), 203.0);
+    // a negative channel is a color outside sRGB, which BT.2020 can hold: nothing is clamped
+    // before the matrix, so a saturated green (negative red and blue in sRGB) stays green
+    let green = conversion.apply([-0.2, 1.0, -0.1]);
+    assert!(green[1] > 0.0);
+    assert!(green.iter().all(|v| *v >= 0.0));
+    // darkness below zero in every channel ends at zero
+    close(conversion.apply([-0.5; 3]), [0.0; 3], 1e-6);
+}
+
+#[test]
+fn scrgb_is_converted_everywhere_plain_srgb_is_left_alone() {
+    let scrgb = ImageDescription::windows_scrgb();
+    assert!(!jff_wm::primitives::gamut::is_plain_srgb(&scrgb));
+    // on an SDR output it needs a conversion even with the same primaries
+    let to_sdr = Conversion::between(&scrgb, &ImageDescription::srgb()).unwrap();
+    // scRGB's reference white is the SDR output's white, what is above clips
+    close(to_sdr.apply([1.0; 3]), [1.0; 3], 1e-4);
+    close(to_sdr.apply([4.0; 3]), [1.0; 3], 1e-4);
+    // and the curve is the sRGB one on the way out: linear 0.2140 is about the code 0.5
+    close(to_sdr.apply([0.2140; 3]), [0.5; 3], 1e-3);
+}
+
+#[test]
+fn the_scrgb_conversion_has_its_own_tag() {
+    let srgb = Conversion::to_working(&ImageDescription::srgb(), 203.0);
+    let scrgb = Conversion::to_working(&ImageDescription::windows_scrgb(), 203.0);
+    assert_ne!(srgb.tag(), scrgb.tag());
+    assert_ne!(
+        scrgb.tag(),
+        Conversion::to_working(&ImageDescription::windows_scrgb(), 100.0).tag()
+    );
+}

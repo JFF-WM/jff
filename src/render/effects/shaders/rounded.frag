@@ -43,7 +43,8 @@ uniform float ycc_on;
 // matrix whose rows are cm_r, cm_g, cm_b, brought into the output's gamut (`cm_map` 0: clipped,
 // 1: desaturated toward the grey of the same luminance, `cm_luma` is the output's luminance row)
 // and encoded with `cm_encode`. A curve is (kind, exponent): kind 1 is the piecewise sRGB curve,
-// kind 2 PQ, kind 3 HLG, anything else a pure power. Off when cm_on is 0.
+// kind 2 PQ, kind 3 HLG, kind 4 extended linear (scRGB: not clamped, so a value above 1 or
+// below 0 reaches the matrix), anything else a pure power. Off when cm_on is 0.
 // For an HDR output (cm_working 1) the result is not encoded: it is linear BT.2020 light in the
 // working space, 1.0 being the output's SDR white, with no gamut map. PQ (kind 2) and HLG (kind 3)
 // decode to a fraction of 10000 cd/m², `cm_scale` turns that into the output's units (1.0 for the
@@ -93,6 +94,8 @@ vec3 cm_hlg_to_light(vec3 v) {
 
 // Encoded value to linear light, for the curve described by `curve`.
 vec3 cm_to_light(vec3 v, vec2 curve) {
+    if (curve.x > 3.5)
+        return v;
     v = clamp(v, 0.0, 1.0);
     if (curve.x > 2.5)
         return cm_hlg_to_light(v);

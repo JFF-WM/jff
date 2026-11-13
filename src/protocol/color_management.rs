@@ -4,8 +4,10 @@
 //! This module keeps the books: a surface's image description and rendering intent are
 //! double-buffered like the rest of its state. Requests change the pending state, a
 //! `wl_surface.commit` makes it current, and [`surface_color`] reads the current one. Only
-//! parametric descriptions exist: ICC profiles and the Windows formats are refused with
-//! `unsupported_feature`, and mastering display metadata is checked and then not drawn differently. The rules for building a description, and
+//! parametric descriptions exist: ICC profiles are refused with
+//! `unsupported_feature`, and mastering display metadata is checked and then not drawn differently.
+//! Windows-scRGB (`create_windows_scrgb`, what Mesa's Vulkan WSI and Wine/Proton use for fp16
+//! HDR swapchains) is offered: sRGB primaries, an extended linear curve, 1.0 at 80 cd/m². The rules for building a description, and
 //! what is offered, are in `primitives/color.rs`.
 //!
 //! The renderer reads the books through [`surface_color_in`] and draws a surface whose
@@ -473,8 +475,20 @@ impl Dispatch<WpColorManagerV1, ()> for JffState {
                 data_init.init(obj, ParamsCreator::default());
             }
             Request::CreateWindowsScrgb { image_description } => {
-                init_dead(data_init, image_description);
-                resource.post_error(Error::UnsupportedFeature, "windows_scrgb is not supported");
+                // A pre-defined description, always ready. `get_information` is allowed on it
+                // (what `info` says about it is exact), which can only spare a client an error.
+                match state
+                    .color_management
+                    .describe(ImageDescription::windows_scrgb())
+                {
+                    Some(described) => init_ready(data_init, image_description, described, true),
+                    None => init_failed(
+                        data_init,
+                        image_description,
+                        wp_image_description_v1::Cause::OperatingSystem,
+                        "out of image description numbers",
+                    ),
+                }
             }
             _ => {}
         }

@@ -53,8 +53,7 @@ impl RenderIntent {
 /// Rendering intents clients are told they can use.
 pub const SUPPORTED_INTENTS: &[RenderIntent] = &[RenderIntent::Perceptual, RenderIntent::Relative];
 
-/// Optional parts of the protocol jff offers. ICC profiles, extended target volumes and the
-/// Windows formats are not.
+/// Optional parts of the protocol jff offers. ICC profiles and extended target volumes are not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Feature {
     /// 1.
@@ -67,6 +66,9 @@ pub enum Feature {
     SetLuminances,
     /// 5. A target color volume inside the primary one, taken as a hint and not drawn differently.
     SetMasteringDisplayPrimaries,
+    /// 7. `create_windows_scrgb`: the sRGB-primaries, extended-linear, 80 cd/m² reference
+    /// description that Mesa's Vulkan WSI and Wine/Proton use for fp16 HDR swapchains.
+    WindowsScrgb,
 }
 
 impl Feature {
@@ -77,6 +79,7 @@ impl Feature {
             Self::SetTfPower => 3,
             Self::SetLuminances => 4,
             Self::SetMasteringDisplayPrimaries => 5,
+            Self::WindowsScrgb => 7,
         }
     }
 }
@@ -88,6 +91,7 @@ pub const SUPPORTED_FEATURES: &[Feature] = &[
     Feature::SetTfPower,
     Feature::SetLuminances,
     Feature::SetMasteringDisplayPrimaries,
+    Feature::WindowsScrgb,
 ];
 
 fn supports(feature: Feature) -> bool {
@@ -274,7 +278,9 @@ impl NamedPrimaries {
 /// Primaries clients are told they can name.
 pub const SUPPORTED_PRIMARIES: &[NamedPrimaries] = &NamedPrimaries::ALL;
 
-/// Named transfer functions jff offers.
+/// Named transfer functions jff offers, plus [`NamedTf::ExtLinear`], which only the
+/// Windows-scRGB description has (it is not in [`NamedTf::ALL`], so a client cannot name it in
+/// a parametric creator).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NamedTf {
     /// 2. Display gamma 2.2.
@@ -287,6 +293,9 @@ pub enum NamedTf {
     St2084Pq,
     /// 13. Hybrid log-gamma (BT.2100-2), taken as shown on a 1000 cd/m² display.
     Hlg,
+    /// 5. Extended linear: light is the encoded value, which may be below 0 or above 1. Only
+    /// Windows-scRGB (`create_windows_scrgb`) uses it.
+    ExtLinear,
 }
 
 impl NamedTf {
@@ -311,6 +320,7 @@ impl NamedTf {
             Self::Gamma28 => "gamma28",
             Self::St2084Pq => "st2084_pq",
             Self::Hlg => "hlg",
+            Self::ExtLinear => "ext_linear",
         }
     }
 
@@ -318,6 +328,7 @@ impl NamedTf {
         match self {
             Self::Gamma22 => 2,
             Self::Gamma28 => 3,
+            Self::ExtLinear => 5,
             Self::Srgb => 9,
             Self::St2084Pq => 11,
             Self::Hlg => 13,
@@ -368,6 +379,15 @@ impl Luminance {
         max: 80,
         reference: 80,
     };
+
+    /// What Windows-scRGB has: 1.0 is 80 cd/m², and that is also its reference white. Values
+    /// above 1.0 are the highlights, so `max` is only the nominal range (see
+    /// [`ImageDescription::windows_scrgb`]), only `reference` is used to place the light.
+    pub const SCRGB: Self = Self {
+        min: 2_000,
+        max: 80,
+        reference: 80,
+    };
 }
 
 /// Colors as a surface or an output has them: primaries, transfer function and luminance.
@@ -395,6 +415,21 @@ impl ImageDescription {
             },
             tf: TransferFunction::Named(NamedTf::Srgb),
             luminance: Luminance::SDR,
+            max_cll: None,
+            max_fall: None,
+        }
+    }
+
+    /// Windows-scRGB (`create_windows_scrgb`): sRGB primaries and white, an extended linear
+    /// curve in which 1.0 is 80 cd/m², so a value above 1.0 is brighter than SDR white and one
+    /// below 0 is a color outside the sRGB gamut. Games reach it through fp16 swapchains
+    /// (`VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT`).
+    pub const fn windows_scrgb() -> Self {
+        let srgb = Self::srgb();
+        Self {
+            primaries: srgb.primaries,
+            tf: TransferFunction::Named(NamedTf::ExtLinear),
+            luminance: Luminance::SCRGB,
             max_cll: None,
             max_fall: None,
         }

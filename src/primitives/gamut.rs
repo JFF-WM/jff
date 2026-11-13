@@ -167,6 +167,10 @@ pub enum Curve {
     Pq,
     /// BT.2100 HLG with its OOTF for a 1000 cd/m² display, decoding to a fraction of 10000 cd/m². `luma` is the Y row of the surface's primaries.
     Hlg { luma: [f32; 3] },
+    /// Extended linear (Windows-scRGB): light is the encoded value, and it is not clamped, so
+    /// highlights above 1.0 and colors below 0 survive until the output decides what to do
+    /// with them. What 1.0 is worth comes from the surface's reference luminance.
+    Linear,
 }
 
 impl Curve {
@@ -177,6 +181,7 @@ impl Curve {
             TransferFunction::Named(NamedTf::Gamma28) => Self::power(28_000),
             TransferFunction::Named(NamedTf::St2084Pq) => Self::Pq,
             TransferFunction::Named(NamedTf::Hlg) => Self::Hlg { luma: BT2020_LUMA },
+            TransferFunction::Named(NamedTf::ExtLinear) => Self::Linear,
             TransferFunction::Power(raw) => Self::power(raw),
         }
     }
@@ -217,6 +222,8 @@ impl Curve {
             Self::Power(exponent) => v.powf(exponent),
             Self::Pq => pq_decode(v),
             Self::Hlg { luma } => hlg_display_nits([v; 3], luma)[0] / PQ_PEAK,
+            // Not clamped: scRGB goes above 1 for highlights and below 0 for wide colors.
+            Self::Linear => value,
         }
     }
 
@@ -244,19 +251,20 @@ impl Curve {
             }
             Self::Power(exponent) => l.powf(1.0 / exponent),
             Self::Pq => pq_encode(l),
-            // Not an output curve: an HDR output is encoded by its final pass.
-            Self::Hlg { .. } => l,
+            // Not output curves: an HDR output is encoded by its final pass.
+            Self::Hlg { .. } | Self::Linear => l,
         }
     }
 
     /// The two numbers the shader takes for a curve: 1 and an unused 0 for sRGB, 0 and the
-    /// exponent for a power, 2 for PQ and 3 for HLG.
+    /// exponent for a power, 2 for PQ, 3 for HLG and 4 for extended linear.
     pub fn shader_params(self) -> [f32; 2] {
         match self {
             Self::Srgb => [1.0, 0.0],
             Self::Power(exponent) => [0.0, exponent],
             Self::Pq => [2.0, 0.0],
             Self::Hlg { .. } => [3.0, 0.0],
+            Self::Linear => [4.0, 0.0],
         }
     }
 
@@ -375,6 +383,9 @@ impl Conversion {
                 .enumerate()
                 .any(|(j, value)| (*value - IDENTITY[i][j]).abs() > NEAR_IDENTITY)
         });
+        // PQ and HLG are absolute light. Everything else, extended linear included, is placed
+        // relative to its own reference white, which an SDR output shows as its white: scRGB's
+        // 1.0 (80 cd/m²) is white, what is above it clips.
         let scale = if decode.is_absolute() {
             PQ_PEAK / HDR_REFERENCE_WHITE
         } else {
@@ -426,6 +437,12 @@ impl Conversion {
             luma: [0.2627, 0.6780, 0.0593],
             scale: if decode.is_absolute() {
                 PQ_PEAK / sdr_white.max(1.0)
+            } else if decode == Curve::Linear {
+                // scRGB's 1.0 is its reference white (80 cd/m²), the working space's 1.0 is
+                // the monitor's SDR white: 1.0 in scRGB is 80 / sdr_white there, so with the
+                // usual 203 cd/m² SDR white a game's HDR highlights keep their real brightness
+                // and its SDR white is not pushed up to the desktop's.
+                source.luminance.reference as f32 / sdr_white.max(1.0)
             } else {
                 1.0
             },
