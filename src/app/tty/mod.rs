@@ -324,6 +324,10 @@ struct TtyOutput {
     color_dirty: bool,
     /// The frame is drawn through the HDR path while this is set.
     hdr: Option<HdrOutput>,
+    /// The plan the connector's HDR signal comes from, `None` while the output is not HDR.
+    hdr_plan: Option<hdr::Plan>,
+    /// The content light levels (max_cll, max_fall) of the window on the primary plane, `(None, None)` when the frame is composited.
+    hdr_content: (Option<u32>, Option<u32>),
     /// What the last sync decided about HDR, kept to log only when it changes.
     hdr_status: Status,
     /// The HDR failure logged last, cleared when a frame succeeds or the HDR settings are synced.
@@ -1068,6 +1072,8 @@ impl Tty {
             edid: None,
             color_target: ConnectorColorState::default(),
             color_dirty: false,
+            hdr_plan: None,
+            hdr_content: (None, None),
             hdr: None,
             hdr_status: Status::Off,
             hdr_fault: None,
@@ -1147,6 +1153,7 @@ impl Tty {
                 .and_then(|c| c.hdr_tone_map)
                 .unwrap_or_default();
             let mut hdr = None;
+            let mut hdr_plan = None;
             let mut target = ConnectorColorState::default();
             let status = if !output_config.is_some_and(|c| c.hdr) {
                 Status::Off
@@ -1173,7 +1180,10 @@ impl Tty {
                         )
                         .with_tone_map(tone);
                         hdr = Some((WorkingSpace { sdr_white }, pass));
-                        target = hdr_color_state(&plan);
+                        target = hdr_color_state(
+                            &plan.with_content(lit.hdr_content.0, lit.hdr_content.1),
+                        );
+                        hdr_plan = Some(plan);
                         Status::hdr10(&plan, sdr_white)
                     }
                     Err(reason) => Status::Sdr(reason),
@@ -1195,6 +1205,10 @@ impl Tty {
                     frame: None,
                 });
                 lit.queue_redraw();
+            }
+            lit.hdr_plan = hdr_plan;
+            if hdr_plan.is_none() {
+                lit.hdr_content = (None, None);
             }
             if target != lit.color_target {
                 lit.color_target = target;
@@ -1763,6 +1777,8 @@ impl JffState {
             let covering = overview_here.is_none() && fullscreen_covers(&self.desk, rect);
             direct_scanout = hdr_space.is_none() && covering;
             let mut scanout_blocked = None;
+            // The light levels the connector should state: the client's while its buffer goes to the plane.
+            let mut content = (None, None);
             if hdr_space.is_some() && covering {
                 if let Some(surface) = fullscreen_surface(&self.desk, rect) {
                     let (tag, buffer_format) = surface_scanout_facts(&surface);
@@ -1799,7 +1815,15 @@ impl JffState {
                                 scanout_blocked = Some(None);
                             } else {
                                 hdr_scanout_try = Some(key);
+                                content = facts
+                                    .tag
+                                    .map_or((None, None), |tag| (tag.max_cll, tag.max_fall));
                             }
+                        }
+                        // The levels are on their way to the connector, keep them until they land.
+                        Err(Decline::SignalPending) => {
+                            content = lit.hdr_content;
+                            scanout_blocked = Some(Some(Decline::SignalPending));
                         }
                         Err(decline) => scanout_blocked = Some(Some(decline)),
                     }
@@ -1807,6 +1831,14 @@ impl JffState {
             }
             if hdr_space.is_some() && !covering {
                 lit.hdr_scanout = HdrScanout::default();
+            }
+            if content != lit.hdr_content {
+                lit.hdr_content = content;
+                if let Some(plan) = lit.hdr_plan {
+                    lit.color_target = hdr_color_state(&plan.with_content(content.0, content.1));
+                    lit.color_dirty = true;
+                    lit.queue_redraw();
+                }
             }
             if let Some(reason) = scanout_blocked.flatten() {
                 if lit.hdr_scanout.reason != Some(reason) {

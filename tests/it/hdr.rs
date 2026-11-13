@@ -248,3 +248,41 @@ fn a_monitor_with_hlg_and_pq_is_planned_as_pq() {
     edid.hdr.as_mut().unwrap().eotfs.hlg = true;
     assert!(plan(Some(&edid), &kernel(), None).is_ok());
 }
+
+#[test]
+fn the_client_levels_replace_the_panel_peak_in_the_plan() {
+    let plan = plan(Some(&panel()), &kernel(), None).unwrap();
+    let content = plan.with_content(Some(250), Some(120));
+    assert_eq!(content.max_cll, 250);
+    assert_eq!(content.max_fall, 120);
+    assert_eq!(content.max_luminance, plan.max_luminance);
+    assert_eq!(content.min_luminance, plan.min_luminance);
+}
+
+#[test]
+fn the_client_levels_never_pass_the_panel_peak() {
+    let plan = plan(Some(&panel()), &kernel(), None).unwrap();
+    let content = plan.with_content(Some(4000), Some(3000));
+    assert_eq!(content.max_cll, 302);
+    assert_eq!(content.max_fall, 302);
+}
+
+#[test]
+fn the_frame_average_never_passes_the_content_peak() {
+    let plan = plan(Some(&panel()), &kernel(), None).unwrap();
+    let content = plan.with_content(Some(100), Some(200));
+    assert_eq!(content.max_cll, 100);
+    assert_eq!(content.max_fall, 100);
+    let content = plan.with_content(Some(100), None);
+    assert_eq!(content.max_fall, 100);
+}
+
+#[test]
+fn missing_or_zero_levels_keep_the_plan() {
+    let plan = plan(Some(&panel()), &kernel(), None).unwrap();
+    assert_eq!(plan.with_content(None, None), plan);
+    assert_eq!(plan.with_content(Some(0), Some(0)), plan);
+    let content = plan.with_content(None, Some(150));
+    assert_eq!(content.max_cll, plan.max_cll);
+    assert_eq!(content.max_fall, 150);
+}

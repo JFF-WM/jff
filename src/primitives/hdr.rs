@@ -92,6 +92,24 @@ pub struct Plan {
     pub peak_source: PeakSource,
 }
 
+impl Plan {
+    /// The same plan with the light levels of the content on screen: each is the client's value when it gave a nonzero one, capped at the panel's peak, and the frame average never exceeds the content peak.
+    pub fn with_content(self, max_cll: Option<u32>, max_fall: Option<u32>) -> Plan {
+        let cap = |level: Option<u32>, limit: u16| {
+            level
+                .filter(|&v| v != 0)
+                .map(|v| v.min(u32::from(limit)) as u16)
+        };
+        let max_cll = cap(max_cll, self.max_luminance).unwrap_or(self.max_cll);
+        let max_fall = cap(max_fall, max_cll).unwrap_or(self.max_fall).min(max_cll);
+        Plan {
+            max_cll,
+            max_fall,
+            ..self
+        }
+    }
+}
+
 /// Where the peak luminance of an output comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeakSource {
