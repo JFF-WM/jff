@@ -1,6 +1,7 @@
 //! Tests for `jff_wm::primitives::color`: what jff offers clients, how parametric image
 //! descriptions are checked, and what an information object tells.
 
+use jff_wm::primitives::color::supported_intents;
 use jff_wm::primitives::color::{
     Chromaticities, ContentLight, CreateError, CreatorError, Feature, Identities, ImageDescription,
     InfoEvent, Luminance, MasteringLuminance, NamedPrimaries, NamedTf, ParamsBuilder, RenderIntent,
@@ -45,9 +46,20 @@ fn gamut_size(c: Chromaticities) -> i64 {
 fn offered_values_have_the_protocol_numbers() {
     assert_eq!(RenderIntent::Perceptual.raw(), 0);
     assert_eq!(RenderIntent::Relative.raw(), 1);
-    assert_eq!(RenderIntent::from_raw(2), None); // saturation
-    assert_eq!(RenderIntent::from_raw(3), None); // absolute
-    assert!(SUPPORTED_INTENTS.contains(&RenderIntent::Perceptual));
+    assert_eq!(RenderIntent::Saturation.raw(), 2);
+    assert_eq!(RenderIntent::Absolute.raw(), 3);
+    assert_eq!(RenderIntent::RelativeBpc.raw(), 4);
+    assert_eq!(RenderIntent::AbsoluteNoAdaptation.raw(), 5);
+    assert_eq!(RenderIntent::from_raw(6), None);
+    for raw in 0..=5 {
+        let intent = RenderIntent::from_raw(raw).unwrap();
+        assert_eq!(intent.raw(), raw);
+        assert!(SUPPORTED_INTENTS.contains(&intent));
+    }
+    // absolute without adaptation came with version 2
+    assert_eq!(supported_intents(1).len(), 5);
+    assert!(!supported_intents(1).contains(&RenderIntent::AbsoluteNoAdaptation));
+    assert_eq!(supported_intents(2), SUPPORTED_INTENTS);
 
     assert_eq!(
         SUPPORTED_FEATURES

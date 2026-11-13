@@ -2,7 +2,8 @@
 //! of an output, and when a surface needs none.
 
 use jff_wm::primitives::color::{
-    Chromaticities, ImageDescription, NamedPrimaries, NamedTf, RenderIntent, TransferFunction,
+    Chromaticities, ImageDescription, Luminance, NamedPrimaries, NamedTf, RenderIntent,
+    TransferFunction,
 };
 use jff_wm::primitives::gamut::{
     conversion_matrix, invert, is_plain_srgb, map_gamut, mul, rgb_to_xyz, Conversion, Curve,
@@ -465,4 +466,131 @@ fn the_tag_follows_the_gamut_mapping() {
         Conversion::to_output(&source, &target, RenderIntent::Perceptual, false).unwrap();
     let clip = Conversion::to_output(&source, &target, RenderIntent::Relative, false).unwrap();
     assert_ne!(compress.tag(), clip.tag());
+}
+
+fn row_sums(conversion: &Conversion) -> [f32; 3] {
+    conversion.rows.map(|row| row.iter().sum())
+}
+
+#[test]
+fn saturation_keeps_the_primaries_pure() {
+    let mut source = described(NamedPrimaries::DisplayP3, NamedTf::Srgb);
+    source.tf = TransferFunction::Named(NamedTf::Gamma22);
+    let target = ImageDescription::srgb();
+    let saturated =
+        Conversion::to_output(&source, &target, RenderIntent::Saturation, false).unwrap();
+    // The matrix is left out: a pure primary is the output's own, where relative would pull it in.
+    assert_eq!(
+        saturated.rows,
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    );
+    assert_eq!(saturated.map, GamutMap::Compress);
+    assert!(near(
+        saturated.apply([1.0, 0.0, 0.0]),
+        [1.0, 0.0, 0.0],
+        1e-5
+    ));
+    let relative = Conversion::to_output(&source, &target, RenderIntent::Relative, false).unwrap();
+    assert!(relative.rows[1][0] != 0.0);
+    // Nothing to do at all when the curves agree too.
+    let same_curve = described(NamedPrimaries::DisplayP3, NamedTf::Srgb);
+    assert!(Conversion::to_output(&same_curve, &target, RenderIntent::Saturation, false).is_none());
+}
+
+#[test]
+fn absolute_is_relative_for_a_description_of_primaries_and_a_curve() {
+    let source = described(NamedPrimaries::DisplayP3, NamedTf::Srgb);
+    let target = ImageDescription::srgb();
+    let relative = Conversion::to_output(&source, &target, RenderIntent::Relative, false).unwrap();
+    let absolute = Conversion::to_output(&source, &target, RenderIntent::Absolute, false).unwrap();
+    assert_eq!(relative.rows, absolute.rows);
+    assert_eq!(relative.map, absolute.map);
+    assert_eq!(relative.black, absolute.black);
+}
+
+#[test]
+fn absolute_without_adaptation_does_not_move_the_white_point() {
+    let mut source = ImageDescription::srgb();
+    source.primaries = aoc_panel();
+    let target = ImageDescription::srgb();
+    let relative = Conversion::to_output(&source, &target, RenderIntent::Relative, true).unwrap();
+    let kept =
+        Conversion::to_output(&source, &target, RenderIntent::AbsoluteNoAdaptation, true).unwrap();
+    // Relative maps the white of the source to the white of the output.
+    assert!(
+        near(row_sums(&relative), [1.0; 3], 1e-4),
+        "{:?}",
+        row_sums(&relative)
+    );
+    // Its white point is not D65: unadapted it comes out tinted, but still near white.
+    let sums = row_sums(&kept);
+    assert!(!near(sums, [1.0; 3], 1e-4), "{sums:?}");
+    assert!(near(sums, [1.0; 3], 0.05), "{sums:?}");
+    assert_eq!(kept.map, GamutMap::Clip);
+    // With the same white point there is nothing to leave out.
+    let p3 = described(NamedPrimaries::DisplayP3, NamedTf::Srgb);
+    let a = Conversion::to_output(&p3, &target, RenderIntent::Relative, false).unwrap();
+    let b = Conversion::to_output(&p3, &target, RenderIntent::AbsoluteNoAdaptation, false).unwrap();
+    for (x, y) in a.rows.iter().flatten().zip(b.rows.iter().flatten()) {
+        assert!((x - y).abs() < 1e-4);
+    }
+}
+
+#[test]
+fn black_point_compensation_puts_the_source_black_on_the_output_black() {
+    let mut source = ImageDescription::srgb();
+    source.luminance = Luminance {
+        min: 0,
+        max: 80,
+        reference: 80,
+    };
+    // Same primaries and curve: relative has nothing to do, so the surface is shown as it is.
+    let target = ImageDescription::srgb();
+    assert!(Conversion::to_output(&source, &target, RenderIntent::Relative, true).is_none());
+    let bpc = Conversion::to_output(&source, &target, RenderIntent::RelativeBpc, true).unwrap();
+    // 0.2 cd/m² on 80: the output's black is 0.0025 of its white, which is code 0.0323 in sRGB.
+    let black = bpc.apply([0.0; 3]);
+    assert!(near(black, [0.0323; 3], 2e-3), "{black:?}");
+    assert!(near(bpc.apply([1.0; 3]), [1.0; 3], 1e-5));
+    // Monotonic between the two.
+    assert!(bpc.apply([0.2; 3])[0] > 0.2);
+}
+
+#[test]
+fn black_point_compensation_leaves_alone_what_has_the_output_black() {
+    let source = described(NamedPrimaries::DisplayP3, NamedTf::Srgb);
+    let target = ImageDescription::srgb();
+    let relative = Conversion::to_output(&source, &target, RenderIntent::Relative, false).unwrap();
+    let bpc = Conversion::to_output(&source, &target, RenderIntent::RelativeBpc, false).unwrap();
+    assert_eq!(bpc.black, [1.0, 0.0]);
+    assert_eq!(bpc.rows, relative.rows);
+    assert_eq!(bpc.apply([0.0; 3]), [0.0; 3]);
+    assert!(near(
+        bpc.apply([0.9, 0.3, 0.2]),
+        relative.apply([0.9, 0.3, 0.2]),
+        1e-6
+    ));
+}
+
+#[test]
+fn intents_that_convert_differently_make_their_own_tag() {
+    let source = described(NamedPrimaries::DisplayP3, NamedTf::Gamma22);
+    let target = ImageDescription::srgb();
+    let tags: Vec<i32> = [
+        RenderIntent::Perceptual,
+        RenderIntent::Relative,
+        RenderIntent::Saturation,
+    ]
+    .iter()
+    .map(|&intent| {
+        Conversion::to_output(&source, &target, intent, false)
+            .unwrap()
+            .tag()
+    })
+    .collect();
+    for (i, a) in tags.iter().enumerate() {
+        for b in &tags[i + 1..] {
+            assert_ne!(a, b);
+        }
+    }
 }

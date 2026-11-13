@@ -40,7 +40,8 @@ uniform float ycc_on;
 
 // Color management (wp-color-management): the surface's own gamut and curve to the output's.
 // Straight (not premultiplied) color is decoded with `cm_decode`, mapped in linear light by the
-// matrix whose rows are cm_r, cm_g, cm_b, brought into the output's gamut (`cm_map` 0: clipped,
+// matrix whose rows are cm_r, cm_g, cm_b, scaled by `cm_black` (gain, lift: black point
+// compensation, 1 and 0 for none), brought into the output's gamut (`cm_map` 0: clipped,
 // 1: desaturated toward the grey of the same luminance, `cm_luma` is the output's luminance row)
 // and encoded with `cm_encode`. A curve is (kind, exponent): kind 1 is the piecewise sRGB curve,
 // kind 2 PQ, kind 3 HLG, kind 4 extended linear (scRGB: not clamped, so a value above 1 or
@@ -56,6 +57,7 @@ uniform vec2 cm_decode;
 uniform vec3 cm_src_luma;
 uniform vec2 cm_encode;
 uniform float cm_map;
+uniform vec2 cm_black;
 uniform vec3 cm_luma;
 uniform float cm_scale;
 uniform float cm_working;
@@ -157,6 +159,7 @@ void main() {
         if (cm_working > 0.5) {
             color.rgb = max(light, 0.0) * color.a;
         } else {
+            light = light * cm_black.x + vec3(cm_black.y);
             light = cm_map_gamut(light);
             color.rgb = cm_from_light(light, cm_encode) * color.a;
         }

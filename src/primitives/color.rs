@@ -34,23 +34,42 @@ pub const MIN_LUM_SCALE: u32 = 10_000;
 /// Exponent of a power transfer function is sent times this.
 pub const EXPONENT_SCALE: u32 = 10_000;
 
-/// How out-of-gamut colors are treated (see `primitives/gamut.rs`): perceptual desaturates a
-/// color toward the grey of the same luminance until the output can show it, relative
-/// colorimetric clips it to the edge of the output's gamut. Colors that fit are the same for both.
+/// How a surface wants its colors brought to the output (see `primitives/gamut.rs`).
+///
+/// * perceptual desaturates a color the output cannot show toward the grey of the same luminance until it fits,
+/// * saturation keeps the primaries pure: red, green and blue of the surface are the output's own, whatever the gamuts, and what is left outside goes the perceptual way,
+/// * relative colorimetric moves the white point over (Bradford) and clips what does not fit,
+/// * relative with black point compensation does the same after the black of the surface is moved onto the output's,
+/// * absolute colorimetric is the same as relative here, as it is for every description made of primaries and a curve, whose media white is the white point they state,
+/// * absolute without adaptation keeps the color itself (CIE XYZ) and moves no white point, so a surface with another white than the output's shows it tinted.
+///
+/// Colors that fit are the same for the perceptual intents and the colorimetric ones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderIntent {
     /// 0. Mandatory.
     Perceptual,
     /// 1.
     Relative,
+    /// 2.
+    Saturation,
+    /// 3.
+    Absolute,
+    /// 4.
+    RelativeBpc,
+    /// 5, from version 2 of the protocol.
+    AbsoluteNoAdaptation,
 }
 
 impl RenderIntent {
-    /// `None` for an intent that is not offered.
+    /// `None` for a number that is not an intent.
     pub fn from_raw(raw: u32) -> Option<Self> {
         match raw {
             0 => Some(Self::Perceptual),
             1 => Some(Self::Relative),
+            2 => Some(Self::Saturation),
+            3 => Some(Self::Absolute),
+            4 => Some(Self::RelativeBpc),
+            5 => Some(Self::AbsoluteNoAdaptation),
             _ => None,
         }
     }
@@ -59,12 +78,40 @@ impl RenderIntent {
         match self {
             Self::Perceptual => 0,
             Self::Relative => 1,
+            Self::Saturation => 2,
+            Self::Absolute => 3,
+            Self::RelativeBpc => 4,
+            Self::AbsoluteNoAdaptation => 5,
+        }
+    }
+
+    /// The version of the protocol this intent came with.
+    pub fn since(self) -> u32 {
+        match self {
+            Self::AbsoluteNoAdaptation => 2,
+            _ => 1,
         }
     }
 }
 
 /// Rendering intents clients are told they can use.
-pub const SUPPORTED_INTENTS: &[RenderIntent] = &[RenderIntent::Perceptual, RenderIntent::Relative];
+pub const SUPPORTED_INTENTS: &[RenderIntent] = &[
+    RenderIntent::Perceptual,
+    RenderIntent::Relative,
+    RenderIntent::Saturation,
+    RenderIntent::Absolute,
+    RenderIntent::RelativeBpc,
+    RenderIntent::AbsoluteNoAdaptation,
+];
+
+/// Intents a client that bound `version` of the protocol is told it can use.
+pub fn supported_intents(version: u32) -> Vec<RenderIntent> {
+    SUPPORTED_INTENTS
+        .iter()
+        .copied()
+        .filter(|intent| intent.since() <= version)
+        .collect()
+}
 
 /// Optional parts of the protocol jff offers. ICC profiles and extended target volumes are not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

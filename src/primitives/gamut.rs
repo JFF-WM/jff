@@ -14,7 +14,10 @@
 //! relative colorimetric clips them to the gamut's edge ([`GamutMap::Clip`]), perceptual
 //! desaturates them toward the grey of the same luminance until they fit ([`GamutMap::Compress`]),
 //! so a saturated color keeps its hue and its brightness instead of changing hue at the edge.
-//! Colors that already fit are not touched by either.
+//! Colors that already fit are not touched by either. The other intents change something before
+//! that: saturation leaves the primaries out of the matrix, relative with black point
+//! compensation moves the surface's black onto the output's ([`Conversion::black`]), and absolute
+//! without adaptation leaves the white point alone ([`conversion_matrix_absolute`]).
 //!
 //! A surface with no description is plain sRGB. Unless [`Conversion::to_output`] is told to
 //! convert those (`color-management { convert-srgb }`), plain sRGB is drawn as it always was,
@@ -24,8 +27,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use super::color::{
-    Chromaticities, ImageDescription, NamedPrimaries, NamedTf, RenderIntent, TransferFunction,
-    CHROMA_SCALE, EXPONENT_SCALE,
+    Chromaticities, ImageDescription, Luminance, NamedPrimaries, NamedTf, RenderIntent,
+    TransferFunction, CHROMA_SCALE, EXPONENT_SCALE, MIN_LUM_SCALE,
 };
 use super::hdr_output::{
     hlg_display_nits, pq_decode, pq_encode, BT2020_LUMA, HDR_REFERENCE_WHITE, PQ_PEAK,
@@ -147,6 +150,11 @@ pub fn conversion_matrix(from: &Chromaticities, to: &Chromaticities) -> Option<M
         adaptation(xyz_of(from.white), xyz_of(to.white))?
     };
     Some(mul(&invert(&target)?, &mul(&adapt, &source)))
+}
+
+/// Like [`conversion_matrix`] with no chromatic adaptation: the color (CIE XYZ) stays what it was, so when the white points differ the white of `from` is not (1, 1, 1) in `to`.
+pub fn conversion_matrix_absolute(from: &Chromaticities, to: &Chromaticities) -> Option<Mat3> {
+    Some(mul(&invert(&rgb_to_xyz(to)?)?, &rgb_to_xyz(from)?))
 }
 
 /// Linear sRGB to linear BT.2020, both with a D65 white. Stands in if the primaries cannot be worked out.
@@ -297,8 +305,11 @@ impl GamutMap {
     /// What the rendering intent of a surface asks for.
     pub fn of(intent: RenderIntent) -> Self {
         match intent {
-            RenderIntent::Perceptual => Self::Compress,
-            RenderIntent::Relative => Self::Clip,
+            RenderIntent::Perceptual | RenderIntent::Saturation => Self::Compress,
+            RenderIntent::Relative
+            | RenderIntent::Absolute
+            | RenderIntent::RelativeBpc
+            | RenderIntent::AbsoluteNoAdaptation => Self::Clip,
         }
     }
 
@@ -332,6 +343,23 @@ pub fn map_gamut(light: [f32; 3], luma: [f32; 3], map: GamutMap) -> [f32; 3] {
     }
 }
 
+/// No black point compensation: gain 1, lift 0.
+const NO_BLACK: [f32; 2] = [1.0, 0.0];
+
+/// Gain and lift that put the black of `source` on the black of `target` and leave white where it is, in light as a fraction of each one's reference white. Black is the minimum luminance of a description. `NO_BLACK` when they agree.
+fn black_point_compensation(source: &Luminance, target: &Luminance) -> [f32; 2] {
+    let black = |l: &Luminance| {
+        let reference = l.reference.max(1) as f32;
+        (l.min as f32 / MIN_LUM_SCALE as f32 / reference).clamp(0.0, 0.99)
+    };
+    let (from, to) = (black(source), black(target));
+    if (from - to).abs() < 1e-9 {
+        return NO_BLACK;
+    }
+    let gain = (1.0 - to) / (1.0 - from);
+    [gain, to - from * gain]
+}
+
 /// What the shader does to a surface to show its colors on an output.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Conversion {
@@ -343,6 +371,8 @@ pub struct Conversion {
     pub encode: Curve,
     /// What to do with colors outside the output's gamut.
     pub map: GamutMap,
+    /// Black point compensation: linear light is multiplied by the first value and the second is added, after the matrix. `[1.0, 0.0]` for none.
+    pub black: [f32; 2],
     /// The output's luminance row (Y of its red, green and blue), for [`GamutMap::Compress`].
     pub luma: [f32; 3],
     /// Multiplies linear light after the matrix: turns PQ's or HLG's fraction of 10000 cd/m² into the output's white.
@@ -371,10 +401,17 @@ impl Conversion {
         if is_plain_srgb(source) && !convert_plain_srgb {
             return None;
         }
-        let matrix = if source.primaries == target.primaries {
+        let matrix = if source.primaries == target.primaries || intent == RenderIntent::Saturation {
             IDENTITY
+        } else if intent == RenderIntent::AbsoluteNoAdaptation {
+            conversion_matrix_absolute(&source.primaries, &target.primaries)?
         } else {
             conversion_matrix(&source.primaries, &target.primaries)?
+        };
+        let black = if intent == RenderIntent::RelativeBpc {
+            black_point_compensation(&source.luminance, &target.luminance)
+        } else {
+            NO_BLACK
         };
         let decode = Curve::of_description(source);
         let encode = Curve::of(target.tf);
@@ -391,7 +428,7 @@ impl Conversion {
         } else {
             1.0
         };
-        if !moves_colors && decode == encode {
+        if !moves_colors && decode == encode && black == NO_BLACK {
             return None;
         }
         let mut rows = [[0.0f32; 3]; 3];
@@ -408,6 +445,7 @@ impl Conversion {
             decode,
             encode,
             map: GamutMap::of(intent),
+            black,
             luma,
             scale,
             working: false,
@@ -434,6 +472,7 @@ impl Conversion {
             decode,
             encode: Curve::Power(1.0),
             map: GamutMap::Clip,
+            black: NO_BLACK,
             luma: [0.2627, 0.6780, 0.0593],
             scale: if decode.is_absolute() {
                 PQ_PEAK / sdr_white.max(1.0)
@@ -461,6 +500,8 @@ impl Conversion {
         if self.working {
             return mapped.map(|v| v.max(0.0));
         }
+        let [gain, lift] = self.black;
+        let mapped = mapped.map(|v| v * gain + lift);
         map_gamut(mapped, self.luma, self.map).map(|v| self.encode.encode(v))
     }
 
@@ -472,6 +513,9 @@ impl Conversion {
             value.to_bits().hash(&mut hasher);
         }
         self.map.shader_param().to_bits().hash(&mut hasher);
+        for value in self.black {
+            value.to_bits().hash(&mut hasher);
+        }
         self.scale.to_bits().hash(&mut hasher);
         self.working.hash(&mut hasher);
         for value in self

@@ -88,9 +88,9 @@ use smithay::wayland::compositor::{with_states, Cacheable, SurfaceData};
 
 use crate::config::Config;
 use crate::primitives::color::{
-    short_identity, split_identity, supported_features, CreateError, ImageDescription, InfoEvent,
-    LongIdentities, NamedTf, ParamsBuilder, RenderIntent, SUPPORTED_INTENTS, SUPPORTED_PRIMARIES,
-    SUPPORTED_TFS,
+    short_identity, split_identity, supported_features, supported_intents, CreateError,
+    ImageDescription, InfoEvent, LongIdentities, NamedTf, ParamsBuilder, RenderIntent,
+    SUPPORTED_PRIMARIES, SUPPORTED_TFS,
 };
 use crate::state::JffState;
 
@@ -466,7 +466,7 @@ impl GlobalDispatch<WpColorManagerV1, ()> for JffState {
     ) {
         let manager = data_init.init(resource, ());
         let version = manager.version();
-        for intent in SUPPORTED_INTENTS {
+        for intent in supported_intents(version) {
             if let Ok(intent) = wp_color_manager_v1::RenderIntent::try_from(intent.raw()) {
                 manager.supported_intent(intent);
             }
@@ -735,7 +735,9 @@ impl Dispatch<WpColorManagementSurfaceV1, ColorSurface> for JffState {
                     );
                     return;
                 };
-                let Some(intent) = RenderIntent::from_raw(u32::from(render_intent)) else {
+                let intent = RenderIntent::from_raw(u32::from(render_intent))
+                    .filter(|intent| intent.since() <= resource.version());
+                let Some(intent) = intent else {
                     resource
                         .post_error(Error::RenderIntent, "the rendering intent is not supported");
                     return;
