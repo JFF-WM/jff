@@ -16,6 +16,7 @@
 //! is an error for jff, only write keys it has.
 
 pub mod actions;
+pub mod modes;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use std::fmt;

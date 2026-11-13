@@ -41,6 +41,9 @@ pub enum Kind {
     },
     /// Free text, empty removes the key. Applied with Enter or the check button.
     Text,
+    /// `mode "WIDTHxHEIGHT@HZ"` of a display: a searchable list of what the display offers
+    /// (from `wlr-randr`) with Automatic first, or a text entry when there is no list.
+    Mode,
     /// Written as "#rrggbbaa".
     Color {
         default: &'static str,
@@ -864,7 +867,12 @@ pub fn output_fields() -> Vec<Field> {
                 default: (0, 0),
             },
         ),
-        text(&["mode"], "Mode, for example 1920x1080@60"),
+        field(
+            &["mode"],
+            "Mode",
+            "Read from wlr-randr. Automatic is the display's preferred mode",
+            Kind::Mode,
+        ),
         choice(
             &["adaptive-sync"],
             "Variable Refresh Rate",

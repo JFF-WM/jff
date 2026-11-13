@@ -4,7 +4,7 @@ use crate::pages::{Field, Group, Kind};
 use crate::{lists, Ctx};
 use adw::prelude::*;
 use gtk4 as gtk;
-use jff_settings_core::{Arg, JffConfig};
+use jff_settings_core::{modes, Arg, JffConfig};
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -123,6 +123,92 @@ fn to_hex(c: &gtk::gdk::RGBA) -> String {
 }
 
 // builders
+
+/// A free text row. Empty text removes the key.
+fn text_row(title: &str, path: Vec<String>, prop: Option<&'static str>, ctx: &Ctx) -> gtk::Widget {
+    let row = adw::EntryRow::new();
+    row.set_title(title);
+    row.set_show_apply_button(true);
+    let current = read_arg(&ctx.cfg.borrow(), &path, prop);
+    row.set_text(current.as_ref().and_then(Arg::as_str).unwrap_or(""));
+    let ctx = ctx.clone();
+    row.connect_apply(move |r| {
+        let text = r.text();
+        let mut cfg = ctx.cfg.borrow_mut();
+        if text.is_empty() {
+            clear(&mut cfg, &path, prop);
+        } else {
+            write_arg(&mut cfg, &path, prop, Arg::Str(text.to_string()));
+        }
+        drop(cfg);
+        (ctx.changed)();
+    });
+    row.upcast()
+}
+
+/// The mode of the display `root` points at, picked from what `wlr-randr` lists for it. The
+/// first entry is Automatic (no `mode` line). A mode in the file that the display doesn't
+/// offer stays in the list, so opening the window never changes the file. Without a list
+/// (no wlr-randr, display not connected) it is a text entry.
+fn mode_row(
+    field: &Field,
+    root: &[String],
+    path: Vec<String>,
+    prop: Option<&'static str>,
+    ctx: &Ctx,
+) -> gtk::Widget {
+    let name = match ctx.cfg.borrow().args(&refs(root)).first() {
+        Some(Arg::Str(name)) => name.clone(),
+        _ => String::new(),
+    };
+    let modes = modes::for_output(&name);
+    if modes.is_empty() {
+        return text_row("Mode, for example 1920x1080@60", path, prop, ctx);
+    }
+    let current = read_arg(&ctx.cfg.borrow(), &path, prop)
+        .and_then(|arg| arg.as_str().map(str::to_owned))
+        .filter(|value| !value.is_empty());
+
+    // (value in the file, label); `None` is Automatic.
+    let mut items: Vec<(Option<String>, String)> = vec![(None, "Automatic".to_owned())];
+    items.extend(modes.iter().map(|m| (Some(m.value()), m.label())));
+    let selected = match &current {
+        None => 0,
+        Some(value) => match items.iter().position(|(v, _)| v.as_deref() == Some(value)) {
+            Some(i) => i,
+            None => {
+                items.push((Some(value.clone()), format!("{value} (not offered)")));
+                items.len() - 1
+            }
+        },
+    };
+
+    let row = adw::ComboRow::new();
+    titled(&row, field);
+    let labels: Vec<&str> = items.iter().map(|(_, label)| label.as_str()).collect();
+    row.set_model(Some(&gtk::StringList::new(&labels)));
+    row.set_expression(Some(&gtk::PropertyExpression::new(
+        gtk::StringObject::static_type(),
+        None::<gtk::Expression>,
+        "string",
+    )));
+    row.set_enable_search(true);
+    row.set_selected(selected as u32);
+    let ctx = ctx.clone();
+    row.connect_selected_notify(move |r| {
+        let Some((value, _)) = items.get(r.selected() as usize) else {
+            return;
+        };
+        let mut cfg = ctx.cfg.borrow_mut();
+        match value {
+            None => clear(&mut cfg, &path, prop),
+            Some(value) => write_arg(&mut cfg, &path, prop, Arg::Str(value.clone())),
+        }
+        drop(cfg);
+        (ctx.changed)();
+    });
+    row.upcast()
+}
 
 /// Adds one PreferencesGroup per group to the page.
 pub fn build_groups(page: &adw::PreferencesPage, groups: &[Group], root: &[String], ctx: &Ctx) {
@@ -379,26 +465,8 @@ pub fn build_row(
             });
             (row.upcast(), true)
         }
-        Kind::Text => {
-            let row = adw::EntryRow::new();
-            row.set_title(field.title);
-            row.set_show_apply_button(true);
-            let current = read_arg(&ctx.cfg.borrow(), &path, prop);
-            row.set_text(current.as_ref().and_then(Arg::as_str).unwrap_or(""));
-            let ctx = ctx.clone();
-            row.connect_apply(move |r| {
-                let text = r.text();
-                let mut cfg = ctx.cfg.borrow_mut();
-                if text.is_empty() {
-                    clear(&mut cfg, &path, prop);
-                } else {
-                    write_arg(&mut cfg, &path, prop, Arg::Str(text.to_string()));
-                }
-                drop(cfg);
-                (ctx.changed)();
-            });
-            (row.upcast(), true)
-        }
+        Kind::Text => (text_row(field.title, path, prop, ctx), true),
+        Kind::Mode => (mode_row(field, root, path, prop, ctx), true),
         Kind::Color { default, optional } => {
             let default: &'static str = *default;
             let fallback = || gtk::gdk::RGBA::parse(default).unwrap_or(gtk::gdk::RGBA::BLACK);

@@ -34,11 +34,18 @@ Needs the development packages of GTK 4.10 or newer and libadwaita 1.4 or newer.
 | Keyboard     | layout, variant, options, rules, model, repeat delay and rate, Num Lock                                                           |
 | Windows      | workspaces (count, per monitor), maximize new windows, drag modifier, global hotkeys, window animations                           |
 | Effects      | blur (with its lists), on-screen display, window switcher, overview, workspace wall, hot corner                                   |
-| Monitors     | one entry per output: off, position, mode, variable refresh rate, HDR (SDR white, peak, tone mapping, content brightness), ICC profile, game hint, color management |
+| Monitors     | one entry per output: off, position, mode (a list read from `wlr-randr`), variable refresh rate, HDR (SDR white, peak, tone mapping, content brightness), ICC profile, game hint, color management |
 | Window rules | add, edit, reorder and remove rules: match (app id, title, tag, dialog, restored) and actions                                     |
 | Key bindings | add, edit and remove bindings; every action jff knows, with its arguments                                                         |
 | Startup      | `autostart` and `sh-autostart` lines                                                                                              |
 | System       | screenshots, logging, color management, tearing                                                                                   |
+
+## Display modes
+
+The mode row lists what `wlr-randr` reports for that connector, biggest first, with Automatic (no
+`mode` line) on top. jff rounds the refresh rate in the config to whole Hz, so 59.94 and 60.00 are one
+entry. Without `wlr-randr`, or for a display that isn't connected, the row is a text entry for
+`1920x1080@60`. A mode in the file that the display doesn't offer is kept and marked "not offered".
 
 ## Limits
 

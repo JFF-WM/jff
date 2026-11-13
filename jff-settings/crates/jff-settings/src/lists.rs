@@ -241,7 +241,8 @@ fn fill_outputs(list: &Dynamic, ctx: &Ctx) {
         let name_row = entry("Connector Name");
         name_row.set_text(&name);
         {
-            let (ctx, root, expander) = (ctx.clone(), root.clone(), expander.clone());
+            let (ctx, root, expander, list) =
+                (ctx.clone(), root.clone(), expander.clone(), list.clone());
             name_row.connect_apply(move |r| {
                 let text = r.text().trim().to_owned();
                 if text.is_empty() {
@@ -252,6 +253,9 @@ fn fill_outputs(list: &Dynamic, ctx: &Ctx) {
                     .set_args(&refs(&root), &[Arg::Str(text.clone())]);
                 expander.set_title(&gtk::glib::markup_escape_text(&text));
                 (ctx.changed)();
+                // The mode list belongs to the connector, so build the rows again.
+                let (ctx, list) = (ctx.clone(), list.clone());
+                later(move || fill_outputs(&list, &ctx));
             });
         }
         expander.add_row(&name_row);
