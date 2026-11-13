@@ -63,7 +63,7 @@ use crate::feature::osd::{
 };
 use crate::feature::outputs::output_rect;
 use crate::feature::overview_search::{self as search_ui, Row};
-use crate::input::{BTN_LEFT, BTN_MIDDLE};
+use crate::input::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use crate::primitives::app_search::{self as apps, DesktopEntry, Pick, Query};
 use crate::primitives::geom::Size;
 use crate::primitives::layout::{self, Rect};
@@ -1615,9 +1615,10 @@ impl JffState {
     }
 
     /// Button event while the overview is open. A click counts on release, so nothing of it is
-    /// left over for the window that gets focused: left selects, middle closes, any button on
-    /// empty space (or on another monitor) cancels. Left-drag on a thumbnail drags it, dropped
-    /// on another monitor, the window moves there.
+    /// left over for the window that gets focused: left selects, middle closes, right sends the
+    /// window to the next workspace (the last wraps around to the first), any button on empty
+    /// space (or on another monitor) cancels. Left-drag on a thumbnail drags it, dropped on
+    /// another monitor, the window moves there.
     pub fn overview_button(&mut self, button: u32, state: ButtonState, time: InputTime) {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
@@ -1717,6 +1718,13 @@ impl JffState {
                     Some(window) if button == BTN_MIDDLE => {
                         if let Some(toplevel) = window.toplevel() {
                             toplevel.send_close();
+                        }
+                    }
+                    Some(window) if button == BTN_RIGHT => {
+                        // On to the next workspace, the last one wraps around to the first.
+                        let count = self.workspace_count().max(1);
+                        if let Some(from) = self.desk.workspace_of(|w| *w == window) {
+                            self.send_to_workspace(&window, (from + 1) % count);
                         }
                     }
                     Some(_) => {}
