@@ -18,7 +18,9 @@
 //! is converted into a linear working space ([`WorkingSpace`], BT.2020 with 1.0 at the monitor's
 //! `sdr-white`), and the final pass of `render/effects/hdr.rs` maps it to the monitor's peak and
 //! codes it as PQ. Nothing is left as the client drew it, so `fullscreen-passthrough` does not
-//! apply there and such a monitor is never scanned out directly.
+//! apply there. The one exception is a fullscreen window that is PQ in BT.2020 in the swapchain's
+//! 10-bit format with nothing drawn over it: its buffer goes straight to the primary plane (see
+//! `primitives/hdr_scanout.rs`).
 //!
 //! The global is version 1 of the protocol: descriptions are announced with `ready` and a 32
 //! bit identity. Moving to version 2 or 3 means `ready2`, `preferred_changed2` and the
