@@ -376,14 +376,16 @@ impl RenderElement<GlesRenderer> for FramebufferEffectElement {
         // Release the frame before using its GL access below.
         drop(guard);
 
-        // Wallpaper copy to read instead of the live frame, when one is usable.
+        // Wallpaper copy to read instead of the live frame, when one is usable: one made in
+        // another format (the output switched between HDR and SDR) is left alone.
         let fb_size = transform.transform_size(output_rect.size);
         let wallpaper = self
             .source
             .as_ref()
             .and_then(|s| s.0.borrow().texture.clone())
             .filter(|t| {
-                t.size().w >= fb_size.w
+                t.format() == Some(format)
+                    && t.size().w >= fb_size.w
                     && t.size().h >= fb_size.h
                     && source_rect.loc.x >= 0
                     && source_rect.loc.y >= 0
