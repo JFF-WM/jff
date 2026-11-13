@@ -666,7 +666,7 @@ fn log_hdr_status(name: &str, status: &Status, swapchain: Fourcc) {
             );
             if status.banding() {
                 tracing::warn!(
-                    "monitor {name}: the link cannot carry 10 bits per color, gradients may show banding"
+                    "monitor {name}: the link cannot carry 10 bits per color, the picture is dithered to hide banding"
                 );
             }
             if status.low_headroom() {
@@ -675,6 +675,15 @@ fn log_hdr_status(name: &str, status: &Status, swapchain: Fourcc) {
                 );
             }
         }
+    }
+}
+
+/// Bits per color of a swapchain format, 16 for the formats it is not worth dithering.
+fn link_bits(format: Fourcc) -> u32 {
+    match format {
+        Fourcc::Argb2101010 | Fourcc::Abgr2101010 | Fourcc::Xrgb2101010 | Fourcc::Xbgr2101010 => 10,
+        Fourcc::Argb8888 | Fourcc::Abgr8888 | Fourcc::Xrgb8888 | Fourcc::Xbgr8888 => 8,
+        _ => 16,
     }
 }
 
@@ -1199,7 +1208,11 @@ impl Tty {
                             panel.as_ref(),
                         )
                         .with_tone_map(tone)
-                        .with_eotf(plan.eotf);
+                        .with_eotf(plan.eotf)
+                        .with_dither(Some(
+                            link_bits(lit.compositor.format())
+                                .min(plan.max_bpc.unwrap_or(u32::MAX)),
+                        ));
                         hdr = Some((WorkingSpace { sdr_white }, pass, content_metadata));
                         target = hdr_color_state(
                             &plan.with_content(lit.hdr_content.0, lit.hdr_content.1),

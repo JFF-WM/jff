@@ -5,9 +5,10 @@ use jff_wm::primitives::color::{
 };
 use jff_wm::primitives::gamut::{Conversion, Curve};
 use jff_wm::primitives::hdr_output::{
-    bt2390_source_peak, bt2390_tone_map, fitted_tone_map, frame_content_peak, hlg_display_nits,
-    hlg_inverse_oetf, low_headroom, pq_decode, pq_encode, tone_map, FinalPass, ToneMap,
-    BT2020_LUMA, BT2390_SOURCE_PEAK, DEFAULT_SDR_WHITE, HDR_PEAK_RANGE, PQ_PEAK, SDR_WHITE_RANGE,
+    bt2390_source_peak, bt2390_tone_map, dither_noise, fitted_tone_map, frame_content_peak,
+    hlg_display_nits, hlg_inverse_oetf, low_headroom, pq_decode, pq_encode, tone_map, FinalPass,
+    ToneMap, BT2020_LUMA, BT2390_SOURCE_PEAK, DEFAULT_SDR_WHITE, HDR_PEAK_RANGE, PQ_PEAK,
+    SDR_WHITE_RANGE,
 };
 
 const PEAK: f32 = 301.8;
@@ -858,4 +859,98 @@ fn a_surface_that_says_nothing_is_not_mapped_harder_beside_one_that_does() {
     for nits in [400.0, 500.0] {
         assert!(shown(&too_hard, nits) > shown(&alone, nits) + 5.0, "{nits}");
     }
+}
+
+fn dithered(bits: Option<u32>) -> FinalPass {
+    FinalPass::new(203.0, PEAK, None).with_dither(bits)
+}
+
+#[test]
+fn dithering_is_for_links_under_ten_bits() {
+    assert_eq!(dithered(None).dither_levels, 0.0);
+    assert_eq!(dithered(Some(10)).dither_levels, 0.0);
+    assert_eq!(dithered(Some(12)).dither_levels, 0.0);
+    assert_eq!(dithered(Some(8)).dither_levels, 255.0);
+    assert_eq!(dithered(Some(6)).dither_levels, 63.0);
+    assert_eq!(dithered(Some(0)).dither_levels, 0.0);
+    assert_ne!(dithered(Some(8)), dithered(None));
+}
+
+#[test]
+fn a_pass_that_is_not_dithered_leaves_the_code_alone() {
+    let code = [0.3, 0.5, 0.7];
+    assert_eq!(dithered(None).dither(code, 12, 34), code);
+    assert_eq!(dithered(Some(10)).dither(code, 12, 34), code);
+}
+
+#[test]
+fn the_noise_stays_in_range_and_moves_from_pixel_to_pixel() {
+    let mut seen = std::collections::BTreeSet::new();
+    for y in 0..64 {
+        for x in 0..64 {
+            let n = dither_noise(x as f32, y as f32);
+            assert!((0.0..1.0).contains(&n), "{n} at {x},{y}");
+            seen.insert((n * 64.0) as u32);
+        }
+    }
+    assert!(seen.len() > 48, "only {} of 64 levels used", seen.len());
+}
+
+#[test]
+fn dithering_leaves_black_and_stays_inside_the_range() {
+    let pass = dithered(Some(8));
+    for y in 0..32 {
+        for x in 0..32 {
+            assert_eq!(pass.dither([0.0; 3], x, y), [0.0; 3]);
+            for v in pass.dither([1.0, 0.999, 0.001], x, y) {
+                assert!((0.0..=1.0).contains(&v));
+            }
+            // never more than one step away
+            let moved = pass.dither([0.4; 3], x, y);
+            for v in moved {
+                assert!((v - 0.4).abs() <= 1.0 / 255.0 + 1e-6);
+            }
+        }
+    }
+}
+
+#[test]
+fn dithered_codes_average_to_the_true_value_on_an_8_bit_link() {
+    // 100.4 steps of 8 bits: rounding alone is off by 0.4 everywhere, so a gradient bands.
+    let value = 100.4 / 255.0;
+    let pass = dithered(Some(8));
+    let (mut sum, mut plain) = (0.0f64, 0.0f64);
+    let size = 64u32;
+    for y in 0..size {
+        for x in 0..size {
+            let out = pass.dither([value; 3], x, y);
+            sum += f64::from((out[0] * 255.0).round());
+            plain += f64::from((value * 255.0).round());
+        }
+    }
+    let count = f64::from(size * size);
+    assert!((plain / count - 100.4).abs() > 0.39);
+    assert!((sum / count - 100.4).abs() < 0.08, "mean {}", sum / count);
+}
+
+#[test]
+fn the_three_channels_get_different_noise() {
+    let pass = dithered(Some(8));
+    let differing = (0..32u32)
+        .filter(|&x| {
+            let out = pass.dither([0.5; 3], x, 7);
+            out[0] != out[1] || out[1] != out[2]
+        })
+        .count();
+    assert!(differing > 16);
+}
+
+#[test]
+fn the_capture_pass_does_not_dither() {
+    let plain = FinalPass::new(203.0, PEAK, None);
+    let dithered = dithered(Some(8));
+    assert_eq!(
+        plain.apply([0.4, 0.5, 0.6]),
+        dithered.apply([0.4, 0.5, 0.6])
+    );
 }

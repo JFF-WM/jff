@@ -257,7 +257,12 @@ pub struct FinalPass {
     pub eotf: OutputEotf,
     /// How bright the visible content says it gets, in cd/m² (see [`frame_content_peak`]). Set, it replaces `tone`: the frame is fitted to it. Not part of the settings `new` works out, it changes from frame to frame.
     pub content_peak: Option<f32>,
+    /// Highest code value the link carries when it has fewer bits than the signal needs (255 for 8 bits), 0 for no dithering, see [`FinalPass::dither`].
+    pub dither_levels: f32,
 }
+
+/// Codes at or above this many bits are fine enough that dithering them would only add noise.
+pub const DITHER_MAX_BITS: u32 = 10;
 
 fn narrow(m: &Mat3) -> [[f32; 3]; 3] {
     m.map(|row| row.map(|v| v as f32))
@@ -294,6 +299,19 @@ impl FinalPass {
             tone: ToneMap::default(),
             eotf: OutputEotf::default(),
             content_peak: None,
+            dither_levels: 0.0,
+        }
+    }
+
+    /// The same pass dithered for a link of `bits` per color, `None` or [`DITHER_MAX_BITS`] and up for none.
+    pub fn with_dither(self, bits: Option<u32>) -> Self {
+        let dither_levels = match bits {
+            Some(bits) if (1..DITHER_MAX_BITS).contains(&bits) => ((1u32 << bits) - 1) as f32,
+            _ => 0.0,
+        };
+        Self {
+            dither_levels,
+            ..self
         }
     }
 
@@ -337,6 +355,33 @@ impl FinalPass {
             OutputEotf::Pq => nits.map(|v| pq_encode(v.clamp(0.0, PQ_PEAK) / PQ_PEAK)),
             OutputEotf::Hlg => hlg_signal(nits, self.luma_2020),
         }
+    }
+}
+
+/// Interleaved gradient noise at a pixel, 0 to 1 (the shader's `ign`).
+pub fn dither_noise(x: f32, y: f32) -> f32 {
+    let inner = (x * 0.067_110_56 + y * 0.005_837_15).fract();
+    (52.982_92 * inner).fract()
+}
+
+impl FinalPass {
+    /// The shader's `dither` on the code values `code` of pixel (`x`, `y`): triangular noise of one step of the link is added, black is left alone, and the result stays in 0 to 1. Unchanged when the pass is not dithered. [`FinalPass::apply`] does not do this: a capture keeps its own bits.
+    pub fn dither(&self, code: [f32; 3], x: u32, y: u32) -> [f32; 3] {
+        if self.dither_levels <= 0.0 {
+            return code;
+        }
+        let (x, y) = (x as f32, y as f32);
+        let mut out = code;
+        for (channel, value) in out.iter_mut().enumerate() {
+            if *value <= 0.0 {
+                continue;
+            }
+            let c = channel as f32;
+            let a = dither_noise(x + 41.0 * c, y);
+            let b = dither_noise(x, y + 73.0 + 29.0 * c);
+            *value = (*value + (a + b - 1.0) / self.dither_levels).clamp(0.0, 1.0);
+        }
+        out
     }
 }
 

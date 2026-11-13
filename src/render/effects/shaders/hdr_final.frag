@@ -30,7 +30,8 @@ uniform float tint;
 // knee, 1 with the BT.2390 EETF. `content_peak` above 0 is how bright the visible content says it
 // gets (cd/m², `FinalPass::content_peak`): it replaces `tone_kind`, content up to the panel's peak
 // is left as it is and brighter content is BT.2390-mapped with that peak as its source, 0 is
-// no metadata. This is `FinalPass::apply` in primitives/hdr_output.rs, keep them the same.
+// no metadata. A link with fewer bits than the signal needs gets `dither_levels` (see `dither`). This
+// is `FinalPass::apply` and `FinalPass::dither` in primitives/hdr_output.rs, keep them the same.
 uniform float sdr_white;
 uniform float peak;
 // BT.2020 to the panel's primaries, row by row, and back.
@@ -46,6 +47,8 @@ uniform float map_on;
 uniform float tone_kind;
 uniform float content_peak;
 uniform float out_hlg;
+// Highest code value of the link (255 for 8 bits), 0 for no dithering.
+uniform float dither_levels;
 
 const float KNEE = 0.75;
 const float BT2390_SOURCE_PEAK = 1000.0;
@@ -125,6 +128,22 @@ float tone_map(float nits) {
     return knee + range * (1.0 - exp(-(nits - knee) / range));
 }
 
+// Interleaved gradient noise (Jimenez), 0 to 1, a fixed pattern per pixel. `dither_noise` in
+// primitives/hdr_output.rs.
+float ign(vec2 p) {
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+
+// A code value with triangular noise of one step added before the link rounds it: a gradient
+// that would band on a link with fewer bits turns into fine grain. Black is left alone, and the
+// pattern is fixed to the pixel so a still picture does not shimmer.
+vec3 dither(vec3 code, vec2 p) {
+    vec3 a = vec3(ign(p), ign(p + vec2(41.0, 0.0)), ign(p + vec2(82.0, 0.0)));
+    vec3 b = vec3(ign(p + vec2(0.0, 73.0)), ign(p + vec2(0.0, 102.0)), ign(p + vec2(0.0, 131.0)));
+    vec3 lit = vec3(greaterThan(code, vec3(0.0)));
+    return clamp(code + lit * (a + b - vec3(1.0)) / dither_levels, 0.0, 1.0);
+}
+
 void main() {
     vec3 nits = max(texture2D(tex, v_coords).rgb, vec3(0.0)) * sdr_white;
 
@@ -156,5 +175,7 @@ void main() {
 
     // The frame is opaque, `alpha` is 1.
     vec3 coded = out_hlg > 0.5 ? hlg_signal(nits) : pq_encode(max(nits, vec3(0.0)));
+    if (dither_levels > 0.0)
+        coded = dither(coded, gl_FragCoord.xy);
     gl_FragColor = vec4(coded, 1.0) * alpha;
 }

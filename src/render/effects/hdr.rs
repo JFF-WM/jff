@@ -57,6 +57,7 @@ fn program(renderer: &mut GlesRenderer) -> Option<GlesTexProgram> {
                 UniformName::new("tone_kind", UniformType::_1f),
                 UniformName::new("content_peak", UniformType::_1f),
                 UniformName::new("out_hlg", UniformType::_1f),
+                UniformName::new("dither_levels", UniformType::_1f),
             ],
         )
         .map_err(|err| tracing::warn!("error compiling the HDR output shader: {err:#}"))
@@ -327,6 +328,7 @@ impl RenderElement<GlesRenderer> for HdrFrameElement {
             Uniform::new("tone_kind", pass.tone.shader_param()),
             Uniform::new("content_peak", pass.content_peak.unwrap_or(0.0)),
             Uniform::new("out_hlg", f32::from(u8::from(pass.eotf == OutputEotf::Hlg))),
+            Uniform::new("dither_levels", pass.dither_levels),
         ];
         frame.render_texture_from_to(
             &self.texture,
