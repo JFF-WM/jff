@@ -1101,7 +1101,9 @@ impl Config {
     /// returns warnings for things that load fine but probably aren't what you meant.
     pub fn check_text(text: &str) -> anyhow::Result<Vec<String>> {
         let config = Self::parse(text)?;
-        let doc: KdlDocument = text.parse()?;
+        let doc: KdlDocument = text
+            .parse()
+            .map_err(|e: kdl::KdlError| anyhow::anyhow!("{e:?}"))?;
         let mut warnings = Vec::new();
         for node in doc.nodes() {
             let name = node.name().value();
