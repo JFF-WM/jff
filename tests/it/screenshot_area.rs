@@ -4,8 +4,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use jff_wm::feature::screenshot::area::{
-    crop_rgba, expand_home, file_name, flip_rows, hit_handle, normalize_rect, physical_rect,
-    resize_rect, screenshot_dir, unpremultiply, Handle, Rect, Selector,
+    crop_channels, crop_rgba, expand_home, file_name, flip_rows, hit_handle, normalize_rect,
+    physical_rect, resize_rect, screenshot_dir, unpremultiply, Handle, Rect, Selector,
 };
 
 const MONITOR: Rect = (1920, 0, 1280, 720);
@@ -179,6 +179,21 @@ fn picture(w: usize, h: usize) -> Vec<u8> {
     (0..h)
         .flat_map(|y| (0..w).flat_map(move |x| [x as u8, y as u8, 7, 255]))
         .collect()
+}
+
+#[test]
+fn crop_channels_cuts_half_floats_the_same_way() {
+    // 6 by 4 pixels, four values each, every value says where it came from
+    let src: Vec<u16> = (0..4u16)
+        .flat_map(|y| (0..6u16).flat_map(move |x| [x, y, 7, 255]))
+        .collect();
+    let (out, w, h) = crop_channels(&src, 6, 4, (2, 1, 3, 2), 4).unwrap();
+    assert_eq!((w, h), (3, 2));
+    assert_eq!(&out[..4], &[2, 1, 7, 255]);
+    assert_eq!(&out[out.len() - 4..], &[4, 2, 7, 255]);
+    assert_eq!(out.len(), 3 * 2 * 4);
+    assert!(crop_channels(&src, 6, 4, (6, 0, 2, 2), 4).is_none());
+    assert!(crop_channels(&src[..10], 6, 4, (0, 0, 2, 2), 4).is_none());
 }
 
 #[test]

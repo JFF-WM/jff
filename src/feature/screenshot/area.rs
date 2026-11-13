@@ -182,19 +182,34 @@ pub fn physical_rect(rect: Rect, origin: (i32, i32), scale: f64) -> Rect {
 /// The pixels of `rect` out of an RGBA picture `width` by `height`, as `(pixels, width, height)`.
 /// Clipped to the picture. `None` when nothing is left.
 pub fn crop_rgba(src: &[u8], width: i32, height: i32, rect: Rect) -> Option<(Vec<u8>, i32, i32)> {
+    crop_channels(src, width, height, rect, 4)
+}
+
+/// [`crop_rgba`] for any kind of value: `per_pixel` of them make a pixel (4 bytes of RGBA, or 4
+/// half floats of an HDR picture).
+pub fn crop_channels<T: Copy>(
+    src: &[T],
+    width: i32,
+    height: i32,
+    rect: Rect,
+    per_pixel: usize,
+) -> Option<(Vec<T>, i32, i32)> {
     let left = rect.0.clamp(0, width);
     let top = rect.1.clamp(0, height);
     let right = (rect.0 + rect.2).clamp(0, width);
     let bottom = (rect.1 + rect.3).clamp(0, height);
-    if right <= left || bottom <= top || src.len() < (width as usize) * (height as usize) * 4 {
+    if right <= left
+        || bottom <= top
+        || src.len() < (width as usize) * (height as usize) * per_pixel
+    {
         return None;
     }
-    let stride = width as usize * 4;
-    let row_bytes = (right - left) as usize * 4;
-    let mut out = Vec::with_capacity(row_bytes * (bottom - top) as usize);
+    let stride = width as usize * per_pixel;
+    let row_len = (right - left) as usize * per_pixel;
+    let mut out = Vec::with_capacity(row_len * (bottom - top) as usize);
     for y in top..bottom {
-        let start = y as usize * stride + left as usize * 4;
-        out.extend_from_slice(&src[start..start + row_bytes]);
+        let start = y as usize * stride + left as usize * per_pixel;
+        out.extend_from_slice(&src[start..start + row_len]);
     }
     Some((out, right - left, bottom - top))
 }

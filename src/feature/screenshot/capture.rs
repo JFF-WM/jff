@@ -7,7 +7,9 @@
 //!
 //! A full-monitor screenshot of a monitor in HDR mode is the exception: it is drawn into the
 //! same linear working space as the screen (`capture_output_hdr`) and saved as a 16-bit PQ PNG.
-//! The window and area screenshots, and `image_copy`, still get the sRGB picture.
+//! So is an area selection on such a monitor: the frozen frame is captured twice, as sRGB for
+//! the screen and in the working space for the file. The window screenshots, and `image_copy`,
+//! still get the sRGB picture.
 //!
 //! Saving: `save.rs` turns the pixels into a file, the clipboard, and a notification on a
 //! worker thread. Capturing is synchronous, nothing else is.
@@ -56,7 +58,7 @@ use smithay::utils::{
 use crate::app::{Backend, BACKGROUND};
 use crate::feature::outputs::output_rect;
 use crate::feature::screenshot::area::{
-    crop_rgba, flip_rows, physical_rect, screenshot_dir, Selector,
+    crop_channels, crop_rgba, flip_rows, physical_rect, screenshot_dir, Selector,
 };
 use crate::feature::screenshot::save::{notify, spawn_save, spawn_save_hdr, HdrSaveJob, SaveJob};
 use crate::feature::window_anim::OpenFrame;
@@ -149,6 +151,8 @@ pub struct ScreenshotUi {
     scale: f64,
     /// Frozen frame, RGBA (`Abgr8888`), top row first, `width * height * 4` bytes.
     pixels: Vec<u8>,
+    /// The same frame in the working space, for a monitor in HDR mode: what the file is cut from.
+    hdr: Option<HdrCaptured>,
     width: u32,
     height: u32,
     buffer: MemoryRenderBuffer,
@@ -422,11 +426,14 @@ impl JffState {
     /// A picture of `output` in the linear working space it is composited in, for a monitor in
     /// HDR mode. Same pieces as [`JffState::capture_output`], only converted to the working
     /// space instead of to sRGB.
-    pub(crate) fn capture_output_hdr(&mut self, output: &Output) -> Result<HdrCaptured, String> {
+    pub(crate) fn capture_output_hdr(
+        &mut self,
+        output: &Output,
+        with_cursor: bool,
+    ) -> Result<HdrCaptured, String> {
         let (space, pass) = self
             .hdr_capture(output)
             .ok_or("the monitor is not shown as HDR")?;
-        let with_cursor = self.config.screenshot().include_cursor;
         let frame = self.output_frame(output, with_cursor, Some(space))?;
         let renderer = self.backend.renderer();
         let elements = hdr_frame::linearize(&mut *renderer, frame.elements, space);
@@ -807,7 +814,8 @@ impl JffState {
     pub fn screenshot_fullscreen(&mut self) -> Result<(), String> {
         let output = self.output_at_pointer().ok_or("there is no monitor")?;
         if self.hdr_capture(&output).is_some() {
-            match self.capture_output_hdr(&output) {
+            let include_cursor = self.config.screenshot().include_cursor;
+            match self.capture_output_hdr(&output, include_cursor) {
                 Ok(picture) => {
                     self.queue_save_hdr(picture);
                     return Ok(());
@@ -855,6 +863,16 @@ impl JffState {
 
         // Freeze first, so an open menu is in the picture, and no cursor.
         let picture = self.capture_output(&output, false)?;
+        // A monitor in HDR mode is frozen a second time for the file, still before the popups go.
+        let hdr = if self.hdr_capture(&output).is_some() {
+            self.capture_output_hdr(&output, false)
+                .map_err(|why| {
+                    tracing::warn!("no HDR frame for the selection, it will be sRGB: {why}");
+                })
+                .ok()
+        } else {
+            None
+        };
         // Then dismiss popups: with a grab they'd hold the pointer.
         self.dismiss_popups();
 
@@ -877,6 +895,7 @@ impl JffState {
             rect,
             scale,
             pixels: picture.rgba,
+            hdr,
             width: picture.width,
             height: picture.height,
             buffer,
@@ -951,7 +970,30 @@ impl JffState {
         };
         let wanted = physical_rect(selection, (ui.rect.0, ui.rect.1), ui.scale);
         let cropped = crop_rgba(&ui.pixels, ui.width as i32, ui.height as i32, wanted);
+        // Same rectangle out of the HDR frame, which has the size of the other one.
+        let cropped_hdr = ui.hdr.as_ref().map(|frame| {
+            let cut = crop_channels(
+                &frame.half_rgba,
+                frame.width as i32,
+                frame.height as i32,
+                wanted,
+                4,
+            );
+            (cut, frame.pass)
+        });
         self.cancel_screenshot();
+        if let Some((cut, pass)) = cropped_hdr {
+            match cut {
+                Some((half_rgba, width, height)) => self.queue_save_hdr(HdrCaptured {
+                    half_rgba,
+                    width: width as u32,
+                    height: height as u32,
+                    pass,
+                }),
+                None => report_failure("the selection is empty"),
+            }
+            return;
+        }
         match cropped {
             Some((rgba, width, height)) => self.queue_save(
                 Captured {
