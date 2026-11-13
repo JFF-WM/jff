@@ -19,6 +19,7 @@ fn view(id: u64) -> View {
         focused: false,
         output: Some("DP-1".to_string()),
         workspace: 1,
+        pid: Some(4242),
     }
 }
 
@@ -685,13 +686,15 @@ fn a_view_is_written_like_the_documented_example() {
         v.to_json(),
         "{\"id\":1,\"app_id\":\"foot\",\"title\":\"~\",\"x\":40,\"y\":40,\"width\":800,\
              \"height\":600,\"maximized\":false,\"fullscreen\":false,\"focused\":true,\
-             \"output\":\"DP-1\",\"workspace\":1}"
+             \"output\":\"DP-1\",\"workspace\":1,\"pid\":4242}"
     );
     v.app_id = None;
     v.title = None;
     v.output = None;
     assert!(v.to_json().contains("\"app_id\":null,\"title\":null"));
     assert!(v.to_json().contains("\"output\":null"));
+    v.pid = None;
+    assert!(v.to_json().ends_with("\"pid\":null}"));
 }
 
 #[test]
@@ -701,7 +704,7 @@ fn events_are_written_as_one_json_line_each() {
             Event::ViewOpened(view(5)),
             "{\"event\":\"view-opened\",\"id\":5,\"app_id\":\"foot\",\"title\":\"~\",\
                  \"x\":40,\"y\":40,\"width\":800,\"height\":600,\"maximized\":false,\
-                 \"fullscreen\":false,\"focused\":false,\"output\":\"DP-1\",\"workspace\":1}",
+                 \"fullscreen\":false,\"focused\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242}",
         ),
         (
             Event::ViewClosed { id: 5 },

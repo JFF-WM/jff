@@ -99,6 +99,10 @@ pub struct View {
     pub output: Option<String>,
     /// The workspace the window lives on, counting from 1.
     pub workspace: usize,
+    /// Process id of the client that owns the window, from the Wayland socket's peer
+    /// credentials. Null when jff can't tell. Windows of one client share it, and for an
+    /// X11 window it is xwayland-satellite's pid, not the X11 app's.
+    pub pid: Option<u32>,
 }
 
 impl View {
@@ -106,7 +110,7 @@ impl View {
     fn members(&self) -> String {
         format!(
             "\"id\":{},\"app_id\":{},\"title\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\
-             \"maximized\":{},\"fullscreen\":{},\"focused\":{},\"output\":{},\"workspace\":{}",
+             \"maximized\":{},\"fullscreen\":{},\"focused\":{},\"output\":{},\"workspace\":{},\"pid\":{}",
             self.id,
             json_opt(self.app_id.as_deref()),
             json_opt(self.title.as_deref()),
@@ -119,6 +123,7 @@ impl View {
             self.focused,
             json_opt(self.output.as_deref()),
             self.workspace,
+            self.pid.map_or_else(|| "null".to_string(), |pid| pid.to_string()),
         )
     }
 

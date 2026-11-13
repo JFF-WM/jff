@@ -49,8 +49,11 @@
 //! `{"ok":true,"workspace":2,"count":9}` (the shown workspace, from 1). `status` replies
 //! `{"ok":true,"views":[...],"workspace":2,"count":9}`. A view is
 //! `{"id":1,"app_id":"foot","title":"~","x":40,"y":40,"width":800,"height":600,
-//!   "maximized":false,"fullscreen":false,"focused":true,"output":"DP-1","workspace":1}`.
-//! `id` is assigned when the window appears and never reused while jff runs.
+//!   "maximized":false,"fullscreen":false,"focused":true,"output":"DP-1","workspace":1,
+//!   "pid":4242}`.
+//! `id` is assigned when the window appears and never reused while jff runs. `pid` is the
+//! process id of the client that owns the window (null when unknown), an X11 window reports
+//! xwayland-satellite's pid.
 //!
 //! `outputs` replies `{"ok":true,"outputs":[OUTPUT,...]}`, each OUTPUT what `watch` describes
 //! below (`name`, `x`, `y`, `width`, `height`, `scanout`, `adaptive_sync`, `color`), as it is
@@ -199,6 +202,7 @@ use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::Resource;
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::wlr_layer::Layer;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
@@ -735,7 +739,16 @@ impl JffState {
             focused,
             output,
             workspace,
+            pid: self.window_pid(window),
         }
+    }
+
+    /// Process id of the client that owns `window`, if the socket can tell.
+    fn window_pid(&self, window: &Window) -> Option<u32> {
+        let surface = window.toplevel()?.wl_surface();
+        let client = surface.client()?;
+        let creds = client.get_credentials(&self.display_handle).ok()?;
+        u32::try_from(creds.pid).ok()
     }
 
     /// Every monitor, as `watch` and `outputs` describe them.
