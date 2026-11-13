@@ -2,7 +2,10 @@
 
 use std::path::PathBuf;
 
-use jff_wm::feature::screenshot::save::{encode_png, save_with, timestamp, write_unique, SaveJob};
+use jff_wm::feature::screenshot::save::{
+    encode_png, save_hdr_with, save_with, timestamp, write_unique, HdrSaveJob, SaveJob,
+};
+use jff_wm::primitives::hdr_output::FinalPass;
 
 struct TempDir(PathBuf);
 
@@ -199,4 +202,64 @@ fn the_timestamp_has_the_shape_of_a_file_name() {
     let stamp = timestamp();
     assert_eq!(stamp.len(), "2026-11-04 21-30-05".len(), "{stamp}");
     assert!(!stamp.contains(':') && !stamp.contains('/'));
+}
+
+fn hdr_job(dir: &TempDir, half_rgba: Vec<u16>, width: u32, height: u32) -> HdrSaveJob {
+    HdrSaveJob {
+        half_rgba,
+        width,
+        height,
+        pass: FinalPass::new(203.0, 1000.0, None),
+        dir: Some(dir.0.clone()),
+        wants_clipboard: false,
+    }
+}
+
+#[test]
+fn an_hdr_picture_is_saved_as_a_16_bit_png_that_says_it_is_pq() {
+    let dir = TempDir::new("hdr");
+    // one white pixel and one black one
+    let path = save_hdr_with(
+        hdr_job(
+            &dir,
+            vec![0x3C00, 0x3C00, 0x3C00, 0x3C00, 0, 0, 0, 0x3C00],
+            2,
+            1,
+        ),
+        "2026-11-13 00-00-00",
+    )
+    .unwrap();
+    assert_eq!(
+        path.file_name().unwrap().to_str().unwrap(),
+        "Screenshot from 2026-11-13 00-00-00.png"
+    );
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(bytes
+        .windows(8)
+        .any(|w| w == [b'c', b'I', b'C', b'P', 9, 16, 0, 1]));
+    let mut reader = png::Decoder::new(std::io::Cursor::new(&bytes))
+        .read_info()
+        .unwrap();
+    assert_eq!(reader.info().bit_depth, png::BitDepth::Sixteen);
+    let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+    reader.next_frame(&mut buf).unwrap();
+    let first = u16::from_be_bytes([buf[0], buf[1]]);
+    let last = u16::from_be_bytes([buf[6], buf[7]]);
+    assert!(first > 20_000, "white should be a high code, got {first}");
+    assert!(last < 10, "black should be near zero, got {last}");
+}
+
+#[test]
+fn an_hdr_picture_of_the_wrong_size_is_refused() {
+    let dir = TempDir::new("hdr-size");
+    let err = save_hdr_with(hdr_job(&dir, vec![0; 7], 2, 1), "x").unwrap_err();
+    assert!(err.contains("needs 8 values"), "{err}");
+}
+
+#[test]
+fn an_hdr_picture_with_nowhere_to_go_is_refused() {
+    let dir = TempDir::new("hdr-nodir");
+    let mut job = hdr_job(&dir, vec![0; 4], 1, 1);
+    job.dir = None;
+    assert!(save_hdr_with(job, "x").is_err());
 }

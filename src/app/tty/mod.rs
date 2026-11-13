@@ -1231,6 +1231,15 @@ impl Tty {
         }
     }
 
+    /// The working space and final pass of `output` while it is drawn as HDR, `None` when it is
+    /// SDR, not lit, or not one of ours. A screenshot is made with the same pass the monitor
+    /// shows, so it has the same tone curve and gamut.
+    pub fn hdr_capture(&self, output: &Output) -> Option<(WorkingSpace, FinalPass)> {
+        let lit = self.outputs.values().find(|lit| lit.output == *output)?;
+        let hdr = lit.hdr.as_ref()?;
+        Some((hdr.space, hdr.pass))
+    }
+
     /// What clients are told about each monitor drawn in HDR: PQ in BT.2020 up to its peak (the EDID's or `hdr-peak`), with SDR white at its configured level.
     pub fn hdr_descriptions(&self) -> Vec<(String, ImageDescription)> {
         self.outputs

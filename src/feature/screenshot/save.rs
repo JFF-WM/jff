@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::feature::screenshot::area::{file_name, unpremultiply};
+use crate::primitives::hdr_capture::pq_picture;
+use crate::primitives::hdr_output::FinalPass;
+use crate::primitives::hdr_png;
 
 /// Clipboard helper. `wl-copy` reads the PNG from its standard input.
 const CLIPBOARD_PROGRAM: &str = "wl-copy";
@@ -26,6 +29,21 @@ pub struct SaveJob {
     pub dir: Option<PathBuf>,
     /// Also hand the PNG to the clipboard.
     pub copy_to_clipboard: bool,
+}
+
+/// A picture of an HDR monitor on its way to disk, still in the working space it was drawn in.
+/// The conversion to PQ and the encoding are slow, so they happen on the worker thread too.
+pub struct HdrSaveJob {
+    /// Four half floats per pixel (the bits), top row first.
+    pub half_rgba: Vec<u16>,
+    pub width: u32,
+    pub height: u32,
+    /// The final pass of the monitor the picture was taken from.
+    pub pass: FinalPass,
+    /// Folder to save in. `None` means no home directory to derive one from.
+    pub dir: Option<PathBuf>,
+    /// The user asked for the clipboard too. An HDR picture is not put there, see [`spawn_save_hdr`].
+    pub wants_clipboard: bool,
 }
 
 /// What `save_with` did.
@@ -132,6 +150,32 @@ pub fn save_with(mut job: SaveJob, stamp: &str, clipboard_program: &str) -> Resu
     Ok(Saved { path, clipboard })
 }
 
+/// Convert and write `job` as a 16-bit PQ PNG, returning the path it went to.
+pub fn save_hdr_with(job: HdrSaveJob, stamp: &str) -> Result<PathBuf, String> {
+    let dir = job
+        .dir
+        .clone()
+        .ok_or("no folder to save in (no home directory and no screenshot path)")?;
+    let expected = job.width as usize * job.height as usize * 4;
+    if job.width == 0 || job.height == 0 || job.half_rgba.len() != expected {
+        return Err(format!(
+            "a {}x{} picture needs {expected} values, got {}",
+            job.width,
+            job.height,
+            job.half_rgba.len()
+        ));
+    }
+    let picture = pq_picture(&job.pass, &job.half_rgba);
+    let png = hdr_png::encode(
+        &picture.codes,
+        job.width,
+        job.height,
+        Some(picture.max_nits),
+    )?;
+    write_unique(&dir, stamp, &png)
+        .map_err(|err| format!("could not write into {}: {err}", dir.display()))
+}
+
 /// Local time for file names, `2026-11-04 21-30-05`.
 pub fn timestamp() -> String {
     chrono::Local::now().format("%Y-%m-%d %H-%M-%S").to_string()
@@ -173,6 +217,35 @@ pub fn spawn_save(job: SaveJob) {
                 }
             },
         );
+    if let Err(err) = spawned {
+        tracing::warn!("could not start the screenshot thread: {err}");
+    }
+}
+
+/// Save an HDR `job` on its own thread, then report in the log and via notification.
+///
+/// The file is all there is: other programs reading the clipboard mostly ignore the `cICP`
+/// chunk and would show a washed-out picture, so nothing is handed to `wl-copy`. The
+/// notification says so when the clipboard had been asked for.
+pub fn spawn_save_hdr(job: HdrSaveJob) {
+    let wants_clipboard = job.wants_clipboard;
+    let spawned = std::thread::Builder::new()
+        .name("jff-screenshot".to_string())
+        .spawn(move || match save_hdr_with(job, &timestamp()) {
+            Ok(path) => {
+                let path = path.display().to_string();
+                tracing::info!("HDR screenshot saved to {path}");
+                let mut body = path;
+                if wants_clipboard {
+                    body.push_str("\nNot copied to the clipboard: it is an HDR picture.");
+                }
+                notify("HDR screenshot saved", &body);
+            }
+            Err(why) => {
+                tracing::warn!("HDR screenshot not saved: {why}");
+                notify("Screenshot failed", &why);
+            }
+        });
     if let Err(err) = spawned {
         tracing::warn!("could not start the screenshot thread: {err}");
     }

@@ -5,6 +5,10 @@
 //! list the frame loop draws, render it into an offscreen texture, and read the pixels back
 //! (RGBA, top row first). The overview is never in a picture.
 //!
+//! A full-monitor screenshot of a monitor in HDR mode is the exception: it is drawn into the
+//! same linear working space as the screen (`capture_output_hdr`) and saved as a 16-bit PQ PNG.
+//! The window and area screenshots, and `image_copy`, still get the sRGB picture.
+//!
 //! Saving: `save.rs` turns the pixels into a file, the clipboard, and a notification on a
 //! worker thread. Capturing is synchronous, nothing else is.
 //!
@@ -49,16 +53,17 @@ use smithay::utils::{
     SERIAL_COUNTER,
 };
 
-use crate::app::BACKGROUND;
+use crate::app::{Backend, BACKGROUND};
 use crate::feature::outputs::output_rect;
 use crate::feature::screenshot::area::{
     crop_rgba, flip_rows, physical_rect, screenshot_dir, Selector,
 };
-use crate::feature::screenshot::save::{notify, spawn_save, SaveJob};
+use crate::feature::screenshot::save::{notify, spawn_save, spawn_save_hdr, HdrSaveJob, SaveJob};
 use crate::feature::window_anim::OpenFrame;
 use crate::input::BTN_LEFT;
+use crate::primitives::hdr_output::FinalPass;
 use crate::primitives::layout::{self, Rect};
-use crate::protocol::color_management::OutputColor;
+use crate::protocol::color_management::{OutputColor, WorkingSpace};
 use crate::protocol::layer_shell::{
     layer_body_elements, layer_elements, layer_popup_elements, layers_above, BELOW_WINDOWS,
 };
@@ -67,6 +72,7 @@ use crate::render::effects::background_effect::window_elements;
 use crate::render::effects::border::BorderPaint;
 use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
 use crate::render::effects::gamut;
+use crate::render::effects::hdr as hdr_frame;
 use crate::render::effects::rounded::is_fullscreen;
 use crate::render::elements::JffElement;
 use crate::state::JffState;
@@ -169,6 +175,25 @@ pub struct Captured {
     pub height: u32,
 }
 
+/// A picture of an HDR monitor read back from the working space: four half floats per pixel,
+/// top row first, in linear BT.2020 where 1.0 is SDR white.
+pub struct HdrCaptured {
+    pub half_rgba: Vec<u16>,
+    pub width: u32,
+    pub height: u32,
+    /// What the monitor's final pass is, to turn the working space into the picture's PQ codes.
+    pub pass: FinalPass,
+}
+
+/// Everything a capture of a monitor draws, ready to render.
+struct OutputFrame {
+    elements: Vec<JffElement>,
+    size: (i32, i32),
+    scale: f64,
+    /// Keeps the colors the elements were built for active until the picture is rendered.
+    _color_scope: gamut::Scope,
+}
+
 /// Make the corners of a `width` by `height` premultiplied RGBA picture transparent, with a
 /// quarter circle of `radius` pixels and a soft edge.
 fn round_corners(rgba: &mut [u8], width: i32, height: i32, radius: i32) {
@@ -257,6 +282,69 @@ fn render_to_rgba<E: RenderElement<GlesRenderer>>(
     })
 }
 
+/// Render `elements` (already in the working space) into a float texture of `size` and read it
+/// back as the bits of half floats, four per pixel, top row first.
+fn render_to_working(
+    renderer: &mut GlesRenderer,
+    size: (i32, i32),
+    scale: f64,
+    elements: &[JffElement],
+    clear: [f32; 4],
+) -> Result<Vec<u16>, String> {
+    if size.0 <= 0 || size.1 <= 0 {
+        return Err("nothing to capture: the picture would be empty".to_string());
+    }
+    let buffer_size: Size<i32, BufferCoords> = size.into();
+    let physical: Size<i32, Physical> = size.into();
+
+    let mut texture: GlesTexture = renderer
+        .create_buffer(hdr_frame::WORKING_FORMAT, buffer_size)
+        .map_err(|err| format!("could not create a float buffer: {err:?}"))?;
+    let mut target = renderer
+        .bind(&mut texture)
+        .map_err(|err| format!("could not draw into the float buffer: {err:?}"))?;
+
+    let mut tracker = OutputDamageTracker::new(physical, scale, Transform::Normal);
+    let result = {
+        // Blur and the like pick their texture format by this, as in the frame loop.
+        let _drawing = gamut::begin_hdr_draw();
+        tracker
+            .render_output(renderer, &mut target, 0, elements, clear)
+            .map_err(|err| format!("could not render the picture: {err:?}"))?
+    };
+    let _ = result.sync.wait();
+
+    let mapping = renderer
+        .copy_framebuffer(
+            &target,
+            Rectangle::from_size(buffer_size),
+            hdr_frame::WORKING_FORMAT,
+        )
+        .map_err(|err| format!("could not read the float picture back: {err:?}"))?;
+    let flipped = mapping.flipped();
+    let data = renderer
+        .map_texture(&mapping)
+        .map_err(|err| format!("could not map the picture: {err:?}"))?;
+
+    let (width, height) = (size.0 as usize, size.1 as usize);
+    // 8 bytes a pixel: four halves
+    if data.len() != width * height * 8 {
+        return Err(format!(
+            "the GPU gave {} bytes for a {width}x{height} float picture",
+            data.len()
+        ));
+    }
+    let mut bytes = data.to_vec();
+    // same inverted check as in `render_to_rgba`
+    if !flipped {
+        flip_rows(&mut bytes, width * 8);
+    }
+    Ok(bytes
+        .chunks_exact(2)
+        .map(|b| u16::from_ne_bytes([b[0], b[1]]))
+        .collect())
+}
+
 /// The cursor as render elements. `pointer` and `origin` in the shared space. Same as the frame
 /// loop in `tty.rs`.
 fn cursor_elements(
@@ -312,6 +400,60 @@ impl JffState {
         output: &Output,
         with_cursor: bool,
     ) -> Result<Captured, String> {
+        let frame = self.output_frame(output, with_cursor, None)?;
+        render_to_rgba(
+            self.backend.renderer(),
+            frame.size,
+            frame.scale,
+            &frame.elements,
+            BACKGROUND,
+        )
+    }
+
+    /// The working space and final pass of `output` while it is shown as HDR, `None` when it is
+    /// not (or on winit, which has no HDR output).
+    fn hdr_capture(&self, output: &Output) -> Option<(WorkingSpace, FinalPass)> {
+        match &self.backend {
+            Backend::Tty(tty) => tty.hdr_capture(output),
+            Backend::Winit(_) => None,
+        }
+    }
+
+    /// A picture of `output` in the linear working space it is composited in, for a monitor in
+    /// HDR mode. Same pieces as [`JffState::capture_output`], only converted to the working
+    /// space instead of to sRGB.
+    pub(crate) fn capture_output_hdr(&mut self, output: &Output) -> Result<HdrCaptured, String> {
+        let (space, pass) = self
+            .hdr_capture(output)
+            .ok_or("the monitor is not shown as HDR")?;
+        let with_cursor = self.config.screenshot().include_cursor;
+        let frame = self.output_frame(output, with_cursor, Some(space))?;
+        let renderer = self.backend.renderer();
+        let elements = hdr_frame::linearize(&mut *renderer, frame.elements, space);
+        let half_rgba = render_to_working(
+            renderer,
+            frame.size,
+            frame.scale,
+            &elements,
+            hdr_frame::clear_color(space, BACKGROUND),
+        )?;
+        Ok(HdrCaptured {
+            half_rgba,
+            width: frame.size.0 as u32,
+            height: frame.size.1 as u32,
+            pass,
+        })
+    }
+
+    /// Build what a picture of `output` draws. `hdr` is the working space of a monitor in HDR
+    /// mode: the elements are then converted to it, and a picture in the sRGB of a file is not
+    /// what comes out.
+    fn output_frame(
+        &mut self,
+        output: &Output,
+        with_cursor: bool,
+        hdr: Option<WorkingSpace>,
+    ) -> Result<OutputFrame, String> {
         if self.session_locked() {
             return Err("the session is locked".to_string());
         }
@@ -330,10 +472,13 @@ impl JffState {
         let millis = self.start_time.elapsed().as_millis() as u32;
         let fullscreen = self.fullscreen_rects();
         // A picture in a file is sRGB: everything drawn below, layers and menus included, is
-        // converted to that, not to the panel.
-        let _color_scope = gamut::enter(crate::protocol::color_management::capture_color(
-            &self.config,
-        ));
+        // converted to that, not to the panel. An HDR picture is the working space instead.
+        let color = crate::protocol::color_management::capture_color(&self.config);
+        let color = match hdr {
+            Some(space) => Some(crate::protocol::color_management::hdr_color(color, space)),
+            None => color,
+        };
+        let color_scope = gamut::enter(color);
 
         // Same order as `render_crtc`: cursor first, when asked for and drawn by jff at all.
         let cursor_near =
@@ -378,8 +523,6 @@ impl JffState {
         ));
         let radius = self.config.radius();
         let popup_radius = self.config.popup_radius();
-        // A picture in a file is sRGB: tagged windows are converted to that, not to the panel.
-        let color = crate::protocol::color_management::capture_color(&self.config);
         let border = self.config.border();
         for entry in self.desk.top_down() {
             let geo = entry.window.geometry();
@@ -425,13 +568,12 @@ impl JffState {
             self.config.blur_ignore_layers(),
         ));
 
-        render_to_rgba(
-            renderer,
-            (mode.size.w, mode.size.h),
-            scale_factor,
-            &elements,
-            BACKGROUND,
-        )
+        Ok(OutputFrame {
+            elements,
+            size: (mode.size.w, mode.size.h),
+            scale: scale_factor,
+            _color_scope: color_scope,
+        })
     }
 
     /// Scale of the monitor `window` is on and the pixel size of a picture of it.
@@ -644,9 +786,37 @@ impl JffState {
         });
     }
 
-    /// Save a picture of the whole monitor under the pointer.
+    /// Hand a finished HDR picture to the worker thread that converts and writes it.
+    fn queue_save_hdr(&self, picture: HdrCaptured) {
+        let config = self.config.screenshot();
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let pictures = std::env::var("XDG_PICTURES_DIR").ok();
+        let dir = screenshot_dir(config.path.as_deref(), pictures.as_deref(), home.as_deref());
+        spawn_save_hdr(HdrSaveJob {
+            half_rgba: picture.half_rgba,
+            width: picture.width,
+            height: picture.height,
+            pass: picture.pass,
+            dir,
+            wants_clipboard: config.copy_to_clipboard,
+        });
+    }
+
+    /// Save a picture of the whole monitor under the pointer. A monitor in HDR mode gives an HDR
+    /// picture, and an sRGB one if that cannot be made.
     pub fn screenshot_fullscreen(&mut self) -> Result<(), String> {
         let output = self.output_at_pointer().ok_or("there is no monitor")?;
+        if self.hdr_capture(&output).is_some() {
+            match self.capture_output_hdr(&output) {
+                Ok(picture) => {
+                    self.queue_save_hdr(picture);
+                    return Ok(());
+                }
+                Err(why) => {
+                    tracing::warn!("no HDR screenshot, taking an sRGB one instead: {why}");
+                }
+            }
+        }
         let include_cursor = self.config.screenshot().include_cursor;
         let picture = self.capture_output(&output, include_cursor)?;
         self.queue_save(picture, false);

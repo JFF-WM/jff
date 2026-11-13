@@ -9,6 +9,7 @@ pub mod frame_clock;
 pub mod gamut;
 pub mod geom;
 pub mod hdr;
+pub mod hdr_capture;
 pub mod hdr_output;
 pub mod hdr_png;
 pub mod hdr_scanout;
