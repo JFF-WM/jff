@@ -2,7 +2,7 @@
 
 use jff_wm::primitives::edid::{Colorimetry, Edid, Eotfs, HdrStaticMetadata};
 use jff_wm::primitives::hdr::{
-    plan, KernelSupport, PeakSource, Status, Unavailable, FALLBACK_PEAK_NITS,
+    plan, KernelSupport, OutputEotf, PeakSource, Status, Unavailable, FALLBACK_PEAK_NITS,
 };
 
 fn kernel() -> KernelSupport {
@@ -230,23 +230,25 @@ fn the_runtime_reasons_have_messages() {
 }
 
 #[test]
-fn a_monitor_with_hlg_and_no_pq_says_so() {
+fn a_monitor_with_hlg_and_no_pq_is_planned_as_hlg() {
     let mut edid = panel();
     let hdr = edid.hdr.as_mut().unwrap();
     hdr.eotfs.pq = false;
     hdr.eotfs.hlg = true;
     assert_eq!(
-        plan(Some(&edid), &kernel(), None),
-        Err(Unavailable::HlgOnly)
+        plan(Some(&edid), &kernel(), None).unwrap().eotf,
+        OutputEotf::Hlg
     );
-    assert!(Unavailable::HlgOnly.to_string().contains("HLG"));
 }
 
 #[test]
 fn a_monitor_with_hlg_and_pq_is_planned_as_pq() {
     let mut edid = panel();
     edid.hdr.as_mut().unwrap().eotfs.hlg = true;
-    assert!(plan(Some(&edid), &kernel(), None).is_ok());
+    assert_eq!(
+        plan(Some(&edid), &kernel(), None).unwrap().eotf,
+        OutputEotf::Pq
+    );
 }
 
 #[test]
