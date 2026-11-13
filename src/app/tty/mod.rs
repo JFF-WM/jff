@@ -1237,6 +1237,8 @@ impl Tty {
                 _ => false,
             };
             if !unchanged {
+                // Entering or leaving HDR changes whether the calibration curves may be set.
+                lit.gamma_pending = true;
                 lit.hdr = hdr.map(|(space, pass, content_metadata)| HdrOutput {
                     space,
                     pass,
@@ -1313,7 +1315,15 @@ impl Tty {
                 continue;
             }
             lit.gamma_pending = false;
-            let wanted = lit.client_gamma.as_ref().or(lit.gamma.as_ref());
+            let curves = lit.client_gamma.as_ref().or(lit.gamma.as_ref());
+            // The table works on the signal the CRTC scans out. An HDR output sends PQ (or HLG), where curves made for sRGB would bend the whole picture, so none is set and one that is there is cleared.
+            if lit.hdr.is_some() && curves.is_some() {
+                tracing::warn!(
+                    "monitor {}: calibration curves are not applied while it is in HDR mode",
+                    lit.output.name()
+                );
+            }
+            let wanted = curves.filter(|_| lit.hdr.is_none());
             if wanted.is_none() && !lit.gamma_applied {
                 continue;
             }
