@@ -30,6 +30,8 @@ pub enum Unavailable {
     NoHdrBlock,
     /// The monitor does not take PQ with static metadata type 1.
     NoPq,
+    /// The monitor lists HLG but not PQ, and only PQ is signalled.
+    HlgOnly,
     /// The EDID does not list BT.2020 RGB colorimetry.
     NoBt2020Rgb,
     /// The connector has no `HDR_OUTPUT_METADATA` property.
@@ -48,6 +50,9 @@ impl std::fmt::Display for Unavailable {
             Unavailable::NoEdid => f.write_str("the monitor has no readable EDID"),
             Unavailable::NoHdrBlock => f.write_str("the EDID has no HDR static metadata block"),
             Unavailable::NoPq => f.write_str("the monitor does not list the PQ transfer function"),
+            Unavailable::HlgOnly => {
+                f.write_str("the monitor lists HLG but not PQ, and only PQ (HDR10) is signalled")
+            }
             Unavailable::NoBt2020Rgb => {
                 f.write_str("the monitor does not list BT.2020 RGB colorimetry")
             }
@@ -182,7 +187,11 @@ pub fn plan(
     let edid = edid.ok_or(Unavailable::NoEdid)?;
     let hdr = edid.hdr.as_ref().ok_or(Unavailable::NoHdrBlock)?;
     if !hdr.eotfs.pq || !hdr.type1 {
-        return Err(Unavailable::NoPq);
+        return Err(if hdr.eotfs.hlg && !hdr.eotfs.pq {
+            Unavailable::HlgOnly
+        } else {
+            Unavailable::NoPq
+        });
     }
     if !edid.colorimetry.bt2020_rgb {
         return Err(Unavailable::NoBt2020Rgb);

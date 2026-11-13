@@ -1811,10 +1811,17 @@ impl JffState {
             if let Some(reason) = scanout_blocked.flatten() {
                 if lit.hdr_scanout.reason != Some(reason) {
                     lit.hdr_scanout.reason = Some(reason);
-                    tracing::debug!(
-                        "monitor {}: no direct scanout while HDR: {reason}",
-                        lit.output.name()
-                    );
+                    if reason.is_notable() {
+                        tracing::info!(
+                            "monitor {}: a PQ window is not scanned out while HDR: {reason}",
+                            lit.output.name()
+                        );
+                    } else {
+                        tracing::debug!(
+                            "monitor {}: no direct scanout while HDR: {reason}",
+                            lit.output.name()
+                        );
+                    }
                 }
             }
             // Blur is opt-in, and never with a window going straight to the primary plane: the
@@ -2077,8 +2084,8 @@ impl JffState {
                         if let Some(key) = hdr_scanout_try {
                             if lit.hdr_scanout.declined != Some(key) {
                                 lit.hdr_scanout.declined = Some(key);
-                                tracing::debug!(
-                                    "monitor {}: no direct scanout while HDR: the buffer did not reach the primary plane",
+                                tracing::info!(
+                                    "monitor {}: a PQ window is not scanned out while HDR: the buffer did not reach the primary plane",
                                     lit.output.name()
                                 );
                             }

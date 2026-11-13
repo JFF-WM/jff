@@ -85,6 +85,16 @@ pub enum Decline {
     SignalPending,
 }
 
+impl Decline {
+    /// The window passed the checks of a PQ BT.2020 client and still cannot go to the plane, which is worth telling the user.
+    pub fn is_notable(self) -> bool {
+        matches!(
+            self,
+            Self::NotDmabuf | Self::SwapchainNotTenBit(_) | Self::FormatMismatch { .. }
+        )
+    }
+}
+
 impl fmt::Display for Decline {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

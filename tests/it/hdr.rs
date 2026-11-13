@@ -228,3 +228,23 @@ fn only_hdr10_can_have_little_headroom() {
 fn the_runtime_reasons_have_messages() {
     assert!(Unavailable::NoFloatTarget.to_string().contains("float"));
 }
+
+#[test]
+fn a_monitor_with_hlg_and_no_pq_says_so() {
+    let mut edid = panel();
+    let hdr = edid.hdr.as_mut().unwrap();
+    hdr.eotfs.pq = false;
+    hdr.eotfs.hlg = true;
+    assert_eq!(
+        plan(Some(&edid), &kernel(), None),
+        Err(Unavailable::HlgOnly)
+    );
+    assert!(Unavailable::HlgOnly.to_string().contains("HLG"));
+}
+
+#[test]
+fn a_monitor_with_hlg_and_pq_is_planned_as_pq() {
+    let mut edid = panel();
+    edid.hdr.as_mut().unwrap().eotfs.hlg = true;
+    assert!(plan(Some(&edid), &kernel(), None).is_ok());
+}

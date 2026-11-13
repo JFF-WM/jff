@@ -235,3 +235,19 @@ fn a_subsurface_coming_or_going_is_tried_again() {
     assert!(!more.was_declined(Some(tried())));
     assert!(!tried().was_declined(Some(more)));
 }
+
+#[test]
+fn only_declines_of_a_pq_client_are_notable() {
+    assert!(Decline::NotDmabuf.is_notable());
+    assert!(Decline::SwapchainNotTenBit(0).is_notable());
+    assert!(Decline::FormatMismatch {
+        buffer: 1,
+        swapchain: 2
+    }
+    .is_notable());
+    assert!(!Decline::NotCovering.is_notable());
+    assert!(!Decline::Untagged.is_notable());
+    assert!(!Decline::NotPqBt2020.is_notable());
+    assert!(!Decline::SignalPending.is_notable());
+    assert!(!Decline::DrawnOver(Over::Popup).is_notable());
+}

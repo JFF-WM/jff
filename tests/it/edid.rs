@@ -1,6 +1,7 @@
 //! Tests for `jff_wm::primitives::edid`. The EDIDs are built here from the facts of the AOC AG323FWG3R3, not captured from one.
 
 use jff_wm::primitives::edid::{self, EdidError};
+use jff_wm::primitives::hdr::{plan, KernelSupport};
 
 const PANEL: [(f64, f64); 4] = [
     (0.6777, 0.3134),
@@ -188,4 +189,20 @@ fn an_analog_input_has_no_bit_depth_and_empty_chromaticities_no_primaries() {
 fn bytes_that_are_no_edid_are_refused() {
     assert_eq!(edid::parse(&[0; 64]), Err(EdidError::TooShort));
     assert_eq!(edid::parse(&[0; 128]), Err(EdidError::BadHeader));
+}
+
+#[test]
+fn a_minimum_code_in_the_edid_reaches_the_infoframe() {
+    // peak code 96 is 400 cd/m², minimum code 51 is 400 * 0.2^2 / 100 = 0.16 cd/m²
+    let mut bytes = base(1);
+    bytes.extend(cta(&[colorimetry(), hdr(0x07, 96, 96, 51)]));
+    let parsed = edid::parse(&bytes).unwrap();
+    let kernel = KernelSupport {
+        hdr_metadata: true,
+        bt2020_rgb: true,
+        max_bpc: Some(8..=12),
+    };
+    let plan = plan(Some(&parsed), &kernel, None).unwrap();
+    assert_eq!(plan.max_luminance, 400);
+    assert_eq!(plan.min_luminance, 1600);
 }
