@@ -652,6 +652,11 @@ fn log_hdr_status(name: &str, status: &Status, swapchain: Fourcc) {
                 "monitor {name}: {status}, swapchain {swapchain:?}, working space {:?}",
                 hdr_frame::WORKING_FORMAT
             );
+            if status.banding() {
+                tracing::warn!(
+                    "monitor {name}: the link cannot carry 10 bits per color, gradients may show banding"
+                );
+            }
             if status.low_headroom() {
                 tracing::warn!(
                     "monitor {name}: SDR white leaves little headroom under this peak, lower `sdr-white` or raise `hdr-peak` for more"

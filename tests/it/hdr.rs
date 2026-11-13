@@ -127,10 +127,10 @@ fn every_missing_piece_has_its_own_reason() {
     );
 
     let mut support = kernel();
-    support.max_bpc = Some(6..=8);
+    support.max_bpc = Some(6..=7);
     assert_eq!(
         plan(Some(&panel()), &support, None),
-        Err(Unavailable::BpcTooLow(8))
+        Err(Unavailable::BpcTooLow(7))
     );
 }
 
@@ -285,4 +285,29 @@ fn missing_or_zero_levels_keep_the_plan() {
     let content = plan.with_content(None, Some(150));
     assert_eq!(content.max_cll, plan.max_cll);
     assert_eq!(content.max_fall, 150);
+}
+
+#[test]
+fn a_link_under_ten_bits_gets_what_it_can_carry() {
+    let mut support = kernel();
+    support.max_bpc = Some(6..=8);
+    let plan = plan(Some(&panel()), &support, None).unwrap();
+    assert_eq!(plan.max_bpc, Some(8));
+    assert!(Status::hdr10(&plan, 203).banding());
+}
+
+#[test]
+fn a_link_of_ten_bits_or_more_does_not_band() {
+    let hdr = plan(Some(&panel()), &kernel(), None).unwrap();
+    assert!(!Status::hdr10(&hdr, 203).banding());
+    let mut support = kernel();
+    support.max_bpc = None;
+    let no_bpc = plan(Some(&panel()), &support, None).unwrap();
+    assert!(!Status::hdr10(&no_bpc, 203).banding());
+    assert!(!Status::Off.banding());
+}
+
+#[test]
+fn the_bpc_reason_names_the_least_it_wants() {
+    assert!(Unavailable::BpcTooLow(6).to_string().contains("at least 8"));
 }

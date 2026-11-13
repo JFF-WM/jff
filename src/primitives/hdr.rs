@@ -10,6 +10,9 @@ pub const FALLBACK_PEAK_NITS: f64 = 1000.0;
 /// Bits per color asked of the link for HDR, where the connector lets us choose.
 pub const HDR_BPC: u32 = 10;
 
+/// Fewest bits per color a link may be left with for HDR. Under [`HDR_BPC`] the picture bands, below this it is refused.
+pub const MIN_HDR_BPC: u32 = 8;
+
 /// What the kernel and driver offer on the connector.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KernelSupport {
@@ -38,7 +41,7 @@ pub enum Unavailable {
     NoMetadataProperty,
     /// The connector's `Colorspace` property has no `BT2020_RGB`.
     NoBt2020Colorspace,
-    /// The link cannot be asked for 10 bits, the most it takes is this many.
+    /// The link cannot be asked for even [`MIN_HDR_BPC`] bits, the most it takes is this many.
     BpcTooLow(u32),
     /// The renderer cannot draw into a 16-bit float texture.
     NoFloatTarget,
@@ -65,7 +68,7 @@ impl std::fmt::Display for Unavailable {
             Unavailable::BpcTooLow(max) => {
                 write!(
                     f,
-                    "the connector's max bpc goes up to {max}, HDR wants {HDR_BPC}"
+                    "the connector's max bpc goes up to {max}, HDR wants at least {MIN_HDR_BPC}"
                 )
             }
             Unavailable::NoFloatTarget => {
@@ -161,6 +164,11 @@ impl Status {
         }
     }
 
+    /// HDR10 on a link set to fewer bits per color than [`HDR_BPC`], where gradients may band.
+    pub fn banding(&self) -> bool {
+        matches!(self, Status::Hdr10 { max_bpc: Some(bpc), .. } if *bpc < HDR_BPC)
+    }
+
     /// HDR10 with so little room above SDR white that highlights barely show.
     pub fn low_headroom(&self) -> bool {
         match self {
@@ -221,7 +229,11 @@ pub fn plan(
         return Err(Unavailable::NoBt2020Colorspace);
     }
     let max_bpc = match &kernel.max_bpc {
-        Some(range) if *range.end() < HDR_BPC => return Err(Unavailable::BpcTooLow(*range.end())),
+        Some(range) if *range.end() < MIN_HDR_BPC => {
+            return Err(Unavailable::BpcTooLow(*range.end()))
+        }
+        // A link that cannot do 10 bits is asked for the most it can do, and the picture may band.
+        Some(range) if *range.end() < HDR_BPC => Some(*range.end()),
         Some(range) => Some(HDR_BPC.max(*range.start())),
         None => None,
     };
