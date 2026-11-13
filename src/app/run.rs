@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use smithay::backend::renderer::ImportMemWl;
 use smithay::reexports::calloop::generic::Generic;
@@ -12,7 +13,51 @@ use crate::config::{Action, Config, ConfigWatch, CONFIG_WATCH_INTERVAL};
 use crate::input::spawn_command;
 use crate::state::JffState;
 
+/// Where a panic message is written before the default hook prints it. Fixed so the file can be
+/// read after a crash that aborts (a panic in a `resource_destructor` aborts instead of
+/// unwinding, and the message would otherwise only be on stderr, which a display manager or a
+/// systemd user unit may not keep). One line per panic, appended.
+const PANIC_LOG: &str = "/tmp/jff-panic.log";
+
+/// Installed once, first thing. The default hook still runs: it prints the message and
+/// backtrace to stderr as usual, and this only copies the message to [`PANIC_LOG`] first.
+fn install_panic_hook() {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown>".to_owned());
+            let message = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                (*s).to_owned()
+            } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic payload>".to_owned()
+            };
+            let line = format!(
+                "{} panicked at {location}: {message}\n",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            );
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(PANIC_LOG)
+                .and_then(|mut f| {
+                    use std::io::Write;
+                    f.write_all(line.as_bytes())
+                });
+            // Still print it the way Rust does, and still honour RUST_BACKTRACE.
+            default(info);
+        }));
+    });
+}
+
 pub fn run() -> anyhow::Result<()> {
+    install_panic_hook();
+
     // `jff msg ...` only talks to a running instance, it never starts one.
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("msg") {
