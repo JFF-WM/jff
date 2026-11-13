@@ -38,8 +38,6 @@ pub enum Unavailable {
     NoBt2020Colorspace,
     /// The link cannot be asked for 10 bits, the most it takes is this many.
     BpcTooLow(u32),
-    /// The output is rotated, which the HDR frame does not handle yet.
-    Rotated,
     /// The renderer cannot draw into a 16-bit float texture.
     NoFloatTarget,
 }
@@ -65,7 +63,6 @@ impl std::fmt::Display for Unavailable {
                     "the connector's max bpc goes up to {max}, HDR wants {HDR_BPC}"
                 )
             }
-            Unavailable::Rotated => f.write_str("HDR does not work with a rotated output yet"),
             Unavailable::NoFloatTarget => {
                 f.write_str("the renderer cannot draw into a 16-bit float texture")
             }

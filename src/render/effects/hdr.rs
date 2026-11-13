@@ -120,6 +120,16 @@ fn solid(space: WorkingSpace, element: &SolidColorRenderElement) -> SolidColorRe
     )
 }
 
+/// The size of the working texture: the mode in the output's own orientation, width and height swapped for a quarter turn. The output's compositor turns the frame onto the panel, so the texture is never turned itself.
+fn oriented_size(output: &Output) -> Option<Size<i32, Physical>> {
+    let mode = output.current_mode()?;
+    Some(
+        output
+            .current_transform()
+            .transform_size(Size::from((mode.size.w, mode.size.h))),
+    )
+}
+
 /// The frame of one HDR output: the texture it is composited into, and what is needed to repaint only what changed.
 pub struct HdrFrame {
     texture: GlesTexture,
@@ -134,35 +144,33 @@ pub struct HdrFrame {
 }
 
 impl HdrFrame {
-    /// A frame for `output` at its current mode, drawn out through `pass`. `Err` says why it could not be made.
+    /// A frame for `output` at its current mode and orientation, drawn out through `pass`. `Err` says why it could not be made.
     pub fn new(
         renderer: &mut GlesRenderer,
         output: &Output,
         pass: FinalPass,
     ) -> Result<Self, String> {
-        let size = output.current_mode().ok_or("the output has no mode")?.size;
+        let size = oriented_size(output).ok_or("the output has no mode")?;
         let program = program(renderer).ok_or("the final pass shader did not compile")?;
         let texture = renderer
             .create_buffer(WORKING_FORMAT, (size.w, size.h).into())
             .map_err(|err| format!("no float render target: {err:?}"))?;
         Ok(Self {
             texture,
-            tracker: OutputDamageTracker::from_output(output),
+            // The tracker does not follow the output's transform: the frame stays in the output's orientation and the compositor that shows it applies the transform.
+            tracker: OutputDamageTracker::new(size, Scale::from(1.0), Transform::Normal),
             damage: DamageBag::default(),
             id: Id::new(),
-            size: (size.w, size.h).into(),
+            size,
             age: 0,
             pass,
             program,
         })
     }
 
-    /// Whether this frame still fits the output's mode and the final pass settings.
+    /// Whether this frame still fits the output's mode, its orientation (a quarter turn swaps the size) and the final pass settings.
     pub fn fits(&self, output: &Output, pass: &FinalPass) -> bool {
-        self.pass == *pass
-            && output
-                .current_mode()
-                .is_some_and(|mode| Size::from((mode.size.w, mode.size.h)) == self.size)
+        self.pass == *pass && oriented_size(output) == Some(self.size)
     }
 
     /// Composite `elements` (already in the working space) and give back the element that puts the result on the output, with the states of the elements for presentation feedback.

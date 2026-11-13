@@ -1104,9 +1104,6 @@ impl Tty {
                     lit.edid.as_ref(),
                     peak_override,
                 ) {
-                    Ok(_) if lit.output.current_transform() != Transform::Normal => {
-                        Status::Sdr(Unavailable::Rotated)
-                    }
                     Ok(_) if !hdr_frame::supported(renderer) => {
                         Status::Sdr(Unavailable::NoFloatTarget)
                     }

@@ -221,11 +221,10 @@ fn only_hdr10_can_have_little_headroom() {
     assert!(Status::hdr10(&hdr, 203).low_headroom());
     assert!(!Status::hdr10(&hdr, 120).low_headroom());
     assert!(!Status::Off.low_headroom());
-    assert!(!Status::Sdr(Unavailable::Rotated).low_headroom());
+    assert!(!Status::Sdr(Unavailable::NoFloatTarget).low_headroom());
 }
 
 #[test]
 fn the_runtime_reasons_have_messages() {
-    assert!(Unavailable::Rotated.to_string().contains("rotated"));
     assert!(Unavailable::NoFloatTarget.to_string().contains("float"));
 }
