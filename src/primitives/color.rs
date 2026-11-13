@@ -9,6 +9,14 @@
 //! pipeline (stage 2). Transfer functions for HDR (PQ, extended linear) are added with the HDR
 //! path (stage 4), and are refused until then, like every other name that is not listed.
 //!
+//! The global is version 3 of the protocol. What version 2 and 3 change is decided here, so it
+//! is tested without a display: the transfer function `compound_power_2_4` replaces the
+//! deprecated `srgb` for version 2 clients ([`NamedTf::from_raw_in`], [`NamedTf::wire_raw`]),
+//! the creator drops the light level range check ([`ParamsBuilder::for_version`]), the
+//! Windows-BT.2100 feature is for version 3 clients ([`supported_features`]), and identities are
+//! 64 bits ([`LongIdentities`]), of which a version 1 client sees the low 32
+//! ([`short_identity`]).
+//!
 //! Chromaticities are CIE 1931 xy times 1,000,000, minimum luminance is cd/m² times 10,000 and
 //! the other luminances are whole cd/m², all as on the wire, so descriptions compare exactly.
 //!
@@ -76,6 +84,9 @@ pub enum Feature {
     /// 7. `create_windows_scrgb`: the sRGB-primaries, extended-linear, 80 cd/m² reference
     /// description that Mesa's Vulkan WSI and Wine/Proton use for fp16 HDR swapchains.
     WindowsScrgb,
+    /// 8. `create_windows_bt2100` (version 3): BT.2020 primaries and PQ, as Windows 10 drives an
+    /// HDR screen in BT.2100 mode. Its reference white and target volume are unknown.
+    WindowsBt2100,
 }
 
 impl Feature {
@@ -87,11 +98,20 @@ impl Feature {
             Self::SetLuminances => 4,
             Self::SetMasteringDisplayPrimaries => 5,
             Self::WindowsScrgb => 7,
+            Self::WindowsBt2100 => 8,
+        }
+    }
+
+    /// The first version of the protocol a client can use the feature in.
+    pub fn since(self) -> u32 {
+        match self {
+            Self::WindowsBt2100 => 3,
+            _ => 1,
         }
     }
 }
 
-/// Features clients are told they can use.
+/// Features clients of version 1 are told they can use. See [`supported_features`].
 pub const SUPPORTED_FEATURES: &[Feature] = &[
     Feature::Parametric,
     Feature::SetPrimaries,
@@ -100,6 +120,16 @@ pub const SUPPORTED_FEATURES: &[Feature] = &[
     Feature::SetMasteringDisplayPrimaries,
     Feature::WindowsScrgb,
 ];
+
+/// Features a client that bound `version` of the protocol is told it can use.
+pub fn supported_features(version: u32) -> Vec<Feature> {
+    SUPPORTED_FEATURES
+        .iter()
+        .copied()
+        .chain([Feature::WindowsBt2100])
+        .filter(|feature| feature.since() <= version)
+        .collect()
+}
 
 fn supports(feature: Feature) -> bool {
     SUPPORTED_FEATURES.contains(&feature)
@@ -285,6 +315,10 @@ impl NamedPrimaries {
 /// Primaries clients are told they can name.
 pub const SUPPORTED_PRIMARIES: &[NamedPrimaries] = &NamedPrimaries::ALL;
 
+/// The protocol's `compound_power_2_4` (version 2), the piecewise sRGB curve under a name that
+/// says which curve it is. It replaces `srgb` (9), which is deprecated.
+const COMPOUND_POWER_2_4: u32 = 14;
+
 /// Named transfer functions jff offers, plus [`NamedTf::ExtLinear`], which only the
 /// Windows-scRGB description has (it is not in [`NamedTf::ALL`], so a client cannot name it in
 /// a parametric creator).
@@ -317,6 +351,30 @@ impl NamedTf {
     /// `None` for a value that is not an offered name.
     pub fn from_raw(raw: u32) -> Option<Self> {
         Self::ALL.into_iter().find(|tf| tf.raw() == raw)
+    }
+
+    /// [`NamedTf::from_raw`] as a client of protocol `version` can name it. Version 2 deprecates
+    /// `srgb` (9) for `compound_power_2_4` (14), the same piecewise curve: a version 2 client
+    /// that names 9 has named something that was not advertised, and 14 is [`NamedTf::Srgb`].
+    pub fn from_raw_in(raw: u32, version: u32) -> Option<Self> {
+        if version >= 2 {
+            match raw {
+                COMPOUND_POWER_2_4 => Some(Self::Srgb),
+                9 => None,
+                _ => Self::from_raw(raw),
+            }
+        } else {
+            Self::from_raw(raw)
+        }
+    }
+
+    /// The number a client of protocol `version` is sent for this curve: [`NamedTf::raw`], and
+    /// for the piecewise sRGB curve `compound_power_2_4` from version 2 on.
+    pub fn wire_raw(self, version: u32) -> u32 {
+        match self {
+            Self::Srgb if version >= 2 => COMPOUND_POWER_2_4,
+            _ => self.raw(),
+        }
     }
 
     /// The name IPC clients see, the protocol's own (`srgb`, `gamma22`, `gamma28`).
@@ -464,6 +522,18 @@ impl ImageDescription {
             max_cll: None,
             max_fall: None,
             mastering_luminance: None,
+        }
+    }
+
+    /// Windows-BT.2100 (`create_windows_bt2100`, version 3): BT.2020 primaries and PQ, with the
+    /// luminances PQ has when a description says nothing (reference white 203 cd/m², what the
+    /// protocol says to assume). Its target volume is unknown, so nothing more is claimed.
+    pub fn windows_bt2100() -> Self {
+        Self {
+            primaries: NamedPrimaries::Bt2020.chromaticities(),
+            tf: TransferFunction::Named(NamedTf::St2084Pq),
+            luminance: Luminance::PQ,
+            ..Self::srgb()
         }
     }
 
@@ -619,6 +689,8 @@ pub enum CreateError {
 /// The parameters a client has set so far on a `wp_image_description_creator_params_v1`.
 #[derive(Clone, Debug, Default)]
 pub struct ParamsBuilder {
+    /// The version of the protocol the client bound. 0 (the default) is taken as 1.
+    version: u32,
     tf: Option<TransferFunction>,
     primaries: Option<Chromaticities>,
     luminance: Option<Luminance>,
@@ -629,6 +701,16 @@ pub struct ParamsBuilder {
 }
 
 impl ParamsBuilder {
+    /// A builder for a client that bound `version` of the protocol. The rules that changed in
+    /// version 2 apply from there on: which transfer functions can be named, and that the light
+    /// levels are not held to a range.
+    pub fn for_version(version: u32) -> Self {
+        Self {
+            version,
+            ..Self::default()
+        }
+    }
+
     pub fn set_tf_named(&mut self, raw: u32) -> Result<(), Violation> {
         if self.tf.is_some() {
             return violation(
@@ -636,7 +718,7 @@ impl ParamsBuilder {
                 "the transfer function is set already",
             );
         }
-        match NamedTf::from_raw(raw) {
+        match NamedTf::from_raw_in(raw, self.version) {
             Some(tf) => self.tf = Some(TransferFunction::Named(tf)),
             None => return violation(CreatorError::InvalidTf, "unknown transfer function"),
         }
@@ -778,8 +860,10 @@ impl ParamsBuilder {
     /// Check the set and make the description.
     ///
     /// Version 1 of the protocol wants a set light level to lie above the minimum and at or
-    /// below the maximum luminance. A level of 0 is how CTA-861 says "unknown", so it counts
-    /// as not set instead of being an error.
+    /// below the maximum luminance. Version 2 and later do not: only `max_fall` above `max_cll`
+    /// is an error, and a level beyond the range is taken as it is (the tone mapping clamps it
+    /// to what PQ carries). A level of 0 is how CTA-861 says "unknown", so it counts as not set
+    /// instead of being an error.
     pub fn build(self) -> Result<ImageDescription, CreateError> {
         let (Some(tf), Some(primaries)) = (self.tf, self.primaries) else {
             return Err(CreateError::Protocol(Violation {
@@ -802,7 +886,11 @@ impl ParamsBuilder {
                 }));
             }
         }
-        for level in [max_cll, max_fall].into_iter().flatten() {
+        for level in [max_cll, max_fall]
+            .into_iter()
+            .flatten()
+            .filter(|_| self.version < 2)
+        {
             if !above_min(luminance.min, level) || level > luminance.max {
                 return Err(CreateError::Protocol(Violation {
                     error: CreatorError::InvalidLuminance,
@@ -868,4 +956,47 @@ impl Default for Identities {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// [`Identities`] for 64-bit numbers (`ready2`, version 2): zero is never used, a number is never
+/// given twice, and none is recycled, so a client that holds on to a number can trust it.
+#[derive(Clone, Debug)]
+pub struct LongIdentities {
+    next: Option<u64>,
+}
+
+impl LongIdentities {
+    pub fn new() -> Self {
+        Self::starting_at(1)
+    }
+
+    /// For tests of the end of the range.
+    pub fn starting_at(next: u64) -> Self {
+        Self {
+            next: Some(next.max(1)),
+        }
+    }
+
+    /// `None` when all 64 bits are used.
+    pub fn next(&mut self) -> Option<u64> {
+        let id = self.next?;
+        self.next = id.checked_add(1);
+        Some(id)
+    }
+}
+
+impl Default for LongIdentities {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The high and the low 32 bits of an identity, as `ready2` and `preferred_changed2` carry it.
+pub fn split_identity(identity: u64) -> (u32, u32) {
+    ((identity >> 32) as u32, identity as u32)
+}
+
+/// What a version 1 client is sent for an identity: the number itself, which is all of it while it fits in 32 bits. `None` when it does not, there is no number a version 1 client could tell it by.
+pub fn short_identity(identity: u64) -> Option<u32> {
+    u32::try_from(identity).ok().filter(|&id| id != 0)
 }

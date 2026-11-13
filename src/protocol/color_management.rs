@@ -29,9 +29,16 @@
 //! (`max_cll`, else the mastering luminance) among the PQ surfaces that are visible on the monitor
 //! (`hdr-content-metadata` in the config turns that off).
 //!
-//! The global is version 1 of the protocol: descriptions are announced with `ready` and a 32
-//! bit identity. Moving to version 2 or 3 means `ready2`, `preferred_changed2` and the
-//! reference objects, and is not needed for anything here.
+//! The global is version 3 of the protocol, and a client that bound less sees what it knew:
+//! descriptions are announced with `ready` and a 32 bit identity to a version 1 client, and with
+//! `ready2` and a 64 bit one (never recycled) from version 2 on, `preferred_changed` and
+//! `preferred_changed2` likewise. The wayland-protocols that Smithay re-exports is at version 1
+//! only, so the bindings are generated here (`color_management_bindings.rs`). From version 2
+//! `compound_power_2_4` names the piecewise sRGB curve and the deprecated `srgb` is neither
+//! announced nor accepted, light levels are not held to a range, and a
+//! `wp_image_description_reference_v1` can be turned back into a description (jff makes none yet,
+//! see [`init_reference`]). Version 3 adds `create_windows_bt2100`. The rules are in
+//! `primitives/color.rs`.
 //!
 //! An output is described as sRGB, unless the config gives a monitor an ICC profile: then it is
 //! described as that profile says (its primaries, tone curve and white, see
@@ -49,39 +56,41 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use smithay::output::Output;
-use smithay::reexports::wayland_protocols::wp::color_management::v1::server::wp_color_management_output_v1::{
+use super::color_management_bindings::server::wp_color_management_output_v1::{
     self, WpColorManagementOutputV1,
 };
-use smithay::reexports::wayland_protocols::wp::color_management::v1::server::wp_color_management_surface_feedback_v1::{
+use super::color_management_bindings::server::wp_color_management_surface_feedback_v1::{
     self, WpColorManagementSurfaceFeedbackV1,
 };
-use smithay::reexports::wayland_protocols::wp::color_management::v1::server::wp_color_management_surface_v1::{
+use super::color_management_bindings::server::wp_color_management_surface_v1::{
     self, WpColorManagementSurfaceV1,
 };
-use smithay::reexports::wayland_protocols::wp::color_management::v1::server::wp_color_manager_v1::{
-    self, WpColorManagerV1,
-};
-use smithay::reexports::wayland_protocols::wp::color_management::v1::server::wp_image_description_creator_icc_v1::WpImageDescriptionCreatorIccV1;
-use smithay::reexports::wayland_protocols::wp::color_management::v1::server::wp_image_description_creator_params_v1::{
+use super::color_management_bindings::server::wp_color_manager_v1::{self, WpColorManagerV1};
+use super::color_management_bindings::server::wp_image_description_creator_icc_v1::WpImageDescriptionCreatorIccV1;
+use super::color_management_bindings::server::wp_image_description_creator_params_v1::{
     self, WpImageDescriptionCreatorParamsV1,
 };
-use smithay::reexports::wayland_protocols::wp::color_management::v1::server::wp_image_description_info_v1::WpImageDescriptionInfoV1;
-use smithay::reexports::wayland_protocols::wp::color_management::v1::server::wp_image_description_v1::{
+use super::color_management_bindings::server::wp_image_description_info_v1::WpImageDescriptionInfoV1;
+use super::color_management_bindings::server::wp_image_description_reference_v1::{
+    self, WpImageDescriptionReferenceV1,
+};
+use super::color_management_bindings::server::wp_image_description_v1::{
     self, WpImageDescriptionV1,
 };
+use smithay::desktop::utils::surface_primary_scanout_output;
+use smithay::output::Output;
 use smithay::reexports::wayland_server::backend::{ClientId, GlobalId};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
-use smithay::desktop::utils::surface_primary_scanout_output;
 use smithay::wayland::compositor::{with_states, Cacheable, SurfaceData};
 
 use crate::config::Config;
 use crate::primitives::color::{
-    CreateError, Identities, ImageDescription, InfoEvent, ParamsBuilder, RenderIntent,
-    SUPPORTED_FEATURES, SUPPORTED_INTENTS, SUPPORTED_PRIMARIES, SUPPORTED_TFS,
+    short_identity, split_identity, supported_features, CreateError, ImageDescription, InfoEvent,
+    LongIdentities, NamedTf, ParamsBuilder, RenderIntent, SUPPORTED_INTENTS, SUPPORTED_PRIMARIES,
+    SUPPORTED_TFS,
 };
 use crate::state::JffState;
 
@@ -90,7 +99,8 @@ use crate::state::JffState;
 #[derive(Debug)]
 pub struct Described {
     pub description: ImageDescription,
-    pub identity: u32,
+    /// 64 bits, never recycled (`ready2`). A version 1 client is sent [`short_identity`] of it.
+    pub identity: u64,
 }
 
 /// What a surface set as of its last commit.
@@ -174,7 +184,7 @@ pub fn capture_color(config: &Config) -> Option<OutputColor> {
 pub struct ColorManagement {
     /// `None` when the config turns the protocol off.
     _global: Option<GlobalId>,
-    identities: Identities,
+    identities: LongIdentities,
     output: Arc<Described>,
     /// The colors of each monitor that has an ICC profile, by connector name. A monitor that
     /// is not in it is sRGB.
@@ -198,14 +208,14 @@ impl ColorManagement {
     /// `enabled` is false for `color-management { off }`: the global is then not created, and
     /// clients never see the protocol.
     pub fn new(display: &DisplayHandle, enabled: bool) -> Self {
-        let mut identities = Identities::new();
+        let mut identities = LongIdentities::new();
         let output = Arc::new(Described {
             description: ImageDescription::srgb(),
             identity: identities.next().unwrap_or(1),
         });
         Self {
             _global: enabled
-                .then(|| display.create_global::<JffState, WpColorManagerV1, ()>(1, ())),
+                .then(|| display.create_global::<JffState, WpColorManagerV1, ()>(3, ())),
             identities,
             output,
             monitors: HashMap::new(),
@@ -238,7 +248,7 @@ impl ColorManagement {
 
     /// Give the outputs a new description. Returns its identity, `None` when it is the one they
     /// have already (or the numbers ran out, and what they have stays).
-    fn set_output_description(&mut self, description: ImageDescription) -> Option<u32> {
+    fn set_output_description(&mut self, description: ImageDescription) -> Option<u64> {
         if self.output.description == description {
             return None;
         }
@@ -348,10 +358,45 @@ impl ImageDescriptionData {
     }
 }
 
+/// One `wp_image_description_reference_v1` (version 2): a handle on an image description that
+/// another protocol hands out, which `wp_color_manager_v1.get_image_description` turns back into
+/// an image description object. jff gives none out yet, [`init_reference`] is how a protocol that
+/// does (an image capture source, say) makes one.
+pub struct ReferenceData {
+    described: Arc<Described>,
+    /// Whether `get_information` is allowed on what it gives back, as the request that made the
+    /// reference says.
+    allows_info: bool,
+}
+
+/// Give the new `id` a reference to `described`.
+pub fn init_reference(
+    data_init: &mut DataInit<'_, JffState>,
+    id: New<WpImageDescriptionReferenceV1>,
+    described: Arc<Described>,
+    allows_info: bool,
+) -> WpImageDescriptionReferenceV1 {
+    data_init.init(
+        id,
+        ReferenceData {
+            described,
+            allows_info,
+        },
+    )
+}
+
 /// The parameters one `wp_image_description_creator_params_v1` has so far.
-#[derive(Default)]
 pub struct ParamsCreator {
     builder: Mutex<ParamsBuilder>,
+}
+
+impl ParamsCreator {
+    /// For a client that bound `version` of the protocol, whose rules differ from version 2 on.
+    fn new(version: u32) -> Self {
+        Self {
+            builder: Mutex::new(ParamsBuilder::for_version(version)),
+        }
+    }
 }
 
 /// A new image description that failed: `failed` says why, and the object only waits to be
@@ -372,16 +417,40 @@ fn init_dead(data_init: &mut DataInit<'_, JffState>, id: New<WpImageDescriptionV
     data_init.init(id, ImageDescriptionData::failed());
 }
 
-/// A new image description that is ready, and says so.
+/// A new image description that is ready, and says so: `ready2` with the 64-bit identity for a
+/// client of version 2 or later, `ready` with the 32-bit one for version 1 (the deprecated event
+/// is not sent from version 2 on). `version` is the one of the object the request was made on,
+/// which a new object shares. A version 1 client cannot be told an identity that does not fit 32
+/// bits, so it is told the description failed.
 fn init_ready(
     data_init: &mut DataInit<'_, JffState>,
     id: New<WpImageDescriptionV1>,
     described: Arc<Described>,
     allows_info: bool,
+    version: u32,
 ) {
     let identity = described.identity;
+    if version < 2 && short_identity(identity).is_none() {
+        init_failed(
+            data_init,
+            id,
+            wp_image_description_v1::Cause::OperatingSystem,
+            "out of image description numbers",
+        );
+        return;
+    }
     let object = data_init.init(id, ImageDescriptionData::ready(described, allows_info));
-    object.ready(identity);
+    send_ready(&object, identity);
+}
+
+/// The `ready` event that fits the version of `object`.
+fn send_ready(object: &WpImageDescriptionV1, identity: u64) {
+    if object.version() >= 2 {
+        let (hi, lo) = split_identity(identity);
+        object.ready2(hi, lo);
+    } else if let Some(short) = short_identity(identity) {
+        object.ready(short);
+    }
 }
 
 // ---- the global ------------------------------------------------------------------------------
@@ -396,18 +465,21 @@ impl GlobalDispatch<WpColorManagerV1, ()> for JffState {
         data_init: &mut DataInit<'_, JffState>,
     ) {
         let manager = data_init.init(resource, ());
+        let version = manager.version();
         for intent in SUPPORTED_INTENTS {
             if let Ok(intent) = wp_color_manager_v1::RenderIntent::try_from(intent.raw()) {
                 manager.supported_intent(intent);
             }
         }
-        for feature in SUPPORTED_FEATURES {
+        // What is offered depends on the version the client bound: a feature that came with a
+        // later one is not announced, and a deprecated name is not announced from version 2 on.
+        for feature in supported_features(version) {
             if let Ok(feature) = wp_color_manager_v1::Feature::try_from(feature.raw()) {
                 manager.supported_feature(feature);
             }
         }
         for tf in SUPPORTED_TFS {
-            if let Ok(tf) = wp_color_manager_v1::TransferFunction::try_from(tf.raw()) {
+            if let Ok(tf) = wp_color_manager_v1::TransferFunction::try_from(tf.wire_raw(version)) {
                 manager.supported_tf_named(tf);
             }
         }
@@ -477,7 +549,7 @@ impl Dispatch<WpColorManagerV1, ()> for JffState {
                 resource.post_error(Error::UnsupportedFeature, "ICC profiles are not supported");
             }
             Request::CreateParametricCreator { obj } => {
-                data_init.init(obj, ParamsCreator::default());
+                data_init.init(obj, ParamsCreator::new(resource.version()));
             }
             Request::CreateWindowsScrgb { image_description } => {
                 // A pre-defined description, always ready. `get_information` is allowed on it
@@ -486,7 +558,13 @@ impl Dispatch<WpColorManagerV1, ()> for JffState {
                     .color_management
                     .describe(ImageDescription::windows_scrgb())
                 {
-                    Some(described) => init_ready(data_init, image_description, described, true),
+                    Some(described) => init_ready(
+                        data_init,
+                        image_description,
+                        described,
+                        true,
+                        resource.version(),
+                    ),
                     None => init_failed(
                         data_init,
                         image_description,
@@ -495,7 +573,46 @@ impl Dispatch<WpColorManagerV1, ()> for JffState {
                     ),
                 }
             }
-            _ => {}
+            // Version 3. The protocol says this one does not allow `get_information`.
+            Request::CreateWindowsBt2100 { image_description } => {
+                match state
+                    .color_management
+                    .describe(ImageDescription::windows_bt2100())
+                {
+                    Some(described) => init_ready(
+                        data_init,
+                        image_description,
+                        described,
+                        false,
+                        resource.version(),
+                    ),
+                    None => init_failed(
+                        data_init,
+                        image_description,
+                        wp_image_description_v1::Cause::OperatingSystem,
+                        "out of image description numbers",
+                    ),
+                }
+            }
+            // Version 2: the image description behind a reference from another protocol.
+            Request::GetImageDescription {
+                image_description,
+                reference,
+            } => match reference.data::<ReferenceData>() {
+                Some(data) => init_ready(
+                    data_init,
+                    image_description,
+                    data.described.clone(),
+                    data.allows_info,
+                    resource.version(),
+                ),
+                None => init_failed(
+                    data_init,
+                    image_description,
+                    wp_image_description_v1::Cause::OperatingSystem,
+                    "not a reference this compositor made",
+                ),
+            },
         }
     }
 }
@@ -506,7 +623,7 @@ impl Dispatch<WpColorManagementOutputV1, ColorOutput> for JffState {
     fn request(
         state: &mut JffState,
         _client: &Client,
-        _resource: &WpColorManagementOutputV1,
+        resource: &WpColorManagementOutputV1,
         request: wp_color_management_output_v1::Request,
         data: &ColorOutput,
         _display: &DisplayHandle,
@@ -530,7 +647,13 @@ impl Dispatch<WpColorManagementOutputV1, ColorOutput> for JffState {
             }
             let name = data.output.as_ref().map(|o| o.name()).unwrap_or_default();
             let described = state.color_management.output_description(&name);
-            init_ready(data_init, image_description, described, true);
+            init_ready(
+                data_init,
+                image_description,
+                described,
+                true,
+                resource.version(),
+            );
         }
     }
 }
@@ -566,7 +689,13 @@ impl Dispatch<WpColorManagementSurfaceFeedbackV1, ColorFeedback> for JffState {
         .map(|output| output.name())
         .unwrap_or_default();
         let described = state.color_management.output_description(&name);
-        init_ready(data_init, image_description, described, true);
+        init_ready(
+            data_init,
+            image_description,
+            described,
+            true,
+            resource.version(),
+        );
     }
 }
 
@@ -764,7 +893,14 @@ fn notify_preferred_changed(state: &mut JffState) {
     }
     let identity = manager.output.identity;
     for feedback in &manager.feedbacks {
-        feedback.preferred_changed(identity);
+        // `preferred_changed` is deprecated: from version 2 on `preferred_changed2` is sent
+        // instead, with the 64-bit identity.
+        if feedback.version() >= 2 {
+            let (hi, lo) = split_identity(identity);
+            feedback.preferred_changed2(hi, lo);
+        } else if let Some(short) = short_identity(identity) {
+            feedback.preferred_changed(short);
+        }
     }
 }
 
@@ -806,6 +942,11 @@ fn send_info(info: &WpImageDescriptionInfoV1, description: &ImageDescription) {
             }
             InfoEvent::TfPower(exponent) => info.tf_power(exponent),
             InfoEvent::TfNamed(raw) => {
+                // From version 2 the piecewise sRGB curve is `compound_power_2_4`: `srgb` is deprecated.
+                let raw = match NamedTf::from_raw(raw) {
+                    Some(tf) => tf.wire_raw(info.version()),
+                    None => raw,
+                };
                 if let Ok(tf) = wp_color_manager_v1::TransferFunction::try_from(raw) {
                     info.tf_named(tf);
                 }
@@ -834,6 +975,20 @@ impl Dispatch<WpImageDescriptionInfoV1, ()> for JffState {
         _resource: &WpImageDescriptionInfoV1,
         _request: <WpImageDescriptionInfoV1 as Resource>::Request,
         _data: &(),
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, JffState>,
+    ) {
+    }
+}
+
+/// A reference has one request, `destroy`, and the generated code takes care of it.
+impl Dispatch<WpImageDescriptionReferenceV1, ReferenceData> for JffState {
+    fn request(
+        _state: &mut JffState,
+        _client: &Client,
+        _resource: &WpImageDescriptionReferenceV1,
+        _request: wp_image_description_reference_v1::Request,
+        _data: &ReferenceData,
         _display: &DisplayHandle,
         _data_init: &mut DataInit<'_, JffState>,
     ) {
@@ -914,9 +1069,13 @@ impl Dispatch<WpImageDescriptionCreatorParamsV1, ParamsCreator> for JffState {
                 drop(builder);
                 match built {
                     Ok(description) => match state.color_management.describe(description) {
-                        Some(described) => {
-                            init_ready(data_init, image_description, described, false)
-                        }
+                        Some(described) => init_ready(
+                            data_init,
+                            image_description,
+                            described,
+                            false,
+                            resource.version(),
+                        ),
                         None => init_failed(
                             data_init,
                             image_description,
@@ -940,7 +1099,6 @@ impl Dispatch<WpImageDescriptionCreatorParamsV1, ParamsCreator> for JffState {
                 }
                 return;
             }
-            _ => Ok(()),
         };
         if let Err(violation) = result {
             resource.post_error(violation.error.code(), violation.message);
