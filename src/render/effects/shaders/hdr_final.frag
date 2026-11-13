@@ -27,8 +27,10 @@ uniform float tint;
 // the panel cannot show are desaturated into its gamut (when `map_on`), and the result is PQ coded
 // in BT.2020 (`out_hlg` 0), or HLG coded for a 1000 cd/m² display (`out_hlg` 1), which is what the
 // connector announces. `tone_kind` 0 rolls the luminance off with the
-// knee, 1 with the BT.2390 EETF. This is `FinalPass::apply` in primitives/hdr_output.rs, keep them
-// the same.
+// knee, 1 with the BT.2390 EETF. `content_peak` above 0 is how bright the visible content says it
+// gets (cd/m², `FinalPass::content_peak`): it replaces `tone_kind`, content up to the panel's peak
+// is left as it is and brighter content is BT.2390-mapped with that peak as its source, 0 is
+// no metadata. This is `FinalPass::apply` in primitives/hdr_output.rs, keep them the same.
 uniform float sdr_white;
 uniform float peak;
 // BT.2020 to the panel's primaries, row by row, and back.
@@ -42,6 +44,7 @@ uniform vec3 luma_2020;
 uniform vec3 luma_panel;
 uniform float map_on;
 uniform float tone_kind;
+uniform float content_peak;
 uniform float out_hlg;
 
 const float KNEE = 0.75;
@@ -85,11 +88,11 @@ float pq_decode1(float code) {
     return pow(num / den, 1.0 / 0.1593017578125) * 10000.0;
 }
 
-// Luminance in cd/m² squeezed under `peak` with the BT.2390 EETF: untouched up to its knee, then a
-// Hermite spline in the PQ domain that ends on the peak. No black lift, and light above the source
-// peak is shown at the peak. The source peak is `bt2390_source_peak` in primitives/hdr_output.rs.
-float bt2390_tone_map(float nits) {
-    float source_peak = peak < BT2390_SOURCE_PEAK ? BT2390_SOURCE_PEAK : min(peak * 4.0, 10000.0);
+// Luminance in cd/m² squeezed under `peak` with the BT.2390 EETF for content that goes up to
+// `source_peak`: untouched up to its knee, then a Hermite spline in the PQ domain that ends on the
+// peak. No black lift, and light above the source peak is shown at the peak. This is `bt2390_fit`
+// in primitives/hdr_output.rs.
+float bt2390_fit(float nits, float source_peak) {
     if (peak >= source_peak)
         return min(nits, peak);
     float source = pq_encode1(source_peak);
@@ -106,6 +109,13 @@ float bt2390_tone_map(float nits) {
     return min(pq_decode1(shaped * source), peak);
 }
 
+// The same with the source peak of content that says nothing, `bt2390_source_peak` in
+// primitives/hdr_output.rs.
+float bt2390_tone_map(float nits) {
+    float source_peak = peak < BT2390_SOURCE_PEAK ? BT2390_SOURCE_PEAK : min(peak * 4.0, 10000.0);
+    return bt2390_fit(nits, source_peak);
+}
+
 // Luminance in cd/m² squeezed under `peak`: untouched up to the knee, then a smooth roll-off.
 float tone_map(float nits) {
     float knee = KNEE * peak;
@@ -119,8 +129,16 @@ void main() {
     vec3 nits = max(texture2D(tex, v_coords).rgb, vec3(0.0)) * sdr_white;
 
     float y = dot(luma_2020, nits);
-    if (y > 1e-6)
-        nits *= (tone_kind > 0.5 ? bt2390_tone_map(y) : tone_map(y)) / y;
+    if (y > 1e-6) {
+        float mapped;
+        if (content_peak > 0.0)
+            mapped = bt2390_fit(y, content_peak);
+        else if (tone_kind > 0.5)
+            mapped = bt2390_tone_map(y);
+        else
+            mapped = tone_map(y);
+        nits *= mapped / y;
+    }
 
     if (map_on > 0.5) {
         vec3 p = vec3(dot(to_r, nits), dot(to_g, nits), dot(to_b, nits)) / peak;

@@ -11,6 +11,11 @@
 //!
 //! Chromaticities are CIE 1931 xy times 1,000,000, minimum luminance is cd/m² times 10,000 and
 //! the other luminances are whole cd/m², all as on the wire, so descriptions compare exactly.
+//!
+//! A PQ description may also say how bright its content gets: `max_cll`, or else the maximum of
+//! the mastering luminance. [`ImageDescription::content_light`] turns that into the number the
+//! HDR final pass fits its tone mapping to (`primitives/hdr_output.rs`). The mastering
+//! primaries are only checked, and the frame-average level is only passed on.
 
 /// Scale of a chromaticity coordinate on the wire.
 pub const CHROMA_SCALE: i32 = 1_000_000;
@@ -64,7 +69,9 @@ pub enum Feature {
     SetTfPower,
     /// 4.
     SetLuminances,
-    /// 5. A target color volume inside the primary one, taken as a hint and not drawn differently.
+    /// 5. A target color volume inside the primary one. Its primaries are checked and not drawn
+    /// differently, its luminance is what an HDR monitor fits the tone mapping to when the
+    /// description has no `max_cll` (see [`ImageDescription::content_light`]).
     SetMasteringDisplayPrimaries,
     /// 7. `create_windows_scrgb`: the sRGB-primaries, extended-linear, 80 cd/m² reference
     /// description that Mesa's Vulkan WSI and Wine/Proton use for fp16 HDR swapchains.
@@ -390,6 +397,27 @@ impl Luminance {
     };
 }
 
+/// The luminance range of the display the content was mastered on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MasteringLuminance {
+    /// cd/m² times [`MIN_LUM_SCALE`].
+    pub min: u32,
+    /// cd/m².
+    pub max: u32,
+}
+
+/// How bright the content of a surface gets, as far as its description says.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ContentLight {
+    /// Bounded by its own white (sRGB, gamma, power curves): nothing to fit.
+    Sdr,
+    /// An absolute-light curve (PQ) that says its peak, in cd/m².
+    Peak(f32),
+    /// Light that can be as bright as the curve allows and says nothing about it: PQ without
+    /// metadata, HLG and Windows-scRGB.
+    Unknown,
+}
+
 /// Colors as a surface or an output has them: primaries, transfer function and luminance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ImageDescription {
@@ -400,6 +428,8 @@ pub struct ImageDescription {
     pub max_cll: Option<u32>,
     /// Maximum frame-average light level, cd/m².
     pub max_fall: Option<u32>,
+    /// Luminance range of the mastering display. Its primaries are not kept: they are only checked.
+    pub mastering_luminance: Option<MasteringLuminance>,
 }
 
 impl ImageDescription {
@@ -417,6 +447,7 @@ impl ImageDescription {
             luminance: Luminance::SDR,
             max_cll: None,
             max_fall: None,
+            mastering_luminance: None,
         }
     }
 
@@ -432,6 +463,7 @@ impl ImageDescription {
             luminance: Luminance::SCRGB,
             max_cll: None,
             max_fall: None,
+            mastering_luminance: None,
         }
     }
 
@@ -440,8 +472,43 @@ impl ImageDescription {
         NamedPrimaries::detect(&self.primaries)
     }
 
+    /// How bright this description's content gets, for fitting an HDR monitor's tone mapping to it.
+    ///
+    /// Only absolute-light curves have a peak to speak of: PQ gives `max_cll` if it is set and
+    /// not 0 (`build` already turns a 0 into "not set"), else the maximum of the mastering
+    /// luminance, clamped to what PQ can carry. A PQ description with neither, and HLG and
+    /// Windows-scRGB (whose highlights are not bounded by a level they state), are
+    /// [`ContentLight::Unknown`]. Everything else is [`ContentLight::Sdr`].
+    pub fn content_light(&self) -> ContentLight {
+        match self.tf {
+            TransferFunction::Named(NamedTf::St2084Pq) => {
+                let level = self
+                    .max_cll
+                    .filter(|&v| v != 0)
+                    .or(self.mastering_luminance.map(|m| m.max).filter(|&v| v != 0));
+                match level {
+                    Some(level) => ContentLight::Peak(level.min(Luminance::PQ.max) as f32),
+                    None => ContentLight::Unknown,
+                }
+            }
+            TransferFunction::Named(NamedTf::Hlg | NamedTf::ExtLinear) => ContentLight::Unknown,
+            _ => ContentLight::Sdr,
+        }
+    }
+
+    /// The peak of the content in cd/m² if the description states one: `max_cll`, else the
+    /// maximum mastering luminance, for PQ only (see [`ImageDescription::content_light`]).
+    pub fn content_peak(&self) -> Option<f32> {
+        match self.content_light() {
+            ContentLight::Peak(peak) => Some(peak),
+            _ => None,
+        }
+    }
+
     /// What `wp_image_description_info_v1` tells about this description, in the order it is
-    /// sent. There is no mastering display, so the target volume is the primary one.
+    /// sent. The target volume is the mastering display's luminance when the description has
+    /// one, else the primary volume's (and the primaries are always the primary ones, the
+    /// mastering primaries are not kept).
     pub fn info(&self) -> Vec<InfoEvent> {
         let mut events = vec![InfoEvent::Primaries(self.primaries.to_array())];
         if let Some(named) = self.named_primaries() {
@@ -462,7 +529,13 @@ impl ImageDescription {
             reference,
         });
         events.push(InfoEvent::TargetPrimaries(self.primaries.to_array()));
-        events.push(InfoEvent::TargetLuminance { min, max });
+        events.push(match self.mastering_luminance {
+            Some(mastering) => InfoEvent::TargetLuminance {
+                min: mastering.min,
+                max: mastering.max,
+            },
+            None => InfoEvent::TargetLuminance { min, max },
+        });
         if let Some(cll) = self.max_cll {
             events.push(InfoEvent::TargetMaxCll(cll));
         }
@@ -740,7 +813,9 @@ impl ParamsBuilder {
         if let Err(reason) = primaries.check() {
             return Err(CreateError::Unsupported(reason));
         }
-        // The target volume is a hint: it is checked so a nonsense one fails, and the picture is converted from the container volume.
+        // The target primaries are a hint: they are checked so a nonsense set fails, and the
+        // picture is converted from the container volume. The luminance was checked when it was
+        // set, and is kept: it is what the tone mapping fits to when there is no `max_cll`.
         if let Some(Err(reason)) = self.mastering_primaries.map(|m| m.check()) {
             return Err(CreateError::Unsupported(reason));
         }
@@ -750,6 +825,9 @@ impl ParamsBuilder {
             luminance,
             max_cll,
             max_fall,
+            mastering_luminance: self
+                .mastering_luminance
+                .map(|(min, max)| MasteringLuminance { min, max }),
         })
     }
 }

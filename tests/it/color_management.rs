@@ -2,12 +2,15 @@
 //! descriptions are checked, and what an information object tells.
 
 use jff_wm::primitives::color::{
-    Chromaticities, CreateError, CreatorError, Feature, Identities, ImageDescription, InfoEvent,
-    Luminance, NamedPrimaries, NamedTf, ParamsBuilder, RenderIntent, TransferFunction,
-    SUPPORTED_FEATURES, SUPPORTED_INTENTS, SUPPORTED_PRIMARIES, SUPPORTED_TFS,
+    Chromaticities, ContentLight, CreateError, CreatorError, Feature, Identities, ImageDescription,
+    InfoEvent, Luminance, MasteringLuminance, NamedPrimaries, NamedTf, ParamsBuilder, RenderIntent,
+    TransferFunction, SUPPORTED_FEATURES, SUPPORTED_INTENTS, SUPPORTED_PRIMARIES, SUPPORTED_TFS,
 };
 
 const SRGB: u32 = 1;
+const BT2020: u32 = 6;
+const PQ: u32 = 11;
+const HLG: u32 = 13;
 const GAMMA22: u32 = 2;
 const DISPLAY_P3: u32 = 9;
 const SRGB_TF: u32 = 9;
@@ -306,8 +309,23 @@ fn mastering_metadata_is_taken_once_each() {
         error_of(builder.set_mastering_luminance(50, 1_000)),
         CreatorError::AlreadySet
     );
-    // a hint only: the description is the container's
-    assert_eq!(builder.build().unwrap(), srgb_builder().build().unwrap());
+    // The primaries are a hint only, and the container's are the description's. The luminance is
+    // kept (it used to be thrown away, so this compared equal to a plain description).
+    let described = builder.build().unwrap();
+    assert_eq!(
+        described.mastering_luminance,
+        Some(MasteringLuminance {
+            min: 50,
+            max: 1_000
+        })
+    );
+    assert_eq!(
+        ImageDescription {
+            mastering_luminance: None,
+            ..described
+        },
+        srgb_builder().build().unwrap()
+    );
 }
 
 #[test]
@@ -568,4 +586,156 @@ fn an_hlg_description_may_set_its_own_luminances() {
         error_of(bad.set_luminances(2_000_000, 100, 203)),
         CreatorError::InvalidLuminance
     );
+}
+
+// ---- mastering luminance and the content peak ---------------------------------------------
+
+fn pq_builder() -> ParamsBuilder {
+    let mut builder = ParamsBuilder::default();
+    builder.set_tf_named(PQ).unwrap();
+    builder.set_primaries_named(BT2020).unwrap();
+    builder
+}
+
+#[test]
+fn a_description_with_mastering_luminance_is_still_copy_eq_and_hash() {
+    fn needs<T: Copy + Eq + std::hash::Hash>() {}
+    needs::<ImageDescription>();
+    needs::<MasteringLuminance>();
+}
+
+#[test]
+fn the_builder_keeps_the_mastering_luminance() {
+    let mut builder = pq_builder();
+    builder
+        .set_mastering_display_primaries(BT2020_PRIMARIES)
+        .unwrap();
+    builder.set_mastering_luminance(50, 1_000).unwrap();
+    let described = builder.build().unwrap();
+    assert_eq!(
+        described.mastering_luminance,
+        Some(MasteringLuminance {
+            min: 50,
+            max: 1_000
+        })
+    );
+    // not set: nothing kept, and a description without it is another one
+    let plain = pq_builder().build().unwrap();
+    assert_eq!(plain.mastering_luminance, None);
+    assert_ne!(plain, described);
+    assert_eq!(ImageDescription::srgb().mastering_luminance, None);
+    assert_eq!(ImageDescription::windows_scrgb().mastering_luminance, None);
+}
+
+#[test]
+fn bad_mastering_metadata_is_still_refused() {
+    // luminance: the maximum has to be above the minimum, and nothing is kept for a refused one
+    let mut builder = pq_builder();
+    assert_eq!(
+        error_of(builder.set_mastering_luminance(1_000_000, 100)),
+        CreatorError::InvalidLuminance
+    );
+    assert_eq!(builder.build().unwrap().mastering_luminance, None);
+    // primaries: nonsense ones fail the description, however good the luminance is
+    let mut bad = pq_builder();
+    bad.set_mastering_luminance(50, 1_000).unwrap();
+    bad.set_mastering_display_primaries([0, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    assert!(matches!(bad.build(), Err(CreateError::Unsupported(_))));
+}
+
+#[test]
+fn the_content_peak_is_max_cll_then_the_mastering_maximum_then_unknown() {
+    // max_cll wins over the mastering luminance, even when it is the lower one
+    let mut both = pq_builder();
+    both.set_mastering_luminance(50, 1_000).unwrap();
+    both.set_max_cll(600);
+    let described = both.build().unwrap();
+    assert_eq!(described.content_peak(), Some(600.0));
+    assert_eq!(described.content_light(), ContentLight::Peak(600.0));
+
+    // no max_cll: the mastering maximum
+    let mut mastering = pq_builder();
+    mastering.set_mastering_luminance(50, 1_000).unwrap();
+    assert_eq!(mastering.build().unwrap().content_peak(), Some(1_000.0));
+
+    // a max_cll of 0 is "unknown" (build drops it), so the mastering maximum is used
+    let mut zero = pq_builder();
+    zero.set_max_cll(0);
+    zero.set_mastering_luminance(50, 4_000).unwrap();
+    assert_eq!(zero.build().unwrap().content_peak(), Some(4_000.0));
+
+    // a max_cll alone
+    let mut cll = pq_builder();
+    cll.set_max_cll(800);
+    assert_eq!(cll.build().unwrap().content_peak(), Some(800.0));
+
+    // neither: no peak, and the light is as bright as PQ allows
+    let neither = pq_builder().build().unwrap();
+    assert_eq!(neither.content_peak(), None);
+    assert_eq!(neither.content_light(), ContentLight::Unknown);
+}
+
+#[test]
+fn the_content_peak_stays_inside_what_pq_carries() {
+    let mut builder = pq_builder();
+    builder.set_mastering_luminance(0, 20_000).unwrap();
+    assert_eq!(builder.build().unwrap().content_peak(), Some(10_000.0));
+}
+
+#[test]
+fn only_pq_has_a_content_peak() {
+    // sRGB with metadata (the protocol allows it) is bounded by its own white: nothing to fit
+    let mut srgb = srgb_builder();
+    srgb.set_mastering_luminance(50, 1_000).unwrap();
+    srgb.set_max_cll(80);
+    let described = srgb.build().unwrap();
+    assert_eq!(described.content_peak(), None);
+    assert_eq!(described.content_light(), ContentLight::Sdr);
+
+    let mut gamma = ParamsBuilder::default();
+    gamma.set_tf_power(24_000).unwrap();
+    gamma.set_primaries_named(SRGB).unwrap();
+    assert_eq!(gamma.build().unwrap().content_light(), ContentLight::Sdr);
+
+    // HLG and scRGB can be as bright as they like and say nothing: unknown, but not a peak
+    let mut hlg = ParamsBuilder::default();
+    hlg.set_tf_named(HLG).unwrap();
+    hlg.set_primaries_named(BT2020).unwrap();
+    hlg.set_mastering_luminance(50, 600).unwrap();
+    let hlg = hlg.build().unwrap();
+    assert_eq!(hlg.content_peak(), None);
+    assert_eq!(hlg.content_light(), ContentLight::Unknown);
+    let scrgb = ImageDescription::windows_scrgb();
+    assert_eq!(scrgb.content_peak(), None);
+    assert_eq!(scrgb.content_light(), ContentLight::Unknown);
+    assert_eq!(ImageDescription::srgb().content_light(), ContentLight::Sdr);
+}
+
+#[test]
+fn info_reports_the_mastering_luminance_as_the_target_luminance() {
+    let mut builder = pq_builder();
+    builder.set_mastering_luminance(50, 1_000).unwrap();
+    builder.set_max_cll(600);
+    let info = builder.build().unwrap().info();
+    assert!(info.contains(&InfoEvent::Luminances {
+        min: 50,
+        max: 10_000,
+        reference: 203
+    }));
+    assert!(info.contains(&InfoEvent::TargetLuminance {
+        min: 50,
+        max: 1_000
+    }));
+    assert!(!info.contains(&InfoEvent::TargetLuminance {
+        min: 50,
+        max: 10_000
+    }));
+    assert!(info.contains(&InfoEvent::TargetMaxCll(600)));
+    // not set: the primary volume's luminance, as it was
+    let plain = pq_builder().build().unwrap().info();
+    assert!(plain.contains(&InfoEvent::TargetLuminance {
+        min: 50,
+        max: 10_000
+    }));
 }

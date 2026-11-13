@@ -1658,3 +1658,48 @@ fn check_is_quiet_about_a_tone_map_with_hdr() {
         r#"outputs { output "DP-1" { hdr; sdr-white 120; hdr-peak 400; hdr-tone-map "bt2390"; } }"#;
     assert!(Config::check_text(text).unwrap().is_empty());
 }
+
+#[test]
+fn hdr_content_metadata_is_a_flag_that_is_on_when_not_set() {
+    let config = Config::parse(
+        r#"outputs {
+            output "DP-1" { hdr; hdr-content-metadata false; }
+            output "DP-2" { hdr; hdr-content-metadata; }
+            output "DP-3" { hdr; hdr-content-metadata "off"; }
+            output "DP-4" { hdr; }
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.output("DP-1").unwrap().hdr_content_metadata,
+        Some(false)
+    );
+    assert_eq!(
+        config.output("DP-2").unwrap().hdr_content_metadata,
+        Some(true)
+    );
+    assert_eq!(
+        config.output("DP-3").unwrap().hdr_content_metadata,
+        Some(false)
+    );
+    assert_eq!(config.output("DP-4").unwrap().hdr_content_metadata, None);
+}
+
+#[test]
+fn hdr_content_metadata_fails_on_a_value_that_is_not_a_flag() {
+    for bad in ["3", "\"maybe\"", "true false"] {
+        let text = format!(r#"outputs {{ output "DP-1" {{ hdr-content-metadata {bad}; }} }}"#);
+        let message = format!("{:#}", Config::parse(&text).unwrap_err());
+        assert!(message.contains("hdr-content-metadata"), "{message}");
+    }
+}
+
+#[test]
+fn check_warns_about_content_metadata_without_hdr_and_is_quiet_with_it() {
+    let warnings =
+        Config::check_text(r#"outputs { output "DP-1" { hdr-content-metadata false; } }"#).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("hdr-content-metadata") && warnings[0].contains("no `hdr`"));
+    let quiet = r#"outputs { output "DP-1" { hdr; hdr-content-metadata false; } }"#;
+    assert!(Config::check_text(quiet).unwrap().is_empty());
+}

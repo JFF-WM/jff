@@ -16,8 +16,18 @@
 //! it once with [`enter`] and the guard it returns keeps it for the rest of the builder. It is
 //! thread-local like the other per-frame caches in `rounded.rs`, and a builder that does not
 //! enter a scope draws everything unconverted, exactly as before.
+//!
+//! An HDR frame also needs to know how bright the content on screen says it gets (`max_cll` or
+//! the mastering luminance of a PQ surface), to fit its tone mapping to it. The frame builder
+//! asks for that with [`collect_content_light`], the same way: the code that draws real
+//! surfaces ([`wrap_surfaces`], and a window's own surface in `background_effect.rs`) notes their
+//! content light with [`note_content_light`], `rounded.rs` ties it to the id the surface is
+//! finally drawn as ([`bind_content_light`]), and [`take_content_light`] hands the result to
+//! the HDR frame, which keeps those the damage tracker really drew. Overview thumbnails and a
+//! window that is still opening go through the thumbnail path and are never noted, a closing
+//! window is only a picture and has no surface.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
@@ -26,7 +36,7 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::compositor::{with_surface_tree_downward, TraversalAction};
 
-use crate::primitives::color::{ImageDescription, RenderIntent};
+use crate::primitives::color::{ContentLight, ImageDescription, RenderIntent};
 use crate::primitives::gamut::Conversion;
 use crate::protocol::color_management::{surface_color_in, OutputColor, WorkingSpace};
 use crate::render::effects::rounded::Rounding;
@@ -71,6 +81,83 @@ impl Drop for HdrDraw {
 #[must_use = "the frame is only marked while the guard is alive"]
 pub fn begin_hdr_draw() -> HdrDraw {
     HdrDraw(DRAWING_HDR.with(|drawing| drawing.replace(true)))
+}
+
+/// The content light of the surfaces of the HDR frame being built.
+#[derive(Default)]
+struct Lights {
+    /// By the id of the surface's own render element, noted when its tree was walked.
+    surfaces: Vec<(Id, ContentLight)>,
+    /// By the id of the element the surface was drawn as, which is what the damage tracker reports on.
+    drawn: Vec<(Id, ContentLight)>,
+}
+
+thread_local! {
+    /// What the frame being built collects. `None`: nothing is.
+    static LIGHTS: RefCell<Option<Lights>> = const { RefCell::new(None) };
+}
+
+/// Keeps the collecting of content light going until it is dropped, then puts the previous state back.
+pub struct LightScope(Option<Lights>);
+
+impl Drop for LightScope {
+    fn drop(&mut self) {
+        LIGHTS.with(|lights| *lights.borrow_mut() = self.0.take());
+    }
+}
+
+/// Collect the content light of the surfaces drawn from here on (until the guard is dropped) when `on`, and nothing when not.
+#[must_use = "the content light is only collected while the guard is alive"]
+pub fn collect_content_light(on: bool) -> LightScope {
+    LightScope(LIGHTS.with(|lights| lights.replace(on.then(Lights::default))))
+}
+
+/// The content light of the surfaces drawn so far, by the id of the element each was drawn as, and forgets them. Empty when nothing collects.
+pub fn take_content_light() -> Vec<(Id, ContentLight)> {
+    LIGHTS.with(|lights| {
+        lights
+            .borrow_mut()
+            .as_mut()
+            .map(|lights| std::mem::take(&mut lights.drawn))
+            .unwrap_or_default()
+    })
+}
+
+/// Note how bright the content of each surface of the tree of `root` says it gets, for the HDR frame being built. The surfaces still have to be bound to the element they are drawn as ([`bind_content_light`]) before they count. Does nothing when no frame collects or the frame is not HDR, surfaces that are SDR are not noted.
+pub fn note_content_light(root: &WlSurface) {
+    if working().is_none() || LIGHTS.with(|lights| lights.borrow().is_none()) {
+        return;
+    }
+    let mut found = Vec::new();
+    with_surface_tree_downward(
+        root,
+        (),
+        |_, _, _| TraversalAction::DoChildren(()),
+        |surface, states, _| {
+            let light = surface_color_in(states)
+                .map_or(ContentLight::Sdr, |color| color.description.content_light());
+            if light != ContentLight::Sdr {
+                found.push((Id::from_wayland_resource(surface), light));
+            }
+        },
+        |_, _, _| true,
+    );
+    LIGHTS.with(|lights| {
+        if let Some(lights) = lights.borrow_mut().as_mut() {
+            lights.surfaces.extend(found);
+        }
+    });
+}
+
+/// The surface element `inner` is drawn as `element` (see `Rounding`): if its content light was noted, it now counts under `element`'s id.
+pub fn bind_content_light(inner: &Id, element: &Id) {
+    LIGHTS.with(|lights| {
+        if let Some(lights) = lights.borrow_mut().as_mut() {
+            if let Some(&(_, light)) = lights.surfaces.iter().find(|(id, _)| id == inner) {
+                lights.drawn.push((element.clone(), light));
+            }
+        }
+    });
 }
 
 /// Format of a copy of what is on the framebuffer being drawn: float for the working space, 8 bits otherwise.
@@ -189,6 +276,7 @@ pub fn wrap_surfaces(
     elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
     out: &mut Vec<JffElement>,
 ) {
+    note_content_light(root);
     let found = tree_conversions(root);
     if found.is_empty() {
         out.extend(elements.into_iter().map(JffElement::from));

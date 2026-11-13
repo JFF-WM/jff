@@ -5,7 +5,10 @@
 //! double-buffered like the rest of its state. Requests change the pending state, a
 //! `wl_surface.commit` makes it current, and [`surface_color`] reads the current one. Only
 //! parametric descriptions exist: ICC profiles are refused with
-//! `unsupported_feature`, and mastering display metadata is checked and then not drawn differently.
+//! `unsupported_feature`. Mastering display metadata is checked: its primaries are not drawn
+//! differently, but its luminance is kept, and with `max_cll` it tells an HDR monitor how bright
+//! the content of a PQ surface gets, so the monitor's tone mapping can be fitted to it (see
+//! `primitives/hdr_output.rs`, `ImageDescription::content_light`).
 //! Windows-scRGB (`create_windows_scrgb`, what Mesa's Vulkan WSI and Wine/Proton use for fp16
 //! HDR swapchains) is offered: sRGB primaries, an extended linear curve, 1.0 at 80 cd/m². The rules for building a description, and
 //! what is offered, are in `primitives/color.rs`.
@@ -22,7 +25,9 @@
 //! codes it as PQ. Nothing is left as the client drew it, so `fullscreen-passthrough` does not
 //! apply there. The one exception is a fullscreen window that is PQ in BT.2020 in the swapchain's
 //! 10-bit format with nothing drawn over it: its buffer goes straight to the primary plane (see
-//! `primitives/hdr_scanout.rs`).
+//! `primitives/hdr_scanout.rs`). The final pass is fitted to the largest content peak
+//! (`max_cll`, else the mastering luminance) among the PQ surfaces that are visible on the monitor
+//! (`hdr-content-metadata` in the config turns that off).
 //!
 //! The global is version 1 of the protocol: descriptions are announced with `ready` and a 32
 //! bit identity. Moving to version 2 or 3 means `ready2`, `preferred_changed2` and the

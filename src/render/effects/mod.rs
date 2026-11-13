@@ -19,7 +19,10 @@
 //!
 //! * `hdr`: an output with `hdr` in its `output` block is composited in a linear fp16 texture
 //!   (BT.2020, 1.0 at `sdr-white`), every surface converted into it by the same shader, and a final
-//!   pass maps it to the monitor's peak (the EDID's or `hdr-peak`) and codes it as PQ. Blur,
+//!   pass maps it to the monitor's peak (the EDID's or `hdr-peak`) and codes it as PQ. When a
+//!   visible PQ surface states how bright its content gets (`max_cll`, else its mastering
+//!   luminance), the pass is fitted to that peak instead of the configured tone curve, and a
+//!   change of that peak repaints the whole output (`HdrFrame::render`). Blur,
 //!   rounded corners, borders and the overview thumbnails are drawn into that texture like on any
 //!   output, with their colors and the blurred copy in the working space. Outputs without `hdr`
 //!   never touch it.

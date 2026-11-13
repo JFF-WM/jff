@@ -3,7 +3,9 @@
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::{Error as DamageError, OutputDamageTracker};
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
-use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement, RenderElementStates};
+use smithay::backend::renderer::element::{
+    Element, Id, Kind, RenderElement, RenderElementPresentationState, RenderElementStates,
+};
 use smithay::backend::renderer::gles::{
     GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName,
     UniformType,
@@ -16,10 +18,10 @@ use smithay::output::Output;
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Physical, Rectangle, Scale, Size, Transform};
 
-use crate::primitives::color::ImageDescription;
+use crate::primitives::color::{ContentLight, ImageDescription};
 use crate::primitives::gamut::Conversion;
 use crate::primitives::hdr::OutputEotf;
-use crate::primitives::hdr_output::FinalPass;
+use crate::primitives::hdr_output::{frame_content_peak, FinalPass};
 use crate::protocol::color_management::WorkingSpace;
 use crate::render::effects::rounded::Rounding;
 use crate::render::elements::JffElement;
@@ -53,6 +55,7 @@ fn program(renderer: &mut GlesRenderer) -> Option<GlesTexProgram> {
                 vec3("luma_panel"),
                 UniformName::new("map_on", UniformType::_1f),
                 UniformName::new("tone_kind", UniformType::_1f),
+                UniformName::new("content_peak", UniformType::_1f),
                 UniformName::new("out_hlg", UniformType::_1f),
             ],
         )
@@ -133,6 +136,16 @@ fn oriented_size(output: &Output) -> Option<Size<i32, Physical>> {
     )
 }
 
+/// Whether the damage tracker drew (any of) the element `id` into the last frame: it is not hidden under something opaque, and not off the output.
+fn drawn(states: &RenderElementStates, id: &Id) -> bool {
+    states.states.get(id).is_some_and(|state| {
+        !matches!(
+            state.presentation_state,
+            RenderElementPresentationState::Skipped
+        )
+    })
+}
+
 /// The frame of one HDR output: the texture it is composited into, and what is needed to repaint only what changed.
 pub struct HdrFrame {
     texture: GlesTexture,
@@ -142,7 +155,10 @@ pub struct HdrFrame {
     size: Size<i32, Physical>,
     /// 0 until the texture holds a whole frame.
     age: usize,
+    /// The settings of the output. The content peak of `pass` is always `None`: it is `content_peak` below that goes to the element.
     pass: FinalPass,
+    /// The content peak the last frame was drawn through, `None` when no visible surface stated one.
+    content_peak: Option<f32>,
     program: GlesTexProgram,
 }
 
@@ -167,8 +183,14 @@ impl HdrFrame {
             size,
             age: 0,
             pass,
+            content_peak: None,
             program,
         })
+    }
+
+    /// The content peak the last frame went out through, in cd/m².
+    pub fn content_peak(&self) -> Option<f32> {
+        self.content_peak
     }
 
     /// Whether this frame still fits the output's mode, its orientation (a quarter turn swaps the size) and the final pass settings.
@@ -177,11 +199,14 @@ impl HdrFrame {
     }
 
     /// Composite `elements` (already in the working space) and give back the element that puts the result on the output, with the states of the elements for presentation feedback.
+    ///
+    /// `lights` is the content light of the surfaces among `elements`, by the id of the element they were drawn as (see `gamut::take_content_light`), empty to leave the tone curve to the config. Only those the damage tracker really drew count, so a surface under an opaque window, or a thumbnail, does not. If the content peak they give differs from the last frame's, the whole output is damaged: the final pass is a full-screen effect that reads it, but nothing in the texture changed, so the element would otherwise look unchanged to the output's compositor.
     pub fn render(
         &mut self,
         renderer: &mut GlesRenderer,
         elements: &[JffElement],
         clear: [f32; 4],
+        lights: &[(Id, ContentLight)],
     ) -> Result<(HdrFrameElement, RenderElementStates), DamageError<GlesError>> {
         let _drawing = super::gamut::begin_hdr_draw();
         let (damage, states) = {
@@ -198,13 +223,24 @@ impl HdrFrame {
         if let Some(damage) = damage.filter(|damage| !damage.is_empty()) {
             self.damage.add(damage);
         }
+        let content_peak = frame_content_peak(
+            self.pass.peak,
+            lights
+                .iter()
+                .filter(|(id, _)| drawn(&states, id))
+                .map(|(_, light)| *light),
+        );
+        if content_peak != self.content_peak {
+            self.content_peak = content_peak;
+            self.damage.add([Rectangle::from_size(self.size)]);
+        }
         let element = HdrFrameElement {
             texture: self.texture.clone(),
             id: self.id.clone(),
             size: self.size,
             damage: self.damage.snapshot(),
             program: self.program.clone(),
-            pass: self.pass,
+            pass: self.pass.with_content_peak(content_peak),
         };
         Ok((element, states))
     }
@@ -289,6 +325,7 @@ impl RenderElement<GlesRenderer> for HdrFrameElement {
             Uniform::new("luma_panel", pass.luma_panel),
             Uniform::new("map_on", f32::from(u8::from(pass.map_gamut))),
             Uniform::new("tone_kind", pass.tone.shader_param()),
+            Uniform::new("content_peak", pass.content_peak.unwrap_or(0.0)),
             Uniform::new("out_hlg", f32::from(u8::from(pass.eotf == OutputEotf::Hlg))),
         ];
         frame.render_texture_from_to(

@@ -283,7 +283,12 @@ const _: () = {
 /// How a monitor in HDR mode is drawn.
 struct HdrOutput {
     space: WorkingSpace,
+    /// The settings of the output. The content peak is not part of them (it is `None` here), see `content_peak`.
     pass: FinalPass,
+    /// `hdr-content-metadata`: fit the tone mapping to the peak the visible content states.
+    content_metadata: bool,
+    /// The content peak the last frame was shown through, `None` for the configured tone curve. A screenshot is made with it, so it has the tone mapping that is on screen.
+    content_peak: Option<f32>,
     /// The offscreen target, made on the first frame and again when the mode or the pass changes.
     frame: Option<HdrFrame>,
 }
@@ -1164,6 +1169,9 @@ impl Tty {
             let tone = output_config
                 .and_then(|c| c.hdr_tone_map)
                 .unwrap_or_default();
+            let content_metadata = output_config
+                .and_then(|c| c.hdr_content_metadata)
+                .unwrap_or(true);
             let mut hdr = None;
             let mut hdr_plan = None;
             let mut target = ConnectorColorState::default();
@@ -1192,7 +1200,7 @@ impl Tty {
                         )
                         .with_tone_map(tone)
                         .with_eotf(plan.eotf);
-                        hdr = Some((WorkingSpace { sdr_white }, pass));
+                        hdr = Some((WorkingSpace { sdr_white }, pass, content_metadata));
                         target = hdr_color_state(
                             &plan.with_content(lit.hdr_content.0, lit.hdr_content.1),
                         );
@@ -1208,13 +1216,19 @@ impl Tty {
             }
             let unchanged = match (&lit.hdr, &hdr) {
                 (None, None) => true,
-                (Some(old), Some((space, pass))) => old.space == *space && old.pass == *pass,
+                (Some(old), Some((space, pass, content_metadata))) => {
+                    old.space == *space
+                        && old.pass == *pass
+                        && old.content_metadata == *content_metadata
+                }
                 _ => false,
             };
             if !unchanged {
-                lit.hdr = hdr.map(|(space, pass)| HdrOutput {
+                lit.hdr = hdr.map(|(space, pass, content_metadata)| HdrOutput {
                     space,
                     pass,
+                    content_metadata,
+                    content_peak: None,
                     frame: None,
                 });
                 lit.queue_redraw();
@@ -1233,11 +1247,12 @@ impl Tty {
 
     /// The working space and final pass of `output` while it is drawn as HDR, `None` when it is
     /// SDR, not lit, or not one of ours. A screenshot is made with the same pass the monitor
-    /// shows, so it has the same tone curve and gamut.
+    /// shows, so it has the same tone curve and gamut, and the content peak the last frame was
+    /// fitted to.
     pub fn hdr_capture(&self, output: &Output) -> Option<(WorkingSpace, FinalPass)> {
         let lit = self.outputs.values().find(|lit| lit.output == *output)?;
         let hdr = lit.hdr.as_ref()?;
-        Some((hdr.space, hdr.pass))
+        Some((hdr.space, hdr.pass.with_content_peak(hdr.content_peak)))
     }
 
     /// What clients are told about each monitor drawn in HDR: PQ in BT.2020 up to its peak (the EDID's or `hdr-peak`), with SDR white at its configured level.
@@ -1269,6 +1284,7 @@ impl Tty {
                     luminance,
                     max_cll: None,
                     max_fall: None,
+                    mastering_luminance: None,
                 };
                 Some((lit.output.name(), description))
             })
@@ -1697,6 +1713,10 @@ impl JffState {
             None => color,
         };
         let _color_scope = crate::render::effects::gamut::enter(color);
+        // The surfaces drawn below say how bright their content gets, for the final pass of an HDR monitor.
+        let _light_scope = crate::render::effects::gamut::collect_content_light(
+            lit.hdr.as_ref().is_some_and(|hdr| hdr.content_metadata),
+        );
         let pointer: Point<f64, Logical> = self
             .seat
             .get_pointer()
@@ -2075,6 +2095,7 @@ impl JffState {
             let space = hdr.space;
             let pass = hdr.pass;
             let linear = hdr_frame::linearize(&mut *renderer, std::mem::take(&mut elements), space);
+            let lights = crate::render::effects::gamut::take_content_light();
             if !hdr
                 .frame
                 .as_ref()
@@ -2102,9 +2123,10 @@ impl JffState {
             match hdr
                 .frame
                 .as_mut()
-                .map(|f| f.render(&mut *renderer, &linear, clear))
+                .map(|f| f.render(&mut *renderer, &linear, clear, &lights))
             {
                 Some(Ok((element, states))) => {
+                    hdr.content_peak = hdr.frame.as_ref().and_then(HdrFrame::content_peak);
                     if lit.hdr_fault.take().is_some() {
                         tracing::info!("monitor {}: the HDR frame draws again", lit.output.name());
                     }
@@ -2119,6 +2141,7 @@ impl JffState {
                         );
                     }
                     hdr.frame = None;
+                    hdr.content_peak = None;
                     hdr_failed = true;
                 }
                 None => hdr_failed = true,
@@ -2130,6 +2153,7 @@ impl JffState {
         if hdr_scanout_try.is_some() {
             if let Some(hdr) = lit.hdr.as_mut() {
                 hdr.frame = None;
+                hdr.content_peak = None;
             }
         }
 

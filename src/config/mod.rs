@@ -22,7 +22,8 @@
 //! `sdr-white` sets the luminance in cd/m² that SDR white is shown at on an HDR monitor (203 by default, 10 to 1000).
 //! `hdr-peak` replaces the peak luminance the EDID states (100 to 10000 cd/m²): the frame is mapped to it and it is what the monitor is told and what clients are told.
 //! `hdr-tone-map "knee"|"bt2390"` picks how the frame is rolled off under that peak (`"knee"` by default).
-//! `sdr-white`, `hdr-peak` and `hdr-tone-map` only apply to a monitor with `hdr`, `jff check-config` warns when they stand alone.
+//! `hdr-content-metadata` (on by default, `hdr-content-metadata false` turns it off) fits that roll-off to the content: when a visible PQ surface states how bright it gets (`max_cll`, else the mastering luminance a client sent through wp-color-management), content that fits under the peak is shown as it is, and brighter content is BT.2390-mapped with its own peak as the source, whatever `hdr-tone-map` is. Frames with no such surface keep using `hdr-tone-map`.
+//! `sdr-white`, `hdr-peak`, `hdr-tone-map` and `hdr-content-metadata` only apply to a monitor with `hdr`, `jff check-config` warns when they stand alone.
 //! `screenshot-fullscreen` on a monitor in HDR mode saves a 16-bit PNG in PQ and BT.2020 (a `cICP` chunk says so) with the monitor's tone curve, and leaves the clipboard alone. The area and window screenshots are still sRGB.
 //!
 //! Two things that bite when editing the file by hand:
@@ -316,6 +317,8 @@ pub struct OutputConfig {
     pub hdr_peak: Option<u32>,
     /// How an HDR monitor's frame is rolled off under its peak, the knee when not set.
     pub hdr_tone_map: Option<ToneMap>,
+    /// Fit the tone mapping of an HDR monitor to the peak the visible content states (`max_cll` or the mastering luminance). On when not set.
+    pub hdr_content_metadata: Option<bool>,
 }
 
 impl OutputConfig {
@@ -328,6 +331,7 @@ impl OutputConfig {
                 ("sdr-white", self.sdr_white.is_some()),
                 ("hdr-peak", self.hdr_peak.is_some()),
                 ("hdr-tone-map", self.hdr_tone_map.is_some()),
+                ("hdr-content-metadata", self.hdr_content_metadata.is_some()),
             ]
             .into_iter()
             .filter_map(|(key, set)| set.then_some(key))
@@ -2189,6 +2193,7 @@ fn parse_output(node: &KdlNode) -> anyhow::Result<OutputConfig> {
             "hdr" => config.hdr = flag_value(child)?,
             "sdr-white" => config.sdr_white = Some(nits_arg(child, &SDR_WHITE_RANGE, 203)?),
             "hdr-peak" => config.hdr_peak = Some(nits_arg(child, &HDR_PEAK_RANGE, 400)?),
+            "hdr-content-metadata" => config.hdr_content_metadata = Some(flag_value(child)?),
             "hdr-tone-map" => {
                 config.hdr_tone_map = Some(match args.as_slice() {
                     [value] => value

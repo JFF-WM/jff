@@ -1,6 +1,8 @@
 //! The math of an HDR output: PQ and HLG decoding, the tone curve and the final pass that turns the linear working space into the signal.
+//!
+//! The tone curve is either chosen by the config ([`ToneMap`]), or, when a visible surface states how bright its content gets (`max_cll`, or the mastering luminance, see [`super::color::ImageDescription::content_light`]), fitted to that peak: content that fits under the panel's peak is shown as it is up to its peak, content brighter than the panel is BT.2390-mapped with its own peak as the source, whatever `hdr-tone-map` says. Which peak that is, for a frame, is [`frame_content_peak`].
 
-use super::color::{Chromaticities, NamedPrimaries};
+use super::color::{Chromaticities, ContentLight, NamedPrimaries};
 use super::edid::Primaries;
 use super::gamut::{conversion_matrix, map_gamut, rgb_to_xyz, GamutMap, Mat3};
 use super::hdr::OutputEotf;
@@ -178,8 +180,12 @@ impl ToneMap {
 
 /// Luminance of a pixel, in cd/m², squeezed under `peak` with the BT.2390 EETF: untouched up to its knee, then a Hermite spline in the PQ domain that ends on the peak. Black is taken as 0 on both sides, so there is no black lift, and light above [`bt2390_source_peak`] is shown at the peak.
 pub fn bt2390_tone_map(nits: f32, peak: f32) -> f32 {
+    bt2390_fit(nits, bt2390_source_peak(peak), peak)
+}
+
+/// [`bt2390_tone_map`] for content that goes up to `source_peak`, which maps to `peak`. Light above `source_peak` is shown at `peak`, and a `source_peak` at or under `peak` leaves everything up to `peak` as it is.
+pub fn bt2390_fit(nits: f32, source_peak: f32, peak: f32) -> f32 {
     let nits = nits.max(0.0);
-    let source_peak = bt2390_source_peak(peak);
     if peak >= source_peak {
         return nits.min(peak);
     }
@@ -197,6 +203,35 @@ pub fn bt2390_tone_map(nits: f32, peak: f32) -> f32 {
         + (t3 - 2.0 * t2 + t) * (1.0 - knee)
         + (-2.0 * t3 + 3.0 * t2) * max_lum;
     (pq_decode(shaped * source) * PQ_PEAK).min(peak)
+}
+
+/// Luminance of a pixel, in cd/m², for a frame whose content goes up to `content_peak`, on a panel of `peak`.
+///
+/// Content that fits (`content_peak` up to `peak`) has nothing to roll off: it is shown as it is, and anything above the panel's peak (content that says less than it has) is clipped there. Content that does not fit is BT.2390-mapped with its own peak as the source, so `content_peak` lands on `peak`. The knee is not used: it would squeeze content that is already fitted, and it starts below the peak.
+pub fn fitted_tone_map(nits: f32, content_peak: f32, peak: f32) -> f32 {
+    bt2390_fit(nits, content_peak, peak)
+}
+
+/// The content peak a final pass is fitted to for a frame, in cd/m²: `lights` are the content light of the surfaces that are visible on the output, `peak` is the panel's.
+///
+/// `None` unless at least one surface states a peak (the tone curve is then the configured one, as it always was). Otherwise the largest peak among them, where a surface that says nothing but can be as bright as its curve allows counts as [`bt2390_source_peak`] for this panel, the peak the BT.2390 curve is fitted to without metadata, so that surface is not mapped harder than it would be on its own. Never above the top of PQ.
+pub fn frame_content_peak(
+    peak: f32,
+    lights: impl IntoIterator<Item = ContentLight>,
+) -> Option<f32> {
+    let mut stated = false;
+    let mut top = 0.0f32;
+    for light in lights {
+        match light {
+            ContentLight::Sdr => {}
+            ContentLight::Peak(level) => {
+                stated = true;
+                top = top.max(level);
+            }
+            ContentLight::Unknown => top = top.max(bt2390_source_peak(peak)),
+        }
+    }
+    stated.then_some(top.min(PQ_PEAK))
 }
 
 /// What the final pass of an HDR output does, worked out once per output and per setting.
@@ -220,6 +255,8 @@ pub struct FinalPass {
     pub tone: ToneMap,
     /// The signal the result is coded as.
     pub eotf: OutputEotf,
+    /// How bright the visible content says it gets, in cd/m² (see [`frame_content_peak`]). Set, it replaces `tone`: the frame is fitted to it. Not part of the settings `new` works out, it changes from frame to frame.
+    pub content_peak: Option<f32>,
 }
 
 fn narrow(m: &Mat3) -> [[f32; 3]; 3] {
@@ -256,6 +293,7 @@ impl FinalPass {
             map_gamut,
             tone: ToneMap::default(),
             eotf: OutputEotf::default(),
+            content_peak: None,
         }
     }
 
@@ -269,14 +307,23 @@ impl FinalPass {
         Self { eotf, ..self }
     }
 
+    /// The same pass fitted to content that goes up to `content_peak` cd/m², `None` for the configured tone curve.
+    pub fn with_content_peak(self, content_peak: Option<f32>) -> Self {
+        Self {
+            content_peak,
+            ..self
+        }
+    }
+
     /// The shader on one pixel: linear BT.2020 (1.0 is SDR white) in, signal code values out.
     pub fn apply(&self, working: [f32; 3]) -> [f32; 3] {
         let mut nits = working.map(|v| v.max(0.0) * self.sdr_white);
         let y = dot(self.luma_2020, nits);
         if y > 1e-6 {
-            let mapped = match self.tone {
-                ToneMap::Knee => tone_map(y, self.peak),
-                ToneMap::Bt2390 => bt2390_tone_map(y, self.peak),
+            let mapped = match (self.content_peak, self.tone) {
+                (Some(content), _) => fitted_tone_map(y, content, self.peak),
+                (None, ToneMap::Knee) => tone_map(y, self.peak),
+                (None, ToneMap::Bt2390) => bt2390_tone_map(y, self.peak),
             };
             let scale = mapped / y;
             nits = nits.map(|v| v * scale);

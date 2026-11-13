@@ -415,6 +415,7 @@ pub fn window_elements(
         (Some(toplevel), Some(color))
             if !(color.fullscreen_passthrough && is_fullscreen(window)) =>
         {
+            gamut::note_content_light(toplevel.wl_surface());
             gamut::conversions(toplevel.wl_surface(), &color)
         }
         _ => Vec::new(),

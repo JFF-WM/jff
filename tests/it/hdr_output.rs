@@ -1,13 +1,13 @@
 //! Tests for `jff_wm::primitives::hdr_output` and the HDR side of `gamut::Conversion`.
 
 use jff_wm::primitives::color::{
-    ImageDescription, Luminance, NamedPrimaries, NamedTf, TransferFunction,
+    ContentLight, ImageDescription, Luminance, NamedPrimaries, NamedTf, TransferFunction,
 };
 use jff_wm::primitives::gamut::{Conversion, Curve};
 use jff_wm::primitives::hdr_output::{
-    bt2390_source_peak, bt2390_tone_map, hlg_display_nits, hlg_inverse_oetf, low_headroom,
-    pq_decode, pq_encode, tone_map, FinalPass, ToneMap, BT2020_LUMA, BT2390_SOURCE_PEAK,
-    DEFAULT_SDR_WHITE, HDR_PEAK_RANGE, PQ_PEAK, SDR_WHITE_RANGE,
+    bt2390_source_peak, bt2390_tone_map, fitted_tone_map, frame_content_peak, hlg_display_nits,
+    hlg_inverse_oetf, low_headroom, pq_decode, pq_encode, tone_map, FinalPass, ToneMap,
+    BT2020_LUMA, BT2390_SOURCE_PEAK, DEFAULT_SDR_WHITE, HDR_PEAK_RANGE, PQ_PEAK, SDR_WHITE_RANGE,
 };
 
 const PEAK: f32 = 301.8;
@@ -596,4 +596,266 @@ fn the_scrgb_conversion_has_its_own_tag() {
         scrgb.tag(),
         Conversion::to_working(&ImageDescription::windows_scrgb(), 100.0).tag()
     );
+}
+
+// ---- tone mapping fitted to the content's peak ----------------------------------------------
+
+/// A panel of 1000 cd/m² with SDR white at 203, and no gamut to map: only the luminance moves.
+fn fitted_panel(content_peak: Option<f32>) -> FinalPass {
+    FinalPass::new(203.0, 1000.0, None).with_content_peak(content_peak)
+}
+
+/// What a grey of `nits` cd/m² in the working space is shown as, in cd/m².
+fn shown(pass: &FinalPass, nits: f32) -> f32 {
+    let working = nits / pass.sdr_white;
+    pq_decode(pass.apply([working; 3])[0]) * PQ_PEAK
+}
+
+fn near(a: f32, b: f32, tolerance: f32) {
+    assert!((a - b).abs() <= tolerance, "{a} vs {b}");
+}
+
+#[test]
+fn content_under_the_panels_peak_is_shown_as_it_is_up_to_its_peak() {
+    let pass = fitted_panel(Some(600.0));
+    for nits in [0.0, 5.0, 100.0, 203.0, 450.0, 600.0] {
+        near(shown(&pass, nits), nits, 0.5 + nits * 1e-3);
+    }
+    // what the knee would have done to it: it starts at 750, but 900 is above the content's
+    // own peak, so nothing in a well-formed picture is there. Light above the panel is clipped.
+    near(shown(&pass, 5000.0), 1000.0, 1.0);
+}
+
+#[test]
+fn content_equal_to_the_panels_peak_is_shown_as_it_is() {
+    let pass = fitted_panel(Some(1000.0));
+    for nits in [0.0, 100.0, 203.0, 750.0, 900.0, 1000.0] {
+        near(shown(&pass, nits), nits, 0.5 + nits * 1e-3);
+    }
+}
+
+#[test]
+fn the_knee_does_not_squeeze_content_that_is_already_fitted() {
+    // The knee starts at 0.75 of the peak. Content that says it ends at 350 on a panel of 400
+    // is not rolled off, whatever the configured curve is.
+    let knee = FinalPass::new(203.0, 400.0, None);
+    assert_eq!(knee.tone, ToneMap::Knee);
+    let squeezed = shown(&knee, 350.0);
+    assert!(squeezed < 345.0, "{squeezed}");
+    for pass in [knee, knee.with_tone_map(ToneMap::Bt2390)] {
+        let fitted = pass.with_content_peak(Some(350.0));
+        near(shown(&fitted, 350.0), 350.0, 0.5);
+        near(shown(&fitted, 320.0), 320.0, 0.5);
+    }
+}
+
+#[test]
+fn content_above_the_panels_peak_lands_its_peak_on_the_panels() {
+    for content in [1200.0, 4000.0, 10_000.0] {
+        let pass = fitted_panel(Some(content));
+        near(shown(&pass, content), 1000.0, 1.0);
+        // brighter than it says is shown at the peak too
+        near(shown(&pass, content * 1.5), 1000.0, 1.0);
+        // and it is rolled off, not clipped: the highlights below the content's peak stay apart
+        assert!(shown(&pass, content * 0.5) < 1000.0 - 1.0, "{content}");
+    }
+    // the curve is BT.2390 with the content's peak as the source
+    let pass = fitted_panel(Some(4000.0));
+    for nits in [300.0, 800.0, 1500.0, 3000.0] {
+        near(
+            fitted_tone_map(nits, 4000.0, 1000.0),
+            bt2390_tone_map_for(nits, 4000.0, 1000.0),
+            1e-3,
+        );
+        near(
+            shown(&pass, nits),
+            fitted_tone_map(nits, 4000.0, 1000.0),
+            1.0 + nits * 1e-3,
+        );
+    }
+}
+
+/// The same curve as `bt2390_tone_map` has for a panel whose default source peak is `source`:
+/// 4000 is the default for a panel of exactly 1000.
+fn bt2390_tone_map_for(nits: f32, source: f32, peak: f32) -> f32 {
+    assert_eq!(bt2390_source_peak(peak), source);
+    bt2390_tone_map(nits, peak)
+}
+
+#[test]
+fn a_fitted_pass_is_monotonic_and_never_over_the_panel() {
+    for content in [300.0, 1000.0, 1001.0, 4000.0, 10_000.0] {
+        let pass = fitted_panel(Some(content));
+        let mut last = -1.0f32;
+        let mut nits = 0.0f32;
+        while nits <= 12_000.0 {
+            let now = shown(&pass, nits);
+            // a quarter of a cd/m² of slack: the PQ round trip in f32 is not exact up there
+            assert!(now >= last - 0.25, "{content}: {last} then {now} at {nits}");
+            assert!(now <= 1000.5, "{content}: {now} at {nits}");
+            last = now;
+            nits += 25.0;
+        }
+    }
+}
+
+#[test]
+fn without_a_content_peak_the_pass_is_what_it_was() {
+    for tone in [ToneMap::Knee, ToneMap::Bt2390] {
+        for peak in [302.0, 600.0, 1000.0, 4000.0] {
+            let old = FinalPass::new(203.0, peak, None).with_tone_map(tone);
+            let new = old.with_content_peak(None);
+            assert_eq!(old.content_peak, None);
+            assert_eq!(old, new);
+            for working in [0.0, 0.25, 1.0, 2.0, 4.0, 12.0, 60.0] {
+                let rgb = [working, working * 0.5, working * 0.1];
+                assert_eq!(old.apply(rgb), new.apply(rgb));
+                // and it is the configured curve on the luminance, as before
+                let nits = rgb.map(|v| v * 203.0);
+                let y =
+                    BT2020_LUMA[0] * nits[0] + BT2020_LUMA[1] * nits[1] + BT2020_LUMA[2] * nits[2];
+                let mapped = match tone {
+                    ToneMap::Knee => tone_map(y, peak),
+                    ToneMap::Bt2390 => bt2390_tone_map(y, peak),
+                };
+                if y > 1e-3 {
+                    let expected = nits.map(|v| pq_encode(v * (mapped / y) / PQ_PEAK));
+                    for (got, want) in old.apply(rgb).iter().zip(expected) {
+                        assert!(
+                            (got - want).abs() < 2e-3,
+                            "{tone:?} {peak} {rgb:?}: {got} {want}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_content_peak_makes_no_difference_to_what_is_below_the_panels_knee_or_its_own() {
+    // The same pass with and without a peak agrees where neither curve touches the light.
+    let plain = fitted_panel(None);
+    for content in [400.0, 1000.0, 4000.0] {
+        let fitted = fitted_panel(Some(content));
+        for working in [0.0, 0.1, 0.5, 1.0] {
+            let rgb = [working, working, working];
+            for (a, b) in plain.apply(rgb).iter().zip(fitted.apply(rgb)) {
+                assert!((a - b).abs() < 1e-4, "{content} {working}: {a} {b}");
+            }
+        }
+    }
+}
+
+#[test]
+fn sdr_content_is_untouched_whatever_the_content_peak() {
+    // SDR white and the dark half of the range, on a panel of 1000 cd/m².
+    for tone in [ToneMap::Knee, ToneMap::Bt2390] {
+        for content in [None, Some(300.0), Some(600.0), Some(1000.0), Some(4000.0)] {
+            let pass = fitted_panel(content).with_tone_map(tone);
+            for working in [0.0, 0.1, 0.5, 1.0] {
+                let coded = pass.apply([working; 3]);
+                let expected = pq_encode(working * 203.0 / PQ_PEAK);
+                for v in coded {
+                    assert!(
+                        (v - expected).abs() < 1e-4,
+                        "{tone:?} {content:?} {working}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_content_peak_belongs_to_the_pass_and_not_to_its_settings() {
+    let pass = FinalPass::new(203.0, 400.0, None);
+    assert_eq!(pass.content_peak, None);
+    let fitted = pass.with_content_peak(Some(1000.0));
+    assert_ne!(pass, fitted);
+    assert_eq!(fitted.with_content_peak(None), pass);
+    // the other settings are carried over
+    assert_eq!(fitted.sdr_white, pass.sdr_white);
+    assert_eq!(fitted.peak, pass.peak);
+    assert_eq!(fitted.tone, pass.tone);
+}
+
+#[test]
+fn a_frame_without_a_stated_peak_has_none() {
+    assert_eq!(frame_content_peak(1000.0, []), None);
+    // SDR surfaces, and light that says nothing, are not metadata
+    assert_eq!(
+        frame_content_peak(1000.0, [ContentLight::Sdr, ContentLight::Sdr]),
+        None
+    );
+    assert_eq!(
+        frame_content_peak(400.0, [ContentLight::Sdr, ContentLight::Unknown]),
+        None
+    );
+}
+
+#[test]
+fn a_frame_takes_the_largest_stated_peak() {
+    assert_eq!(
+        frame_content_peak(1000.0, [ContentLight::Peak(600.0)]),
+        Some(600.0)
+    );
+    assert_eq!(
+        frame_content_peak(
+            1000.0,
+            [
+                ContentLight::Sdr,
+                ContentLight::Peak(600.0),
+                ContentLight::Peak(1500.0),
+            ]
+        ),
+        Some(1500.0)
+    );
+}
+
+#[test]
+fn a_surface_that_says_nothing_counts_as_the_default_source_peak() {
+    // Under 1000 the default source is 1000, so a PQ video that says 600 next to a game that
+    // says nothing is fitted to 1000, like the game is on its own.
+    assert_eq!(
+        frame_content_peak(400.0, [ContentLight::Peak(600.0), ContentLight::Unknown]),
+        Some(bt2390_source_peak(400.0))
+    );
+    // From 1000 up it is four times the panel's
+    assert_eq!(
+        frame_content_peak(1000.0, [ContentLight::Unknown, ContentLight::Peak(600.0)]),
+        Some(bt2390_source_peak(1000.0))
+    );
+    // a stated peak above the default wins
+    assert_eq!(
+        frame_content_peak(400.0, [ContentLight::Unknown, ContentLight::Peak(4000.0)]),
+        Some(4000.0)
+    );
+    // and none goes over the top of PQ
+    assert_eq!(
+        frame_content_peak(
+            4000.0,
+            [ContentLight::Unknown, ContentLight::Peak(10_000.0)]
+        ),
+        Some(PQ_PEAK)
+    );
+}
+
+#[test]
+fn a_surface_that_says_nothing_is_not_mapped_harder_beside_one_that_does() {
+    // A panel of 400: a PQ surface with no metadata alone is mapped with a source of 1000
+    // (BT.2390 mode). Beside a video that says 600 the pass is fitted to 1000 too, so its
+    // brightest light is shown the same, where fitting to 600 would show it brighter.
+    let alone = FinalPass::new(203.0, 400.0, None).with_tone_map(ToneMap::Bt2390);
+    let beside = alone.with_content_peak(frame_content_peak(
+        400.0,
+        [ContentLight::Peak(600.0), ContentLight::Unknown],
+    ));
+    for nits in [500.0, 800.0, 1000.0] {
+        near(shown(&beside, nits), shown(&alone, nits), 0.5);
+    }
+    let too_hard = alone.with_content_peak(Some(600.0));
+    for nits in [400.0, 500.0] {
+        assert!(shown(&too_hard, nits) > shown(&alone, nits) + 5.0, "{nits}");
+    }
 }

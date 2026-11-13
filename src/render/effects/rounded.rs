@@ -190,16 +190,21 @@ impl Rounding {
     where
         E: Element + RenderElement<GlesRenderer>,
     {
+        // A new correction or conversion is a new id, like a new radius: the window is
+        // repainted.
+        let id = element_id(
+            element.id(),
+            thumb,
+            self.radius
+                .wrapping_add(self.correction.map_or(0, |fix| fix.tag()))
+                .wrapping_add(self.conversion.map_or(0, |conversion| conversion.tag())),
+        );
+        // A live surface's content light counts under the id it is drawn as. A thumbnail's does not: it is not the window.
+        if !thumb {
+            super::gamut::bind_content_light(element.id(), &id);
+        }
         RoundedElement {
-            // A new correction or conversion is a new id, like a new radius: the window is
-            // repainted.
-            id: element_id(
-                element.id(),
-                thumb,
-                self.radius
-                    .wrapping_add(self.correction.map_or(0, |fix| fix.tag()))
-                    .wrapping_add(self.conversion.map_or(0, |conversion| conversion.tag())),
-            ),
+            id,
             inner: element,
             rounding: self.clone(),
         }
