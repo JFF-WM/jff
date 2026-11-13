@@ -151,7 +151,7 @@ pub fn build() -> Vec<Page> {
         Page {
             id: "displays",
             title: "Displays",
-            keywords: "monitor output resolution mode refresh rate hdr icc profile position vrr tearing color management",
+            keywords: "monitor output resolution mode refresh rate hdr tone map bt2390 knee sdr white peak icc profile position vrr tearing color management",
             body: Body::Outputs(displays()),
         },
         Page {
@@ -851,6 +851,7 @@ pub fn output_fields() -> Vec<Field> {
         ("fullscreen", "Fullscreen Only"),
         ("always", "Always"),
     ];
+    const TONE_MAP: &[(&str, &str)] = &[("knee", "Knee"), ("bt2390", "BT.2390")];
     vec![
         field(&["off"], "Turn Off This Display", "", Kind::Presence),
         field(
@@ -895,6 +896,13 @@ pub fn output_fields() -> Vec<Field> {
             400,
         )
         .optional(),
+        choice(
+            &["hdr-tone-map"],
+            "HDR Tone Mapping",
+            "How highlights brighter than the display can show are rolled off. Only used with HDR on",
+            TONE_MAP,
+            "knee",
+        ),
         text(&["icc-profile"], "ICC Profile Path"),
         field(
             &["content-type-hint"],
