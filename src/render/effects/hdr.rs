@@ -1,4 +1,4 @@
-//! HDR output: the frame is composited into a linear fp16 texture and a final pass turns it into the PQ signal.
+//! HDR output: the frame is composited into a linear fp16 texture and a final pass turns it into the PQ (or HLG) signal.
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::{Error as DamageError, OutputDamageTracker};
@@ -18,6 +18,7 @@ use smithay::utils::{Buffer, Physical, Rectangle, Scale, Size, Transform};
 
 use crate::primitives::color::ImageDescription;
 use crate::primitives::gamut::Conversion;
+use crate::primitives::hdr::OutputEotf;
 use crate::primitives::hdr_output::FinalPass;
 use crate::protocol::color_management::WorkingSpace;
 use crate::render::effects::rounded::Rounding;
@@ -52,6 +53,7 @@ fn program(renderer: &mut GlesRenderer) -> Option<GlesTexProgram> {
                 vec3("luma_panel"),
                 UniformName::new("map_on", UniformType::_1f),
                 UniformName::new("tone_kind", UniformType::_1f),
+                UniformName::new("out_hlg", UniformType::_1f),
             ],
         )
         .map_err(|err| tracing::warn!("error compiling the HDR output shader: {err:#}"))
@@ -287,6 +289,7 @@ impl RenderElement<GlesRenderer> for HdrFrameElement {
             Uniform::new("luma_panel", pass.luma_panel),
             Uniform::new("map_on", f32::from(u8::from(pass.map_gamut))),
             Uniform::new("tone_kind", pass.tone.shader_param()),
+            Uniform::new("out_hlg", f32::from(u8::from(pass.eotf == OutputEotf::Hlg))),
         ];
         frame.render_texture_from_to(
             &self.texture,

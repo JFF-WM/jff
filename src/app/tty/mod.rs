@@ -14,7 +14,7 @@ use smithay::backend::renderer::PresentationMode;
 use smithay::backend::drm::exporter::gbm::{GbmFramebufferExporter, NodeFilter};
 use smithay::backend::drm::{
     Colorspace, ConnectorColorState, DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata,
-    DrmEventTime, DrmNode, HdrOutputMetadata, VrrSupport,
+    DrmEventTime, DrmNode, Eotf, HdrOutputMetadata, VrrSupport,
 };
 use smithay::backend::egl::{EGLContext, EGLDevice, EGLDisplay};
 use smithay::backend::input::InputEvent;
@@ -71,7 +71,7 @@ use crate::primitives::color::{
 };
 use crate::primitives::edid::{self, Edid};
 use crate::primitives::frame_clock::{next_presentation_time, wait_until, FALLBACK_REFRESH};
-use crate::primitives::hdr::{self, KernelSupport, Status, Unavailable};
+use crate::primitives::hdr::{self, KernelSupport, OutputEotf, Status, Unavailable};
 use crate::primitives::hdr_output::{self, FinalPass};
 use crate::primitives::hdr_scanout::{self, Decline, Facts, Over, Tried};
 use crate::primitives::layout;
@@ -628,16 +628,23 @@ fn read_edid(drm: &DrmDevice, connector: connector::Handle) -> Option<Edid> {
     edid::parse(&bytes).ok()
 }
 
-/// The connector state that signals HDR10: BT.2020 RGB, PQ, and the plan's metadata.
+/// The connector state that signals HDR: BT.2020 RGB, PQ (or HLG), and the plan's metadata.
 fn hdr_color_state(plan: &hdr::Plan) -> ConnectorColorState {
+    let metadata = HdrOutputMetadata::pq_bt2020(
+        plan.max_luminance,
+        plan.min_luminance,
+        plan.max_cll,
+        plan.max_fall,
+    );
     ConnectorColorState {
         colorspace: Colorspace::Bt2020Rgb,
-        hdr_metadata: Some(HdrOutputMetadata::pq_bt2020(
-            plan.max_luminance,
-            plan.min_luminance,
-            plan.max_cll,
-            plan.max_fall,
-        )),
+        hdr_metadata: Some(match plan.eotf {
+            OutputEotf::Pq => metadata,
+            OutputEotf::Hlg => HdrOutputMetadata {
+                eotf: Eotf::Hlg,
+                ..metadata
+            },
+        }),
         max_bpc: plan.max_bpc,
     }
 }
@@ -1183,7 +1190,8 @@ impl Tty {
                             f32::from(plan.max_luminance),
                             panel.as_ref(),
                         )
-                        .with_tone_map(tone);
+                        .with_tone_map(tone)
+                        .with_eotf(plan.eotf);
                         hdr = Some((WorkingSpace { sdr_white }, pass));
                         target = hdr_color_state(
                             &plan.with_content(lit.hdr_content.0, lit.hdr_content.1),
@@ -1229,14 +1237,27 @@ impl Tty {
             .values()
             .filter_map(|lit| {
                 let hdr = lit.hdr.as_ref()?;
+                let (tf, luminance) = match hdr.pass.eotf {
+                    OutputEotf::Pq => (
+                        NamedTf::St2084Pq,
+                        Luminance {
+                            min: Luminance::PQ.min,
+                            max: hdr.pass.peak as u32,
+                            reference: hdr.space.sdr_white,
+                        },
+                    ),
+                    OutputEotf::Hlg => (
+                        NamedTf::Hlg,
+                        Luminance {
+                            reference: hdr.space.sdr_white,
+                            ..Luminance::HLG
+                        },
+                    ),
+                };
                 let description = ImageDescription {
                     primaries: NamedPrimaries::Bt2020.chromaticities(),
-                    tf: TransferFunction::Named(NamedTf::St2084Pq),
-                    luminance: Luminance {
-                        min: Luminance::PQ.min,
-                        max: hdr.pass.peak as u32,
-                        reference: hdr.space.sdr_white,
-                    },
+                    tf: TransferFunction::Named(tf),
+                    luminance,
                     max_cll: None,
                     max_fall: None,
                 };
@@ -1657,6 +1678,11 @@ impl JffState {
             &lit.output.name(),
         );
         let hdr_space = lit.hdr.as_ref().map(|hdr| hdr.space);
+        // a window goes to the plane as the client coded it, which only matches a PQ signal
+        let hdr_pq = lit
+            .hdr
+            .as_ref()
+            .is_none_or(|hdr| hdr.pass.eotf == OutputEotf::Pq);
         let color = match hdr_space {
             Some(space) => Some(crate::protocol::color_management::hdr_color(color, space)),
             None => color,
@@ -1788,7 +1814,7 @@ impl JffState {
             let mut scanout_blocked = None;
             // The light levels the connector should state: the client's while its buffer goes to the plane.
             let mut content = (None, None);
-            if hdr_space.is_some() && covering {
+            if hdr_space.is_some() && hdr_pq && covering {
                 if let Some(surface) = fullscreen_surface(&self.desk, rect) {
                     let (tag, buffer_format) = surface_scanout_facts(&surface);
                     let current = lit.compositor.current_color_state();

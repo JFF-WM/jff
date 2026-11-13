@@ -1,4 +1,4 @@
-//! Whether an output can be signalled as HDR10 (PQ in BT.2020), and what the signal says.
+//! Whether an output can be signalled as HDR (PQ in BT.2020, or HLG when the monitor has no PQ), and what the signal says.
 
 use std::ops::RangeInclusive;
 
@@ -31,10 +31,8 @@ pub enum Unavailable {
     NoEdid,
     /// The EDID has no HDR static metadata block.
     NoHdrBlock,
-    /// The monitor does not take PQ with static metadata type 1.
+    /// The monitor takes neither PQ nor HLG with static metadata type 1.
     NoPq,
-    /// The monitor lists HLG but not PQ, and only PQ is signalled.
-    HlgOnly,
     /// The EDID does not list BT.2020 RGB colorimetry.
     NoBt2020Rgb,
     /// The connector has no `HDR_OUTPUT_METADATA` property.
@@ -54,9 +52,8 @@ impl std::fmt::Display for Unavailable {
         match self {
             Unavailable::NoEdid => f.write_str("the monitor has no readable EDID"),
             Unavailable::NoHdrBlock => f.write_str("the EDID has no HDR static metadata block"),
-            Unavailable::NoPq => f.write_str("the monitor does not list the PQ transfer function"),
-            Unavailable::HlgOnly => {
-                f.write_str("the monitor lists HLG but not PQ, and only PQ (HDR10) is signalled")
+            Unavailable::NoPq => {
+                f.write_str("the monitor lists neither PQ nor HLG with static metadata type 1")
             }
             Unavailable::NoBt2020Rgb => {
                 f.write_str("the monitor does not list BT.2020 RGB colorimetry")
@@ -81,9 +78,30 @@ impl std::fmt::Display for Unavailable {
     }
 }
 
-/// What to put on the connector for HDR10. Luminances are in the units of the infoframe.
+/// The transfer function the signal is coded with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputEotf {
+    /// SMPTE ST 2084, the HDR10 signal.
+    #[default]
+    Pq,
+    /// Hybrid log-gamma, for a monitor that lists it and not PQ.
+    Hlg,
+}
+
+impl std::fmt::Display for OutputEotf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            OutputEotf::Pq => "HDR10",
+            OutputEotf::Hlg => "HLG",
+        })
+    }
+}
+
+/// What to put on the connector for HDR. Luminances are in the units of the infoframe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Plan {
+    /// How the signal is coded.
+    pub eotf: OutputEotf,
     /// Mastering peak luminance, cd/m².
     pub max_luminance: u16,
     /// Mastering minimum luminance, in units of 0.0001 cd/m².
@@ -144,8 +162,9 @@ pub enum Status {
     Off,
     /// `hdr` is set and the output stays SDR, for this reason.
     Sdr(Unavailable),
-    /// The output is signalled as HDR10.
+    /// The output is signalled as HDR, HDR10 unless `eotf` says HLG.
     Hdr10 {
+        eotf: OutputEotf,
         /// Peak the frame is mapped to, cd/m².
         peak: u16,
         peak_source: PeakSource,
@@ -160,6 +179,7 @@ impl Status {
     /// HDR10 as planned, with SDR white at `sdr_white` cd/m².
     pub fn hdr10(plan: &Plan, sdr_white: u32) -> Self {
         Status::Hdr10 {
+            eotf: plan.eotf,
             peak: plan.max_luminance,
             peak_source: plan.peak_source,
             sdr_white,
@@ -189,6 +209,7 @@ impl std::fmt::Display for Status {
             Status::Off => f.write_str("HDR off"),
             Status::Sdr(reason) => write!(f, "staying SDR, {reason}"),
             Status::Hdr10 {
+                eotf,
                 peak,
                 peak_source,
                 sdr_white,
@@ -196,7 +217,7 @@ impl std::fmt::Display for Status {
             } => {
                 write!(
                     f,
-                    "HDR10, peak {peak} cd/m² ({peak_source}), SDR white {sdr_white} cd/m², "
+                    "{eotf}, peak {peak} cd/m² ({peak_source}), SDR white {sdr_white} cd/m², "
                 )?;
                 match max_bpc {
                     Some(bpc) => write!(f, "{bpc} bpc"),
@@ -215,13 +236,15 @@ pub fn plan(
 ) -> Result<Plan, Unavailable> {
     let edid = edid.ok_or(Unavailable::NoEdid)?;
     let hdr = edid.hdr.as_ref().ok_or(Unavailable::NoHdrBlock)?;
-    if !hdr.eotfs.pq || !hdr.type1 {
-        return Err(if hdr.eotfs.hlg && !hdr.eotfs.pq {
-            Unavailable::HlgOnly
-        } else {
-            Unavailable::NoPq
-        });
+    if !hdr.type1 || !(hdr.eotfs.pq || hdr.eotfs.hlg) {
+        return Err(Unavailable::NoPq);
     }
+    // PQ when the monitor takes it, HLG only for one that lists nothing else
+    let eotf = if hdr.eotfs.pq {
+        OutputEotf::Pq
+    } else {
+        OutputEotf::Hlg
+    };
     if !edid.colorimetry.bt2020_rgb {
         return Err(Unavailable::NoBt2020Rgb);
     }
@@ -249,6 +272,7 @@ pub fn plan(
     let average = hdr.max_frame_average.map_or(peak, |nits| nits.min(peak));
     let minimum = hdr.min_luminance.unwrap_or(0.0);
     Ok(Plan {
+        eotf,
         max_luminance: nits_to_u16(peak),
         min_luminance: nits_to_u16(minimum * 10_000.0),
         max_cll: nits_to_u16(peak),

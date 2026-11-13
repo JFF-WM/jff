@@ -25,7 +25,8 @@ uniform float tint;
 // Final pass of an HDR output. The frame is linear BT.2020 light, 1.0 being SDR white (`sdr_white`
 // cd/m²). It is placed in cd/m², its luminance is rolled off under the panel's `peak`, the colors
 // the panel cannot show are desaturated into its gamut (when `map_on`), and the result is PQ coded
-// in BT.2020, which is what the connector announces. `tone_kind` 0 rolls the luminance off with the
+// in BT.2020 (`out_hlg` 0), or HLG coded for a 1000 cd/m² display (`out_hlg` 1), which is what the
+// connector announces. `tone_kind` 0 rolls the luminance off with the
 // knee, 1 with the BT.2390 EETF. This is `FinalPass::apply` in primitives/hdr_output.rs, keep them
 // the same.
 uniform float sdr_white;
@@ -41,9 +42,12 @@ uniform vec3 luma_2020;
 uniform vec3 luma_panel;
 uniform float map_on;
 uniform float tone_kind;
+uniform float out_hlg;
 
 const float KNEE = 0.75;
 const float BT2390_SOURCE_PEAK = 1000.0;
+const float HLG_NOMINAL_PEAK = 1000.0;
+const float HLG_GAMMA = 1.2;
 
 // Light in cd/m² to a PQ code.
 vec3 pq_encode(vec3 nits) {
@@ -52,6 +56,23 @@ vec3 pq_encode(vec3 nits) {
 }
 
 // The same for one value, and its inverse.
+// Scene light (0 to 1) to HLG signal.
+vec3 hlg_oetf(vec3 e) {
+    e = clamp(e, 0.0, 1.0);
+    vec3 low = sqrt(3.0 * e);
+    vec3 high = 0.17883277 * log(max(12.0 * e - 0.28466892, 1e-6)) + vec3(0.55991073);
+    return mix(high, low, vec3(lessThanEqual(e, vec3(1.0 / 12.0))));
+}
+
+// Light in cd/m² on a 1000 cd/m² display to the HLG signal that shows it: the inverse OOTF, then the OETF.
+vec3 hlg_signal(vec3 nits) {
+    vec3 rel = max(nits, vec3(0.0)) / HLG_NOMINAL_PEAK;
+    float y = dot(luma_2020, rel);
+    if (y <= 0.0)
+        return vec3(0.0);
+    return hlg_oetf(rel * pow(y, (1.0 - HLG_GAMMA) / HLG_GAMMA));
+}
+
 float pq_encode1(float nits) {
     float y = pow(clamp(nits / 10000.0, 0.0, 1.0), 0.1593017578125);
     return pow((0.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y), 78.84375);
@@ -116,5 +137,6 @@ void main() {
     }
 
     // The frame is opaque, `alpha` is 1.
-    gl_FragColor = vec4(pq_encode(max(nits, vec3(0.0))), 1.0) * alpha;
+    vec3 coded = out_hlg > 0.5 ? hlg_signal(nits) : pq_encode(max(nits, vec3(0.0)));
+    gl_FragColor = vec4(coded, 1.0) * alpha;
 }

@@ -3,6 +3,7 @@
 use super::color::{Chromaticities, NamedPrimaries};
 use super::edid::Primaries;
 use super::gamut::{conversion_matrix, map_gamut, rgb_to_xyz, GamutMap, Mat3};
+use super::hdr::OutputEotf;
 
 /// Luminance PQ's top code stands for, in cd/m².
 pub const PQ_PEAK: f32 = 10_000.0;
@@ -89,6 +90,26 @@ pub fn hlg_display_nits(signal: [f32; 3], luma: [f32; 3]) -> [f32; 3] {
     }
     let gain = HLG_NOMINAL_PEAK * y.powf(HLG_SYSTEM_GAMMA - 1.0);
     scene.map(|v| v * gain)
+}
+
+/// Scene light (0 to 1) to HLG signal, the OETF of BT.2100-2.
+pub fn hlg_oetf(scene: f32) -> f32 {
+    let e = scene.clamp(0.0, 1.0);
+    if e <= 1.0 / 12.0 {
+        (3.0 * e).sqrt()
+    } else {
+        HLG_A * (12.0 * e - HLG_B).ln() + HLG_C
+    }
+}
+
+/// Light on a 1000 cd/m² display, in cd/m² (`luma` the Y row of the primaries), to the HLG signal that shows it: the inverse of [`hlg_display_nits`], the inverse OOTF and then the OETF.
+pub fn hlg_signal(nits: [f32; 3], luma: [f32; 3]) -> [f32; 3] {
+    let y = dot(luma, nits.map(|v| v.max(0.0) / HLG_NOMINAL_PEAK));
+    if y <= 0.0 {
+        return [0.0; 3];
+    }
+    let gain = y.powf((1.0 - HLG_SYSTEM_GAMMA) / HLG_SYSTEM_GAMMA);
+    nits.map(|v| hlg_oetf(v.max(0.0) / HLG_NOMINAL_PEAK * gain))
 }
 
 /// The panel's primaries from an EDID, in the millionths the protocol writes them in.
@@ -197,6 +218,8 @@ pub struct FinalPass {
     pub map_gamut: bool,
     /// How luminance above the knee is rolled off.
     pub tone: ToneMap,
+    /// The signal the result is coded as.
+    pub eotf: OutputEotf,
 }
 
 fn narrow(m: &Mat3) -> [[f32; 3]; 3] {
@@ -232,6 +255,7 @@ impl FinalPass {
             luma_panel,
             map_gamut,
             tone: ToneMap::default(),
+            eotf: OutputEotf::default(),
         }
     }
 
@@ -240,7 +264,12 @@ impl FinalPass {
         Self { tone, ..self }
     }
 
-    /// The shader on one pixel: linear BT.2020 (1.0 is SDR white) in, PQ code values out.
+    /// The same pass coding for another signal.
+    pub fn with_eotf(self, eotf: OutputEotf) -> Self {
+        Self { eotf, ..self }
+    }
+
+    /// The shader on one pixel: linear BT.2020 (1.0 is SDR white) in, signal code values out.
     pub fn apply(&self, working: [f32; 3]) -> [f32; 3] {
         let mut nits = working.map(|v| v.max(0.0) * self.sdr_white);
         let y = dot(self.luma_2020, nits);
@@ -257,7 +286,10 @@ impl FinalPass {
             let mapped = map_gamut(panel, self.luma_panel, GamutMap::Compress);
             nits = mul_vec(&self.from_panel, mapped.map(|v| v * self.peak));
         }
-        nits.map(|v| pq_encode(v.clamp(0.0, PQ_PEAK) / PQ_PEAK))
+        match self.eotf {
+            OutputEotf::Pq => nits.map(|v| pq_encode(v.clamp(0.0, PQ_PEAK) / PQ_PEAK)),
+            OutputEotf::Hlg => hlg_signal(nits, self.luma_2020),
+        }
     }
 }
 
