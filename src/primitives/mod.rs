@@ -10,6 +10,7 @@ pub mod gamut;
 pub mod geom;
 pub mod hdr;
 pub mod hdr_output;
+pub mod hdr_scanout;
 pub mod json;
 pub mod layout;
 pub mod overview_grid;

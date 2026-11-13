@@ -5,9 +5,10 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
+use smithay::reexports::wayland_server::Resource;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
-use smithay::backend::allocator::Fourcc;
+use smithay::backend::allocator::{Buffer as _, Fourcc};
 use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags, PrimaryPlaneElement};
 use smithay::backend::renderer::PresentationMode;
 use smithay::backend::drm::exporter::gbm::{GbmFramebufferExporter, NodeFilter};
@@ -49,7 +50,8 @@ use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 use smithay::utils::{DeviceFd, Logical, Monotonic, Physical, Point, Scale, Transform};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::wayland::compositor::SurfaceData;
+use smithay::wayland::compositor::{with_states, SurfaceData};
+use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder};
 use smithay::wayland::drm_lease::{DrmLease, DrmLeaseBuilder, DrmLeaseState, LeaseRejected};
 use smithay::wayland::presentation::Refresh;
@@ -69,11 +71,12 @@ use crate::primitives::edid::{self, Edid};
 use crate::primitives::frame_clock::{next_presentation_time, wait_until, FALLBACK_REFRESH};
 use crate::primitives::hdr::{self, KernelSupport, Status, Unavailable};
 use crate::primitives::hdr_output::{self, FinalPass};
+use crate::primitives::hdr_scanout::{self, Decline, Facts, Over};
 use crate::primitives::layout;
 use crate::protocol::color_management::WorkingSpace;
 use crate::protocol::layer_shell::{
-    fullscreen_covers, layer_body_elements, layer_elements, layer_popup_elements, layers_above,
-    BELOW_WINDOWS,
+    fullscreen_covers, fullscreen_surface, layer_body_elements, layer_elements,
+    layer_popup_elements, layers_above, layers_shown, BELOW_WINDOWS,
 };
 use crate::protocol::session_lock::LOCKED_BACKGROUND;
 use crate::render::cursor::RenderCursor;
@@ -233,6 +236,44 @@ fn note_hdr_fault(last: &mut Option<HdrFault>, fault: HdrFault) -> bool {
     true
 }
 
+/// What a monitor in HDR mode remembers about putting a window straight on the primary plane.
+#[derive(Default)]
+struct HdrScanout {
+    /// The window and buffer format the compositor found not to reach the plane, so it is not tried again until one of them changes.
+    declined: Option<ScanoutKey>,
+    /// The reason logged last, so a reason is logged once.
+    reason: Option<Decline>,
+}
+
+/// A window and what it showed when it did not reach the primary plane.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ScanoutKey {
+    surface: u32,
+    format: Option<u32>,
+    /// How many elements the window made, which changes when a popup or a subsurface comes or goes.
+    elements: usize,
+}
+
+/// The colors and the buffer format of a window's surface, for [`hdr_scanout::decide`].
+fn surface_scanout_facts(surface: &WlSurface) -> (Option<ImageDescription>, Option<u32>) {
+    let tag = with_states(surface, crate::protocol::color_management::surface_color_in)
+        .map(|color| color.description);
+    let format = smithay::backend::renderer::utils::with_renderer_surface_state(surface, |state| {
+        state
+            .buffer()
+            .and_then(|buffer| get_dmabuf(buffer).ok())
+            .map(|dmabuf| dmabuf.format().code as u32)
+    })
+    .flatten();
+    (tag, format)
+}
+
+// The decision compares the fourccs it knows by number.
+const _: () = {
+    assert!(Fourcc::Argb2101010 as u32 == hdr_scanout::ARGB2101010);
+    assert!(Fourcc::Abgr2101010 as u32 == hdr_scanout::ABGR2101010);
+};
+
 /// How a monitor in HDR mode is drawn.
 struct HdrOutput {
     space: WorkingSpace,
@@ -281,6 +322,8 @@ struct TtyOutput {
     hdr_status: Status,
     /// The HDR failure logged last, cleared when a frame succeeds or the HDR settings are synced.
     hdr_fault: Option<HdrFault>,
+    /// Direct scanout of a fullscreen window on this monitor while it is HDR.
+    hdr_scanout: HdrScanout,
     /// The swapchain was made with the 10-bit formats first, which only a monitor that asked for `hdr` when it was lit gets.
     hdr_formats: bool,
     /// Feedback carrying this monitor's scanout tranche (see [`build_dmabuf_feedback`]).
@@ -1022,6 +1065,7 @@ impl Tty {
             hdr: None,
             hdr_status: Status::Off,
             hdr_fault: None,
+            hdr_scanout: HdrScanout::default(),
             hdr_formats: hdr_wanted,
             content_hint: false,
             content_game: false,
@@ -1673,6 +1717,8 @@ impl JffState {
         // frame then holds only that window (plus cursor and overlay layer), so DrmCompositor
         // can show the client's buffer on the primary plane without a copy.
         let mut direct_scanout = false;
+        // An HDR output whose fullscreen window is tried on the primary plane this frame.
+        let mut hdr_scanout_try: Option<ScanoutKey> = None;
         // Blur is of the wallpaper alone unless `behind-windows` is set: a copy of the frame
         // is taken once the background layers are drawn, and the window blurs read that.
         let blur_config = (!self.config.blur().off).then(|| self.config.blur());
@@ -1706,13 +1752,72 @@ impl JffState {
                 }
             }
             // With a fullscreen window on top only the overlay layer stays in front of it.
-            // The HDR path composites everything into its own texture, so nothing goes to a plane.
-            direct_scanout = hdr_space.is_none()
-                && overview_here.is_none()
-                && fullscreen_covers(&self.desk, rect);
+            // An HDR output composites into its own texture, so a window goes to the plane only
+            // when `hdr_scanout::decide` says its buffer can reach the panel as it is.
+            let covering = overview_here.is_none() && fullscreen_covers(&self.desk, rect);
+            direct_scanout = hdr_space.is_none() && covering;
+            let mut scanout_blocked = None;
+            if hdr_space.is_some() && covering {
+                if let Some(surface) = fullscreen_surface(&self.desk, rect) {
+                    let (tag, buffer_format) = surface_scanout_facts(&surface);
+                    let current = lit.compositor.current_color_state();
+                    let facts = Facts {
+                        covering,
+                        over: if layers_shown(&lit.output, layers_above(&fullscreen, rect, false)) {
+                            Some(Over::Layer)
+                        } else if !input_popups.is_empty() {
+                            Some(Over::Popup)
+                        } else if !elements.is_empty() {
+                            Some(Over::Cursor)
+                        } else if !self.osd.is_empty() {
+                            Some(Over::Toast)
+                        } else {
+                            None
+                        },
+                        effects: !crate::render::effects::yuv::corrections(&surface).is_empty(),
+                        tag,
+                        buffer_format,
+                        swapchain_format: lit.compositor.format() as u32,
+                        signalled: current == lit.compositor.pending_color_state()
+                            && current == lit.color_target,
+                    };
+                    let key = ScanoutKey {
+                        surface: surface.id().protocol_id(),
+                        format: buffer_format,
+                        elements: 0,
+                    };
+                    match hdr_scanout::decide(&facts) {
+                        Ok(()) => {
+                            lit.hdr_scanout.reason = None;
+                            let tried = lit.hdr_scanout.declined;
+                            if tried
+                                .is_some_and(|k| k.surface == key.surface && k.format == key.format)
+                            {
+                                scanout_blocked = Some(None);
+                            } else {
+                                hdr_scanout_try = Some(key);
+                            }
+                        }
+                        Err(decline) => scanout_blocked = Some(Some(decline)),
+                    }
+                }
+            }
+            if hdr_space.is_some() && !covering {
+                lit.hdr_scanout = HdrScanout::default();
+            }
+            if let Some(reason) = scanout_blocked.flatten() {
+                if lit.hdr_scanout.reason != Some(reason) {
+                    lit.hdr_scanout.reason = Some(reason);
+                    tracing::debug!(
+                        "monitor {}: no direct scanout while HDR: {reason}",
+                        lit.output.name()
+                    );
+                }
+            }
             // Blur is opt-in, and never with a window going straight to the primary plane: the
             // blur needs the frame composited.
-            let blur = (!direct_scanout && !self.config.blur().off).then(|| self.config.blur());
+            let blur = (!direct_scanout && hdr_scanout_try.is_none() && !self.config.blur().off)
+                .then(|| self.config.blur());
             let above = layers_above(&fullscreen, rect, overview_here.is_some());
             elements.extend(layer_elements(
                 &mut *renderer,
@@ -1724,7 +1829,7 @@ impl JffState {
             ));
             // popups of layers below the windows draw above them, except over a fullscreen
             // window: only the overlay layer is in front of that
-            if !direct_scanout {
+            if !(direct_scanout || hdr_scanout_try.is_some()) {
                 elements.extend(layer_popup_elements(
                     &mut *renderer,
                     &lit.output,
@@ -1774,7 +1879,11 @@ impl JffState {
                     if !layout::intersects(area, rect) {
                         continue;
                     }
-                    // Popups and the window, each with its blur right behind it.
+                    let size = entry.window.geometry().size;
+                    let is_covering = (entry.pos.0, entry.pos.1, size.w, size.h) == rect;
+                    // Popups and the window, each with its blur right behind it. A window tried on
+                    // the primary plane is not converted: its buffer goes to the panel as it is.
+                    let before = elements.len();
                     window_elements(
                         &mut *renderer,
                         &entry.window,
@@ -1786,7 +1895,11 @@ impl JffState {
                         snapshot.as_ref(),
                         radius,
                         popup_radius,
-                        color,
+                        if hdr_scanout_try.is_some() && is_covering {
+                            None
+                        } else {
+                            color
+                        },
                         BorderPaint::of(border, &entry.window, self.focused_window.as_ref()),
                         if animate {
                             crate::feature::window_anim::open_frame(
@@ -1801,14 +1914,18 @@ impl JffState {
                         &mut elements,
                     );
                     // nothing below the covering window goes in the frame
-                    let size = entry.window.geometry().size;
-                    if direct_scanout && (entry.pos.0, entry.pos.1, size.w, size.h) == rect {
-                        break;
+                    if is_covering {
+                        if let Some(key) = hdr_scanout_try.as_mut() {
+                            key.elements = elements.len() - before;
+                        }
+                        if direct_scanout || hdr_scanout_try.is_some() {
+                            break;
+                        }
                     }
                 }
             }
             // Wallpapers and desktop widgets are behind everything.
-            if !direct_scanout {
+            if !(direct_scanout || hdr_scanout_try.is_some()) {
                 // Fills the wallpaper copy: drawn right after the background layers.
                 if let Some(snapshot) = &snapshot {
                     elements.push(JffElement::from(snapshot.element((rect.2, rect.3).into())));
@@ -1824,7 +1941,8 @@ impl JffState {
         }
 
         // no toasts over direct scanout, the lock screen or the frozen screenshot
-        if !direct_scanout && !locked && frozen.is_none() && !self.osd.is_empty() {
+        let scanout = direct_scanout || hdr_scanout_try.is_some();
+        if !scanout && !locked && frozen.is_none() && !self.osd.is_empty() {
             let mut toasts = Vec::new();
             self.osd
                 .elements(&mut *renderer, &lit.output, pointer, &mut toasts);
@@ -1834,12 +1952,12 @@ impl JffState {
         // Plane scanout is off by default. When a fullscreen window covers the monitor, allow
         // its buffer on the primary plane whatever the element kind, and move the cursor to its
         // own plane, or it would sit on top of the window and block that.
-        if direct_scanout != lit.covering {
-            lit.covering = direct_scanout;
+        if scanout != lit.covering {
+            lit.covering = scanout;
             tracing::debug!(
                 "monitor {}: a fullscreen window {} the monitor",
                 lit.output.name(),
-                if direct_scanout {
+                if scanout {
                     "now covers"
                 } else {
                     "no longer covers"
@@ -1848,13 +1966,17 @@ impl JffState {
         }
         let frame_flags = if direct_scanout {
             FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY | FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
+        } else if hdr_scanout_try.is_some() {
+            // Only a buffer in the swapchain's format, and no plane for the cursor: its pixels
+            // would not be taken as PQ.
+            FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT
         } else {
             FrameFlags::empty()
         };
 
         // Tearing: a fullscreen window covering the monitor that asked for it. The compositor
         // falls back to a vsync flip when the frame can't be flipped async.
-        let presentation = if direct_scanout
+        let presentation = if scanout
             && self.config.allow_tearing()
             && crate::protocol::layer_shell::fullscreen_wants_tearing(&self.desk, rect)
         {
@@ -1867,7 +1989,7 @@ impl JffState {
         // element that encodes the result for the signal.
         let mut hdr_states = None;
         let mut hdr_failed = false;
-        if let Some(hdr) = lit.hdr.as_mut() {
+        if let Some(hdr) = lit.hdr.as_mut().filter(|_| hdr_scanout_try.is_none()) {
             let space = hdr.space;
             let pass = hdr.pass;
             let linear = hdr_frame::linearize(&mut *renderer, std::mem::take(&mut elements), space);
@@ -1921,12 +2043,22 @@ impl JffState {
             }
         }
 
+        // The frame is not drawn into the texture while the window is on the plane, so the
+        // texture is repainted whole when it is needed again.
+        if hdr_scanout_try.is_some() {
+            if let Some(hdr) = lit.hdr.as_mut() {
+                hdr.frame = None;
+            }
+        }
+
         let mut queued = false;
+        // The window did not reach the plane: draw the frame again through the HDR path.
+        let mut retry = false;
         if !hdr_failed {
             match lit.compositor.render_frame(
                 &mut *renderer,
                 &elements,
-                if locked || direct_scanout {
+                if locked || scanout {
                     LOCKED_BACKGROUND
                 } else {
                     BACKGROUND
@@ -1935,22 +2067,39 @@ impl JffState {
                 presentation,
             ) {
                 Ok(res) => {
-                    let is_empty = res.is_empty;
+                    // The window was tried on the plane and the compositor put it in a copy: that
+                    // copy is not PQ-encoded for the panel, so it is dropped and the frame is
+                    // drawn through the HDR path.
+                    let declined = hdr_scanout_try.is_some()
+                        && !matches!(res.primary_element, PrimaryPlaneElement::Element(_));
+                    let is_empty = res.is_empty || declined;
+                    if declined {
+                        retry = true;
+                        if let Some(key) = hdr_scanout_try {
+                            if lit.hdr_scanout.declined != Some(key) {
+                                lit.hdr_scanout.declined = Some(key);
+                                tracing::debug!(
+                                    "monitor {}: no direct scanout while HDR: the buffer did not reach the primary plane",
+                                    lit.output.name()
+                                );
+                            }
+                        }
+                    }
                     // debug log for direct scanout changes
                     let on_plane = matches!(res.primary_element, PrimaryPlaneElement::Element(_));
                     if on_plane != lit.scanning_out {
                         lit.scanning_out = on_plane;
                         tracing::debug!(
-                        "monitor {}: primary plane now shows {} (fullscreen cover: {direct_scanout})",
-                        lit.output.name(),
-                        if on_plane {
-                            "the client's buffer (direct scanout)"
-                        } else {
-                            "the composited frame"
-                        },
-                    );
+                            "monitor {}: primary plane now shows {} (fullscreen cover: {scanout})",
+                            lit.output.name(),
+                            if on_plane {
+                                "the client's buffer (direct scanout)"
+                            } else {
+                                "the composited frame"
+                            },
+                        );
                     }
-                    if res.needs_sync() {
+                    if !declined && res.needs_sync() {
                         if let PrimaryPlaneElement::Swapchain(element) = res.primary_element {
                             if let Err(err) = element.sync.wait() {
                                 tracing::warn!("error waiting for frame completion: {err:?}");
@@ -1964,7 +2113,7 @@ impl JffState {
                                 &lit.output,
                                 hdr_states.as_ref().unwrap_or(&res.states),
                                 dmabuf_feedback,
-                                direct_scanout,
+                                scanout,
                             );
                         }
                         let feedback = crate::protocol::presentation::take_feedback(
@@ -1995,6 +2144,11 @@ impl JffState {
             // Nothing went to the display, so no vblank is coming. What clients committed is
             // already on screen: their barriers go, their callbacks wait for the estimated vblank.
             tty.queue_estimated_vblank(crtc);
+            if retry {
+                if let Some(lit) = tty.outputs.get_mut(&crtc) {
+                    lit.queue_redraw();
+                }
+            }
         }
 
         if queued {

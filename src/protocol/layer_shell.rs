@@ -80,6 +80,21 @@ pub fn fullscreen_covers(desk: &Desk<Window>, rect: Rect) -> bool {
         })
 }
 
+/// The surface of the fullscreen window covering the monitor at `rect` (see `fullscreen_covers`), `None` without one and for windows that are not xdg toplevels.
+pub fn fullscreen_surface(desk: &Desk<Window>, rect: Rect) -> Option<WlSurface> {
+    if !fullscreen_covers(desk, rect) {
+        return None;
+    }
+    let entry = desk.top_down().find(|entry| {
+        let size = entry.window.geometry().size;
+        layout::intersects((entry.pos.0, entry.pos.1, size.w, size.h), rect)
+    })?;
+    entry
+        .window
+        .toplevel()
+        .map(|toplevel| toplevel.wl_surface().clone())
+}
+
 /// Whether the fullscreen window covering the monitor at `rect` (see `fullscreen_covers`) says
 /// its content is a game (wp_content_type_v1). False without a covering window, and for windows
 /// that never set a content type, like X11 ones.
@@ -142,6 +157,15 @@ pub enum Under {
 /// Whether the surface has a buffer attached, which is what "mapped" means for it.
 pub(crate) fn is_mapped(surface: &WlSurface) -> bool {
     with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
+}
+
+/// Whether `output` has a mapped layer surface on one of `layers`.
+pub fn layers_shown(output: &Output, layers: &[Layer]) -> bool {
+    let map = layer_map_for_output(output);
+    layers.iter().any(|layer| {
+        map.layers_on(*layer)
+            .any(|surface| is_mapped(surface.wl_surface()))
+    })
 }
 
 /// Render elements of the layer surfaces of `output` on one of `layers`, front to back.
