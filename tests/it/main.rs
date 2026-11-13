@@ -16,6 +16,7 @@ mod geom;
 mod grab_move;
 mod hdr;
 mod hdr_output;
+mod hdr_png;
 mod hdr_scanout;
 mod icc;
 mod icc_lut;
