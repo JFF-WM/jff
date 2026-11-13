@@ -51,9 +51,9 @@ fn offered_values_have_the_protocol_numbers() {
             .iter()
             .map(|f| f.raw())
             .collect::<Vec<_>>(),
-        [1, 2, 3, 4]
+        [1, 2, 3, 4, 5]
     );
-    // No ICC (0), mastering display primaries (5), extended target volume (6), Windows (7, 8).
+    // No ICC (0), extended target volume (6), Windows (7, 8).
     assert!(SUPPORTED_FEATURES.contains(&Feature::Parametric));
 
     let primaries: Vec<u32> = SUPPORTED_PRIMARIES.iter().map(|p| p.raw()).collect();
@@ -241,17 +241,54 @@ fn luminance_defaults_to_sdr_and_big_numbers_do_not_overflow() {
     );
 }
 
+const BT2020_PRIMARIES: [i32; 8] = [
+    708_000, 292_000, 170_000, 797_000, 131_000, 46_000, 312_700, 329_000,
+];
+
 #[test]
-fn mastering_metadata_is_not_offered() {
+fn mastering_metadata_is_taken_once_each() {
     let mut builder = srgb_builder();
+    builder
+        .set_mastering_display_primaries(BT2020_PRIMARIES)
+        .unwrap();
+    builder.set_mastering_luminance(50, 1_000).unwrap();
     assert_eq!(
-        error_of(builder.set_mastering_display_primaries()),
-        CreatorError::UnsupportedFeature
+        error_of(builder.set_mastering_display_primaries(BT2020_PRIMARIES)),
+        CreatorError::AlreadySet
     );
     assert_eq!(
-        error_of(builder.set_mastering_luminance()),
-        CreatorError::UnsupportedFeature
+        error_of(builder.set_mastering_luminance(50, 1_000)),
+        CreatorError::AlreadySet
     );
+    // a hint only: the description is the container's
+    assert_eq!(builder.build().unwrap(), srgb_builder().build().unwrap());
+}
+
+#[test]
+fn mastering_luminance_needs_a_maximum_above_the_minimum() {
+    let mut builder = srgb_builder();
+    // min is cd/m² times 10000: 100 cd/m² against a maximum of 100
+    assert_eq!(
+        error_of(builder.set_mastering_luminance(1_000_000, 100)),
+        CreatorError::InvalidLuminance
+    );
+    assert_eq!(
+        error_of(builder.set_mastering_luminance(0, 0)),
+        CreatorError::InvalidLuminance
+    );
+    builder.set_mastering_luminance(0, 1).unwrap();
+}
+
+#[test]
+fn nonsense_mastering_primaries_fail_the_description_gracefully() {
+    let mut builder = srgb_builder();
+    builder
+        .set_mastering_display_primaries([0, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    assert!(matches!(
+        builder.build(),
+        Err(jff_wm::primitives::color::CreateError::Unsupported(_))
+    ));
 }
 
 #[test]

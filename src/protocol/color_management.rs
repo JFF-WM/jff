@@ -4,8 +4,8 @@
 //! This module keeps the books: a surface's image description and rendering intent are
 //! double-buffered like the rest of its state. Requests change the pending state, a
 //! `wl_surface.commit` makes it current, and [`surface_color`] reads the current one. Only
-//! parametric descriptions exist: ICC profiles, mastering display metadata and the Windows
-//! formats are refused with `unsupported_feature`. The rules for building a description, and
+//! parametric descriptions exist: ICC profiles and the Windows formats are refused with
+//! `unsupported_feature`, and mastering display metadata is checked and then not drawn differently. The rules for building a description, and
 //! what is offered, are in `primitives/color.rs`.
 //!
 //! The renderer reads the books through [`surface_color_in`] and draws a surface whose
@@ -869,10 +869,19 @@ impl Dispatch<WpImageDescriptionCreatorParamsV1, ParamsCreator> for JffState {
                 max_lum,
                 reference_lum,
             } => builder.set_luminances(min_lum, max_lum, reference_lum),
-            Request::SetMasteringDisplayPrimaries { .. } => {
-                builder.set_mastering_display_primaries()
+            Request::SetMasteringDisplayPrimaries {
+                r_x,
+                r_y,
+                g_x,
+                g_y,
+                b_x,
+                b_y,
+                w_x,
+                w_y,
+            } => builder.set_mastering_display_primaries([r_x, r_y, g_x, g_y, b_x, b_y, w_x, w_y]),
+            Request::SetMasteringLuminance { min_lum, max_lum } => {
+                builder.set_mastering_luminance(min_lum, max_lum)
             }
-            Request::SetMasteringLuminance { .. } => builder.set_mastering_luminance(),
             Request::SetMaxCll { max_cll } => {
                 builder.set_max_cll(max_cll);
                 Ok(())

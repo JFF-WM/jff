@@ -53,8 +53,8 @@ impl RenderIntent {
 /// Rendering intents clients are told they can use.
 pub const SUPPORTED_INTENTS: &[RenderIntent] = &[RenderIntent::Perceptual, RenderIntent::Relative];
 
-/// Optional parts of the protocol jff offers. ICC profiles, mastering display primaries,
-/// extended target volumes and the Windows formats are not.
+/// Optional parts of the protocol jff offers. ICC profiles, extended target volumes and the
+/// Windows formats are not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Feature {
     /// 1.
@@ -65,6 +65,8 @@ pub enum Feature {
     SetTfPower,
     /// 4.
     SetLuminances,
+    /// 5. A target color volume inside the primary one, taken as a hint and not drawn differently.
+    SetMasteringDisplayPrimaries,
 }
 
 impl Feature {
@@ -74,6 +76,7 @@ impl Feature {
             Self::SetPrimaries => 2,
             Self::SetTfPower => 3,
             Self::SetLuminances => 4,
+            Self::SetMasteringDisplayPrimaries => 5,
         }
     }
 }
@@ -84,6 +87,7 @@ pub const SUPPORTED_FEATURES: &[Feature] = &[
     Feature::SetPrimaries,
     Feature::SetTfPower,
     Feature::SetLuminances,
+    Feature::SetMasteringDisplayPrimaries,
 ];
 
 fn supports(feature: Feature) -> bool {
@@ -512,6 +516,8 @@ pub struct ParamsBuilder {
     luminance: Option<Luminance>,
     max_cll: Option<u32>,
     max_fall: Option<u32>,
+    mastering_primaries: Option<Chromaticities>,
+    mastering_luminance: Option<(u32, u32)>,
 }
 
 impl ParamsBuilder {
@@ -609,20 +615,46 @@ impl ParamsBuilder {
         Ok(())
     }
 
-    /// Mastering display primaries are not offered (`set_mastering_display_primaries`).
-    pub fn set_mastering_display_primaries(&mut self) -> Result<(), Violation> {
-        violation(
-            CreatorError::UnsupportedFeature,
-            "set_mastering_display_primaries is not offered",
-        )
+    /// Whether the numbers can be drawn is decided by `build`, they are not an error here.
+    pub fn set_mastering_display_primaries(&mut self, values: [i32; 8]) -> Result<(), Violation> {
+        if !supports(Feature::SetMasteringDisplayPrimaries) {
+            return violation(
+                CreatorError::UnsupportedFeature,
+                "set_mastering_display_primaries is not offered",
+            );
+        }
+        if self.mastering_primaries.is_some() {
+            return violation(
+                CreatorError::AlreadySet,
+                "the mastering display primaries are set already",
+            );
+        }
+        self.mastering_primaries = Some(Chromaticities::from_array(values));
+        Ok(())
     }
 
-    /// The mastering luminance range needs the same feature as the primaries.
-    pub fn set_mastering_luminance(&mut self) -> Result<(), Violation> {
-        violation(
-            CreatorError::UnsupportedFeature,
-            "set_mastering_display_primaries is not offered",
-        )
+    /// `min` is cd/m² times [`MIN_LUM_SCALE`], `max` is cd/m².
+    pub fn set_mastering_luminance(&mut self, min: u32, max: u32) -> Result<(), Violation> {
+        if !supports(Feature::SetMasteringDisplayPrimaries) {
+            return violation(
+                CreatorError::UnsupportedFeature,
+                "set_mastering_display_primaries is not offered",
+            );
+        }
+        if self.mastering_luminance.is_some() {
+            return violation(
+                CreatorError::AlreadySet,
+                "the mastering luminance is set already",
+            );
+        }
+        if !above_min(min, max) {
+            return violation(
+                CreatorError::InvalidLuminance,
+                "the mastering maximum luminance must be above the minimum",
+            );
+        }
+        self.mastering_luminance = Some((min, max));
+        Ok(())
     }
 
     /// cd/m². The value is checked by `build`. Setting it again replaces it.
@@ -671,6 +703,10 @@ impl ParamsBuilder {
             }
         }
         if let Err(reason) = primaries.check() {
+            return Err(CreateError::Unsupported(reason));
+        }
+        // The target volume is a hint: it is checked so a nonsense one fails, and the picture is converted from the container volume.
+        if let Some(Err(reason)) = self.mastering_primaries.map(|m| m.check()) {
             return Err(CreateError::Unsupported(reason));
         }
         Ok(ImageDescription {
