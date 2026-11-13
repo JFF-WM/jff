@@ -217,6 +217,38 @@ impl<W> Desk<W> {
             .count()
     }
 
+    /// Where `steps` workspaces from `from` lands on monitor `output` when workspaces without
+    /// windows don't count: negative goes down, positive up. Walks past empty workspaces, and
+    /// stops at the last one with windows when there are fewer than asked for. `from` itself may
+    /// be empty. Stays at `from` when nothing in that direction has a window. Without
+    /// per-output workspaces the monitor makes no difference.
+    pub fn step_occupied(&self, output: &str, from: usize, steps: i32, count: usize) -> usize {
+        let last = count.max(1) - 1;
+        let occupied = |workspace: usize| {
+            self.entries
+                .iter()
+                .any(|e| e.workspace == workspace && (!self.per_output || e.output == output))
+        };
+        let mut at = from.min(last);
+        let mut left = steps.unsigned_abs();
+        while left > 0 {
+            let next = if steps < 0 {
+                match (0..at).rev().find(|&w| occupied(w)) {
+                    Some(w) => w,
+                    None => break,
+                }
+            } else {
+                match (at + 1..=last).find(|&w| occupied(w)) {
+                    Some(w) => w,
+                    None => break,
+                }
+            };
+            at = next;
+            left -= 1;
+        }
+        at
+    }
+
     /// The monitor and the workspace of the first window matching `pred`.
     pub fn home_of(&self, pred: impl Fn(&W) -> bool) -> Option<(String, usize)> {
         self.entries

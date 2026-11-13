@@ -321,3 +321,36 @@ fn set_output_where_keeps_the_workspace_when_shared() {
     d.set_output_where(|w| *w == "a", "DP-1");
     assert_eq!(d.workspace_of(|w| *w == "a"), Some(2));
 }
+
+#[test]
+fn stepping_skips_empty_workspaces() {
+    let mut d = Desk::default();
+    d.add("a");
+    d.set_current(2);
+    d.add("b");
+    d.set_current(5);
+    d.add("c");
+    // 0 and 2 and 5 have windows, 1, 3, 4 and 6..9 don't.
+    assert_eq!(d.step_occupied("", 0, 1, 10), 2);
+    assert_eq!(d.step_occupied("", 0, 2, 10), 5);
+    // Fewer occupied workspaces than steps: stop at the last one.
+    assert_eq!(d.step_occupied("", 0, 5, 10), 5);
+    assert_eq!(d.step_occupied("", 5, 1, 10), 5);
+    assert_eq!(d.step_occupied("", 5, -1, 10), 2);
+    assert_eq!(d.step_occupied("", 5, -9, 10), 0);
+    assert_eq!(d.step_occupied("", 0, -1, 10), 0);
+    // Starting on an empty workspace works too.
+    assert_eq!(d.step_occupied("", 3, 1, 10), 5);
+    assert_eq!(d.step_occupied("", 3, -1, 10), 2);
+    assert_eq!(d.step_occupied("", 7, 1, 10), 7);
+}
+
+#[test]
+fn stepping_only_counts_windows_of_that_monitor() {
+    let mut d = per_output_desk();
+    d.add_on("a", "left");
+    d.set_current_on("right", 3);
+    d.add_on("b", "right");
+    assert_eq!(d.step_occupied("left", 0, 1, 10), 0);
+    assert_eq!(d.step_occupied("right", 0, 1, 10), 3);
+}

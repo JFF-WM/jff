@@ -1466,8 +1466,10 @@ impl JffState {
         };
         let name = output.name();
         let before = self.desk.current_on(&name);
-        let last = self.workspace_count().max(1) - 1;
-        let target = (before as i64 + i64::from(steps)).clamp(0, last as i64) as usize;
+        // Workspaces without windows are skipped, there is nothing to see in their overview.
+        let target = self
+            .desk
+            .step_occupied(&name, before, steps, self.workspace_count());
         if target == before {
             return true;
         }
