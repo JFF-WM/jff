@@ -1,4 +1,4 @@
-//! The math of an HDR output: PQ, the tone curve and the final pass that turns the linear working space into the signal.
+//! The math of an HDR output: PQ and HLG decoding, the tone curve and the final pass that turns the linear working space into the signal.
 
 use super::color::{Chromaticities, NamedPrimaries};
 use super::edid::Primaries;
@@ -43,6 +43,40 @@ pub fn pq_decode(code: f32) -> f32 {
 pub fn pq_encode(light: f32) -> f32 {
     let y = light.clamp(0.0, 1.0).powf(M1);
     ((C1 + C2 * y) / (1.0 + C3 * y)).powf(M2)
+}
+
+/// Peak luminance of the display HLG's absolute values are given for, in cd/m².
+pub const HLG_NOMINAL_PEAK: f32 = 1000.0;
+
+/// The HLG system gamma of a 1000 cd/m² display (BT.2100-2).
+pub const HLG_SYSTEM_GAMMA: f32 = 1.2;
+
+/// Y of BT.2020's red, green and blue, what the HLG OOTF weighs a color by when its primaries are BT.2020.
+pub const BT2020_LUMA: [f32; 3] = [0.2627, 0.6780, 0.0593];
+
+const HLG_A: f32 = 0.178_832_77;
+const HLG_B: f32 = 0.284_668_92;
+const HLG_C: f32 = 0.559_910_73;
+
+/// HLG signal (0 to 1) to scene light (0 to 1), the inverse OETF of BT.2100-2.
+pub fn hlg_inverse_oetf(signal: f32) -> f32 {
+    let e = signal.clamp(0.0, 1.0);
+    if e <= 0.5 {
+        e * e / 3.0
+    } else {
+        (((e - HLG_C) / HLG_A).exp() + HLG_B) / 12.0
+    }
+}
+
+/// An HLG color (signal values, `luma` the Y row of its primaries) as light on a 1000 cd/m² display, in cd/m²: the inverse OETF, then the BT.2100 OOTF with a system gamma of 1.2 and no black lift.
+pub fn hlg_display_nits(signal: [f32; 3], luma: [f32; 3]) -> [f32; 3] {
+    let scene = signal.map(hlg_inverse_oetf);
+    let y = dot(luma, scene);
+    if y <= 0.0 {
+        return [0.0; 3];
+    }
+    let gain = HLG_NOMINAL_PEAK * y.powf(HLG_SYSTEM_GAMMA - 1.0);
+    scene.map(|v| v * gain)
 }
 
 /// The panel's primaries from an EDID, in the millionths the protocol writes them in.

@@ -67,12 +67,12 @@ fn offered_values_have_the_protocol_numbers() {
     }
 
     let tfs: Vec<u32> = SUPPORTED_TFS.iter().map(|tf| tf.raw()).collect();
-    assert_eq!(tfs, [9, 2, 3, 11]);
+    assert_eq!(tfs, [9, 2, 3, 11, 13]);
     for raw in tfs {
         assert_eq!(NamedTf::from_raw(raw).unwrap().raw(), raw);
     }
-    // BT.1886, linear, log, HLG and the rest are not offered.
-    for raw in [0, 1, 4, 5, 6, 7, 8, 10, 12, 13, 14] {
+    // BT.1886, linear, log and the rest are not offered.
+    for raw in [0, 1, 4, 5, 6, 7, 8, 10, 12, 14] {
         assert_eq!(NamedTf::from_raw(raw), None);
     }
 }
@@ -168,7 +168,7 @@ fn each_property_is_set_once() {
 #[test]
 fn names_that_were_not_offered_are_refused() {
     let mut builder = ParamsBuilder::default();
-    for raw in [0, 1, 12, 13, 99] {
+    for raw in [0, 1, 12, 14, 99] {
         assert_eq!(error_of(builder.set_tf_named(raw)), CreatorError::InvalidTf);
     }
     for raw in [0, 2, 7, 11, 99] {
@@ -445,5 +445,44 @@ fn pq_gets_its_own_default_luminances() {
             Luminance::PQ.reference
         ),
         (50, 10_000, 203)
+    );
+}
+
+#[test]
+fn hlg_gets_its_own_default_luminances() {
+    let mut builder = ParamsBuilder::default();
+    builder.set_tf_named(13).unwrap();
+    builder.set_primaries_named(6).unwrap();
+    let description = builder.build().unwrap();
+    assert_eq!(description.tf, TransferFunction::Named(NamedTf::Hlg));
+    assert_eq!(description.luminance, Luminance::HLG);
+    assert_eq!(
+        (
+            Luminance::HLG.min,
+            Luminance::HLG.max,
+            Luminance::HLG.reference
+        ),
+        (50, 1_000, 203)
+    );
+    assert_eq!(NamedTf::Hlg.name(), "hlg");
+}
+
+#[test]
+fn an_hlg_description_may_set_its_own_luminances() {
+    let mut builder = ParamsBuilder::default();
+    builder.set_tf_named(13).unwrap();
+    builder.set_primaries_named(6).unwrap();
+    builder.set_luminances(100, 600, 203).unwrap();
+    let luminance = builder.build().unwrap().luminance;
+    assert_eq!(
+        (luminance.min, luminance.max, luminance.reference),
+        (100, 600, 203)
+    );
+    // the same checks as for any other curve
+    let mut bad = ParamsBuilder::default();
+    bad.set_tf_named(13).unwrap();
+    assert_eq!(
+        error_of(bad.set_luminances(2_000_000, 100, 203)),
+        CreatorError::InvalidLuminance
     );
 }

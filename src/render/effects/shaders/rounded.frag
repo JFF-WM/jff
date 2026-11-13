@@ -43,14 +43,16 @@ uniform float ycc_on;
 // matrix whose rows are cm_r, cm_g, cm_b, brought into the output's gamut (`cm_map` 0: clipped,
 // 1: desaturated toward the grey of the same luminance, `cm_luma` is the output's luminance row)
 // and encoded with `cm_encode`. A curve is (kind, exponent): kind 1 is the piecewise sRGB curve,
-// anything else a pure power. Off when cm_on is 0.
+// kind 2 PQ, kind 3 HLG, anything else a pure power. Off when cm_on is 0.
 // For an HDR output (cm_working 1) the result is not encoded: it is linear BT.2020 light in the
-// working space, 1.0 being the output's SDR white, with no gamut map. PQ (kind 2) decodes to a
-// fraction of 10000 cd/m², `cm_scale` turns that into the output's units (1.0 for the others).
+// working space, 1.0 being the output's SDR white, with no gamut map. PQ (kind 2) and HLG (kind 3)
+// decode to a fraction of 10000 cd/m², `cm_scale` turns that into the output's units (1.0 for the
+// others). HLG weighs the colors by `cm_src_luma`, the Y row of the surface's primaries.
 uniform vec3 cm_r;
 uniform vec3 cm_g;
 uniform vec3 cm_b;
 uniform vec2 cm_decode;
+uniform vec3 cm_src_luma;
 uniform vec2 cm_encode;
 uniform float cm_map;
 uniform vec3 cm_luma;
@@ -77,9 +79,23 @@ vec3 cm_pq_to_light(vec3 v) {
     return pow(num / den, vec3(1.0 / 0.1593017578125));
 }
 
+// BT.2100 HLG signal to light on a 1000 cd/m² display, as a fraction of 10000 cd/m²: the inverse
+// OETF, then the OOTF with a system gamma of 1.2 (the exponent 0.2 on the luminance is gamma - 1).
+vec3 cm_hlg_to_light(vec3 v) {
+    vec3 low = v * v / 3.0;
+    vec3 high = (exp((v - vec3(0.55991073)) / 0.17883277) + vec3(0.28466892)) / 12.0;
+    vec3 scene = mix(high, low, step(v, vec3(0.5)));
+    float y = dot(cm_src_luma, scene);
+    if (y <= 0.0)
+        return vec3(0.0);
+    return scene * (1000.0 / 10000.0) * pow(y, 0.2);
+}
+
 // Encoded value to linear light, for the curve described by `curve`.
 vec3 cm_to_light(vec3 v, vec2 curve) {
     v = clamp(v, 0.0, 1.0);
+    if (curve.x > 2.5)
+        return cm_hlg_to_light(v);
     if (curve.x > 1.5)
         return cm_pq_to_light(v);
     if (curve.x > 0.5) {

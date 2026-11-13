@@ -281,10 +281,18 @@ pub enum NamedTf {
     Srgb,
     /// 11. SMPTE ST 2084 (PQ): absolute luminance up to 10000 cd/m².
     St2084Pq,
+    /// 13. Hybrid log-gamma (BT.2100-2), taken as shown on a 1000 cd/m² display.
+    Hlg,
 }
 
 impl NamedTf {
-    pub const ALL: [Self; 4] = [Self::Srgb, Self::Gamma22, Self::Gamma28, Self::St2084Pq];
+    pub const ALL: [Self; 5] = [
+        Self::Srgb,
+        Self::Gamma22,
+        Self::Gamma28,
+        Self::St2084Pq,
+        Self::Hlg,
+    ];
 
     /// `None` for a value that is not an offered name.
     pub fn from_raw(raw: u32) -> Option<Self> {
@@ -298,6 +306,7 @@ impl NamedTf {
             Self::Gamma22 => "gamma22",
             Self::Gamma28 => "gamma28",
             Self::St2084Pq => "st2084_pq",
+            Self::Hlg => "hlg",
         }
     }
 
@@ -307,6 +316,7 @@ impl NamedTf {
             Self::Gamma28 => 3,
             Self::Srgb => 9,
             Self::St2084Pq => 11,
+            Self::Hlg => 13,
         }
     }
 }
@@ -338,6 +348,13 @@ impl Luminance {
     pub const PQ: Self = Self {
         min: 50,
         max: 10_000,
+        reference: 203,
+    };
+
+    /// What an HLG description has when it says nothing: 0.005 to 1000 cd/m², white at 203.
+    pub const HLG: Self = Self {
+        min: 50,
+        max: 1_000,
         reference: 203,
     };
 
@@ -632,6 +649,7 @@ impl ParamsBuilder {
         };
         let luminance = self.luminance.unwrap_or(match tf {
             TransferFunction::Named(NamedTf::St2084Pq) => Luminance::PQ,
+            TransferFunction::Named(NamedTf::Hlg) => Luminance::HLG,
             _ => Luminance::SDR,
         });
         let max_cll = self.max_cll.filter(|&v| v != 0);

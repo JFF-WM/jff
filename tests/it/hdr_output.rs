@@ -5,8 +5,8 @@ use jff_wm::primitives::color::{
 };
 use jff_wm::primitives::gamut::{Conversion, Curve};
 use jff_wm::primitives::hdr_output::{
-    low_headroom, pq_decode, pq_encode, tone_map, FinalPass, DEFAULT_SDR_WHITE, HDR_PEAK_RANGE,
-    PQ_PEAK, SDR_WHITE_RANGE,
+    hlg_display_nits, hlg_inverse_oetf, low_headroom, pq_decode, pq_encode, tone_map, FinalPass,
+    BT2020_LUMA, DEFAULT_SDR_WHITE, HDR_PEAK_RANGE, PQ_PEAK, SDR_WHITE_RANGE,
 };
 
 const PEAK: f32 = 301.8;
@@ -252,4 +252,142 @@ fn a_higher_peak_leaves_more_room_for_highlights() {
         FinalPass::new(100.0, 300.0, None).apply(dim),
         FinalPass::new(100.0, 400.0, None).apply(dim)
     );
+}
+
+#[test]
+fn the_hlg_inverse_oetf_has_its_known_values() {
+    assert_eq!(hlg_inverse_oetf(0.0), 0.0);
+    // the two pieces meet at half signal, where the square law gives 1/12
+    assert!((hlg_inverse_oetf(0.5) - 1.0 / 12.0).abs() < 1e-6);
+    // full signal is full scene light
+    assert!((hlg_inverse_oetf(1.0) - 1.0).abs() < 1e-5);
+    // 0.75 signal, from the log piece
+    assert!((hlg_inverse_oetf(0.75) - 0.264_94).abs() < 1e-4);
+    // out of range clips
+    assert_eq!(hlg_inverse_oetf(-1.0), 0.0);
+    assert!((hlg_inverse_oetf(2.0) - 1.0).abs() < 1e-5);
+}
+
+#[test]
+fn the_hlg_inverse_oetf_is_continuous_and_rising() {
+    let below = hlg_inverse_oetf(0.5 - 1e-4);
+    let above = hlg_inverse_oetf(0.5 + 1e-4);
+    assert!((above - below).abs() < 1e-3);
+    let mut last = -1.0;
+    for step in 0..=1000 {
+        let v = hlg_inverse_oetf(step as f32 / 1000.0);
+        assert!(v > last, "not rising at {step}");
+        last = v;
+    }
+}
+
+#[test]
+fn hlg_reference_white_is_about_203_nits_on_a_1000_nit_display() {
+    // BT.2408: signal 0.75 is the reference white, 203 cd/m² on a 1000 cd/m² display
+    let white = hlg_display_nits([0.75; 3], BT2020_LUMA);
+    for v in white {
+        assert!((v - 203.0).abs() < 1.0, "{white:?}");
+    }
+    // full signal is the display's peak, black is black
+    let peak = hlg_display_nits([1.0; 3], BT2020_LUMA);
+    for v in peak {
+        assert!((v - 1000.0).abs() < 0.1, "{peak:?}");
+    }
+    assert_eq!(hlg_display_nits([0.0; 3], BT2020_LUMA), [0.0; 3]);
+}
+
+#[test]
+fn the_hlg_ootf_keeps_the_hue_and_weighs_by_luminance() {
+    // the OOTF multiplies the three channels by one gain, so their ratios are the scene's
+    let signal = [0.9, 0.5, 0.2];
+    let scene = signal.map(hlg_inverse_oetf);
+    let nits = hlg_display_nits(signal, BT2020_LUMA);
+    for i in 1..3 {
+        assert!((nits[i] / nits[0] - scene[i] / scene[0]).abs() < 1e-4);
+    }
+    // a grey of scene light e shows as 1000 e^1.2, red alone as 1000 y^0.2 e with y = 0.2627 e
+    let grey = hlg_display_nits([0.5; 3], BT2020_LUMA)[0];
+    assert!((grey - 1000.0 * (1.0f32 / 12.0).powf(1.2)).abs() < 0.01);
+    let red = hlg_display_nits([0.5, 0.0, 0.0], BT2020_LUMA);
+    let e = 1.0f32 / 12.0;
+    assert!((red[0] - 1000.0 * (0.2627 * e).powf(0.2) * e).abs() < 0.01);
+    assert_eq!(red[1], 0.0);
+}
+
+#[test]
+fn an_hlg_surface_is_placed_by_its_absolute_light() {
+    let mut description = ImageDescription::srgb();
+    description.primaries = NamedPrimaries::Bt2020.chromaticities();
+    description.tf = TransferFunction::Named(NamedTf::Hlg);
+    description.luminance = Luminance::HLG;
+    let conversion = Conversion::to_working(&description, 203.0);
+    assert!(matches!(conversion.decode, Curve::Hlg { .. }));
+    // reference white lands on SDR white, the peak at 1000/203 of it
+    close(conversion.apply([0.75; 3]), [1.0; 3], 6e-3);
+    close(conversion.apply([1.0; 3]), [1000.0 / 203.0; 3], 0.01);
+    // moving SDR white moves HLG's share of it, as it does PQ's
+    let other = Conversion::to_working(&description, 100.0);
+    close(other.apply([0.75; 3]), [2.03; 3], 0.02);
+    assert_eq!(conversion.apply([0.0; 3]), [0.0; 3]);
+}
+
+#[test]
+fn hlg_weighs_colors_by_the_luma_of_the_surface_primaries() {
+    let mut bt2020 = ImageDescription::srgb();
+    bt2020.primaries = NamedPrimaries::Bt2020.chromaticities();
+    bt2020.tf = TransferFunction::Named(NamedTf::Hlg);
+    let mut srgb = bt2020;
+    srgb.primaries = ImageDescription::srgb().primaries;
+    let Curve::Hlg { luma: wide } = Curve::of_description(&bt2020) else {
+        panic!("not HLG");
+    };
+    let Curve::Hlg { luma: narrow } = Curve::of_description(&srgb) else {
+        panic!("not HLG");
+    };
+    for (a, b) in wide.iter().zip(BT2020_LUMA) {
+        assert!((a - b).abs() < 1e-3);
+    }
+    assert!((narrow[0] - 0.2126).abs() < 1e-3 && (narrow[1] - 0.7152).abs() < 1e-3);
+    // a grey is the same either way
+    assert!(
+        (Curve::of_description(&bt2020).decode(0.6) - Curve::of_description(&srgb).decode(0.6))
+            .abs()
+            < 1e-6
+    );
+}
+
+#[test]
+fn an_hlg_surface_on_an_sdr_output_is_scaled_to_its_white() {
+    let mut description = ImageDescription::srgb();
+    description.tf = TransferFunction::Named(NamedTf::Hlg);
+    description.luminance = Luminance::HLG;
+    let conversion = Conversion::between(&description, &ImageDescription::srgb()).unwrap();
+    // reference white is SDR white (203 cd/m² is the white of the output, see PQ)
+    let out = conversion.apply([0.75; 3]);
+    let white_encoded = Curve::Srgb.encode(1.0);
+    assert!((out[0] - white_encoded).abs() < 0.01, "{out:?}");
+}
+
+#[test]
+fn the_hlg_conversion_tag_changes_with_the_curve() {
+    let mut pq = ImageDescription::srgb();
+    pq.tf = TransferFunction::Named(NamedTf::St2084Pq);
+    let mut hlg = pq;
+    hlg.tf = TransferFunction::Named(NamedTf::Hlg);
+    assert_ne!(
+        Conversion::to_working(&pq, 203.0).tag(),
+        Conversion::to_working(&hlg, 203.0).tag()
+    );
+    assert_eq!(
+        Conversion::to_working(&hlg, 203.0).tag(),
+        Conversion::to_working(&hlg, 203.0).tag()
+    );
+}
+
+#[test]
+fn the_hlg_shader_params_are_kind_three_and_the_source_luma() {
+    let curve = Curve::Hlg { luma: BT2020_LUMA };
+    assert_eq!(curve.shader_params(), [3.0, 0.0]);
+    assert_eq!(curve.shader_luma(), BT2020_LUMA);
+    assert_eq!(Curve::Pq.shader_luma(), [0.0; 3]);
 }

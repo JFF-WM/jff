@@ -27,7 +27,9 @@ use super::color::{
     Chromaticities, ImageDescription, NamedPrimaries, NamedTf, RenderIntent, TransferFunction,
     CHROMA_SCALE, EXPONENT_SCALE,
 };
-use super::hdr_output::{pq_decode, pq_encode, HDR_REFERENCE_WHITE, PQ_PEAK};
+use super::hdr_output::{
+    hlg_display_nits, pq_decode, pq_encode, BT2020_LUMA, HDR_REFERENCE_WHITE, PQ_PEAK,
+};
 
 /// A 3x3 matrix, row by row.
 pub type Mat3 = [[f64; 3]; 3];
@@ -163,6 +165,8 @@ pub enum Curve {
     Power(f32),
     /// SMPTE ST 2084, decoding to a fraction of 10000 cd/m².
     Pq,
+    /// BT.2100 HLG with its OOTF for a 1000 cd/m² display, decoding to a fraction of 10000 cd/m². `luma` is the Y row of the surface's primaries.
+    Hlg { luma: [f32; 3] },
 }
 
 impl Curve {
@@ -172,8 +176,26 @@ impl Curve {
             TransferFunction::Named(NamedTf::Gamma22) => Self::power(22_000),
             TransferFunction::Named(NamedTf::Gamma28) => Self::power(28_000),
             TransferFunction::Named(NamedTf::St2084Pq) => Self::Pq,
+            TransferFunction::Named(NamedTf::Hlg) => Self::Hlg { luma: BT2020_LUMA },
             TransferFunction::Power(raw) => Self::power(raw),
         }
+    }
+
+    /// The curve of a surface described as `description`: like [`Curve::of`], with HLG weighing colors by the luminance of the surface's own primaries.
+    pub fn of_description(description: &ImageDescription) -> Self {
+        match Self::of(description.tf) {
+            Self::Hlg { .. } => Self::Hlg {
+                luma: rgb_to_xyz(&description.primaries).map_or(BT2020_LUMA, |m| {
+                    [m[1][0] as f32, m[1][1] as f32, m[1][2] as f32]
+                }),
+            },
+            curve => curve,
+        }
+    }
+
+    /// The light is absolute: the curve decodes to a fraction of 10000 cd/m², not to a share of the surface's own white.
+    pub fn is_absolute(self) -> bool {
+        matches!(self, Self::Pq | Self::Hlg { .. })
     }
 
     /// `raw` is the exponent times [`EXPONENT_SCALE`].
@@ -181,7 +203,7 @@ impl Curve {
         Self::Power(raw as f32 / EXPONENT_SCALE as f32)
     }
 
-    /// Encoded value (0 to 1) to linear light.
+    /// Encoded value (0 to 1) to linear light. For HLG this is a neutral grey, colors go through [`Curve::decode_rgb`].
     pub fn decode(self, value: f32) -> f32 {
         let v = value.clamp(0.0, 1.0);
         match self {
@@ -194,6 +216,17 @@ impl Curve {
             }
             Self::Power(exponent) => v.powf(exponent),
             Self::Pq => pq_decode(v),
+            Self::Hlg { luma } => hlg_display_nits([v; 3], luma)[0] / PQ_PEAK,
+        }
+    }
+
+    /// A color (encoded values) to linear light, the shader's `cm_to_light`. HLG's OOTF ties the channels together, so it cannot be done one channel at a time.
+    pub fn decode_rgb(self, rgb: [f32; 3]) -> [f32; 3] {
+        match self {
+            Self::Hlg { luma } => {
+                hlg_display_nits(rgb.map(|v| v.clamp(0.0, 1.0)), luma).map(|nits| nits / PQ_PEAK)
+            }
+            _ => rgb.map(|v| self.decode(v)),
         }
     }
 
@@ -211,16 +244,27 @@ impl Curve {
             }
             Self::Power(exponent) => l.powf(1.0 / exponent),
             Self::Pq => pq_encode(l),
+            // Not an output curve: an HDR output is encoded by its final pass.
+            Self::Hlg { .. } => l,
         }
     }
 
     /// The two numbers the shader takes for a curve: 1 and an unused 0 for sRGB, 0 and the
-    /// exponent for a power.
+    /// exponent for a power, 2 for PQ and 3 for HLG.
     pub fn shader_params(self) -> [f32; 2] {
         match self {
             Self::Srgb => [1.0, 0.0],
             Self::Power(exponent) => [0.0, exponent],
             Self::Pq => [2.0, 0.0],
+            Self::Hlg { .. } => [3.0, 0.0],
+        }
+    }
+
+    /// The Y row of the surface's primaries that HLG weighs colors by, zeros for the other curves.
+    pub fn shader_luma(self) -> [f32; 3] {
+        match self {
+            Self::Hlg { luma } => luma,
+            _ => [0.0; 3],
         }
     }
 }
@@ -293,7 +337,7 @@ pub struct Conversion {
     pub map: GamutMap,
     /// The output's luminance row (Y of its red, green and blue), for [`GamutMap::Compress`].
     pub luma: [f32; 3],
-    /// Multiplies linear light after the matrix: turns PQ's fraction of 10000 cd/m² into the output's white.
+    /// Multiplies linear light after the matrix: turns PQ's or HLG's fraction of 10000 cd/m² into the output's white.
     pub scale: f32,
     /// The output is a linear working space (see [`Conversion::to_working`]): no gamut map and no encode.
     pub working: bool,
@@ -324,14 +368,14 @@ impl Conversion {
         } else {
             conversion_matrix(&source.primaries, &target.primaries)?
         };
-        let decode = Curve::of(source.tf);
+        let decode = Curve::of_description(source);
         let encode = Curve::of(target.tf);
         let moves_colors = matrix.iter().enumerate().any(|(i, row)| {
             row.iter()
                 .enumerate()
                 .any(|(j, value)| (*value - IDENTITY[i][j]).abs() > NEAR_IDENTITY)
         });
-        let scale = if decode == Curve::Pq {
+        let scale = if decode.is_absolute() {
             PQ_PEAK / HDR_REFERENCE_WHITE
         } else {
             1.0
@@ -367,7 +411,7 @@ impl Conversion {
         } else {
             conversion_matrix(&source.primaries, &bt2020).unwrap_or(SRGB_TO_BT2020)
         };
-        let decode = Curve::of(source.tf);
+        let decode = Curve::of_description(source);
         let mut rows = [[0.0f32; 3]; 3];
         for (out, values) in rows.iter_mut().zip(matrix) {
             for (slot, value) in out.iter_mut().zip(values) {
@@ -380,7 +424,7 @@ impl Conversion {
             encode: Curve::Power(1.0),
             map: GamutMap::Clip,
             luma: [0.2627, 0.6780, 0.0593],
-            scale: if decode == Curve::Pq {
+            scale: if decode.is_absolute() {
                 PQ_PEAK / sdr_white.max(1.0)
             } else {
                 1.0
@@ -392,7 +436,7 @@ impl Conversion {
     /// The shader on one color: straight (not premultiplied) values of the surface in, values
     /// for the output out.
     pub fn apply(&self, rgb: [f32; 3]) -> [f32; 3] {
-        let light = rgb.map(|v| self.decode.decode(v));
+        let light = self.decode.decode_rgb(rgb);
         let mut mapped = [0.0f32; 3];
         for (value, row) in mapped.iter_mut().zip(self.rows) {
             *value = (row[0] * light[0] + row[1] * light[1] + row[2] * light[2]) * self.scale;
@@ -418,6 +462,7 @@ impl Conversion {
             .shader_params()
             .into_iter()
             .chain(self.encode.shader_params())
+            .chain(self.decode.shader_luma())
         {
             value.to_bits().hash(&mut hasher);
         }
