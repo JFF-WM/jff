@@ -3,7 +3,9 @@
 use jff_wm::primitives::color::{
     ImageDescription, Luminance, NamedPrimaries, NamedTf, TransferFunction,
 };
-use jff_wm::primitives::hdr_scanout::{decide, Decline, Facts, Over, ABGR2101010, ARGB2101010};
+use jff_wm::primitives::hdr_scanout::{
+    decide, Decline, Facts, Over, Tried, ABGR2101010, ARGB2101010,
+};
 
 fn pq_bt2020() -> ImageDescription {
     let mut description = ImageDescription::srgb();
@@ -190,4 +192,46 @@ fn the_reasons_read_in_plain_words() {
         Decline::SwapchainNotTenBit(0x3432_5241).to_string(),
         "the swapchain format AR24 is not 10 bit"
     );
+}
+
+fn tried() -> Tried {
+    Tried {
+        surface: 7,
+        format: Some(ARGB2101010),
+        subsurfaces: 1,
+    }
+}
+
+#[test]
+fn a_declined_window_is_not_tried_again_as_it_was() {
+    assert!(tried().was_declined(Some(tried())));
+}
+
+#[test]
+fn nothing_declined_means_a_try() {
+    assert!(!tried().was_declined(None));
+}
+
+#[test]
+fn another_surface_or_format_is_tried_again() {
+    let other = Tried {
+        surface: 8,
+        ..tried()
+    };
+    assert!(!other.was_declined(Some(tried())));
+    let other = Tried {
+        format: None,
+        ..tried()
+    };
+    assert!(!other.was_declined(Some(tried())));
+}
+
+#[test]
+fn a_subsurface_coming_or_going_is_tried_again() {
+    let more = Tried {
+        subsurfaces: 2,
+        ..tried()
+    };
+    assert!(!more.was_declined(Some(tried())));
+    assert!(!tried().was_declined(Some(more)));
 }

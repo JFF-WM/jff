@@ -50,7 +50,9 @@ use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 use smithay::utils::{DeviceFd, Logical, Monotonic, Physical, Point, Scale, Transform};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::wayland::compositor::{with_states, SurfaceData};
+use smithay::wayland::compositor::{
+    with_states, with_surface_tree_downward, SurfaceData, TraversalAction,
+};
 use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder};
 use smithay::wayland::drm_lease::{DrmLease, DrmLeaseBuilder, DrmLeaseState, LeaseRejected};
@@ -71,7 +73,7 @@ use crate::primitives::edid::{self, Edid};
 use crate::primitives::frame_clock::{next_presentation_time, wait_until, FALLBACK_REFRESH};
 use crate::primitives::hdr::{self, KernelSupport, Status, Unavailable};
 use crate::primitives::hdr_output::{self, FinalPass};
-use crate::primitives::hdr_scanout::{self, Decline, Facts, Over};
+use crate::primitives::hdr_scanout::{self, Decline, Facts, Over, Tried};
 use crate::primitives::layout;
 use crate::protocol::color_management::WorkingSpace;
 use crate::protocol::layer_shell::{
@@ -240,18 +242,22 @@ fn note_hdr_fault(last: &mut Option<HdrFault>, fault: HdrFault) -> bool {
 #[derive(Default)]
 struct HdrScanout {
     /// The window and buffer format the compositor found not to reach the plane, so it is not tried again until one of them changes.
-    declined: Option<ScanoutKey>,
+    declined: Option<Tried>,
     /// The reason logged last, so a reason is logged once.
     reason: Option<Decline>,
 }
 
-/// A window and what it showed when it did not reach the primary plane.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct ScanoutKey {
-    surface: u32,
-    format: Option<u32>,
-    /// How many elements the window made, which changes when a popup or a subsurface comes or goes.
-    elements: usize,
+/// How many surfaces the window's tree holds: the window and its subsurfaces.
+fn surface_count(surface: &WlSurface) -> usize {
+    let mut count = 0;
+    with_surface_tree_downward(
+        surface,
+        (),
+        |_, _, _| TraversalAction::DoChildren(()),
+        |_, _, _| count += 1,
+        |_, _, _| true,
+    );
+    count
 }
 
 /// The colors and the buffer format of a window's surface, for [`hdr_scanout::decide`].
@@ -1718,7 +1724,7 @@ impl JffState {
         // can show the client's buffer on the primary plane without a copy.
         let mut direct_scanout = false;
         // An HDR output whose fullscreen window is tried on the primary plane this frame.
-        let mut hdr_scanout_try: Option<ScanoutKey> = None;
+        let mut hdr_scanout_try: Option<Tried> = None;
         // Blur is of the wallpaper alone unless `behind-windows` is set: a copy of the frame
         // is taken once the background layers are drawn, and the window blurs read that.
         let blur_config = (!self.config.blur().off).then(|| self.config.blur());
@@ -1781,18 +1787,15 @@ impl JffState {
                         signalled: current == lit.compositor.pending_color_state()
                             && current == lit.color_target,
                     };
-                    let key = ScanoutKey {
+                    let key = Tried {
                         surface: surface.id().protocol_id(),
                         format: buffer_format,
-                        elements: 0,
+                        subsurfaces: surface_count(&surface),
                     };
                     match hdr_scanout::decide(&facts) {
                         Ok(()) => {
                             lit.hdr_scanout.reason = None;
-                            let tried = lit.hdr_scanout.declined;
-                            if tried
-                                .is_some_and(|k| k.surface == key.surface && k.format == key.format)
-                            {
+                            if key.was_declined(lit.hdr_scanout.declined) {
                                 scanout_blocked = Some(None);
                             } else {
                                 hdr_scanout_try = Some(key);
@@ -1883,7 +1886,6 @@ impl JffState {
                     let is_covering = (entry.pos.0, entry.pos.1, size.w, size.h) == rect;
                     // Popups and the window, each with its blur right behind it. A window tried on
                     // the primary plane is not converted: its buffer goes to the panel as it is.
-                    let before = elements.len();
                     window_elements(
                         &mut *renderer,
                         &entry.window,
@@ -1915,9 +1917,6 @@ impl JffState {
                     );
                     // nothing below the covering window goes in the frame
                     if is_covering {
-                        if let Some(key) = hdr_scanout_try.as_mut() {
-                            key.elements = elements.len() - before;
-                        }
                         if direct_scanout || hdr_scanout_try.is_some() {
                             break;
                         }

@@ -55,6 +55,22 @@ pub struct Facts {
     pub signalled: bool,
 }
 
+/// A window and what it showed when it was put on the primary plane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tried {
+    pub surface: u32,
+    pub format: Option<u32>,
+    /// How many surfaces the window's tree holds, which changes when a subsurface comes or goes.
+    pub subsurfaces: usize,
+}
+
+impl Tried {
+    /// Whether the plane already refused this very window, with the same buffer format and the same subsurfaces, so trying again would fail the same way.
+    pub fn was_declined(&self, declined: Option<Tried>) -> bool {
+        declined == Some(*self)
+    }
+}
+
 /// Why a window is not scanned out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decline {
