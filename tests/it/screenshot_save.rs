@@ -210,6 +210,7 @@ fn hdr_job(dir: &TempDir, half_rgba: Vec<u16>, width: u32, height: u32) -> HdrSa
         width,
         height,
         pass: FinalPass::new(203.0, 1000.0, None),
+        corner_radius: None,
         dir: Some(dir.0.clone()),
         wants_clipboard: false,
     }
@@ -262,4 +263,30 @@ fn an_hdr_picture_with_nowhere_to_go_is_refused() {
     let mut job = hdr_job(&dir, vec![0; 4], 1, 1);
     job.dir = None;
     assert!(save_hdr_with(job, "x").is_err());
+}
+
+#[test]
+fn an_hdr_window_is_saved_with_an_alpha_channel_and_cut_corners() {
+    let dir = TempDir::new("hdr-window");
+    // 8 by 8, all white and opaque, corners rounded by 3 pixels
+    let frame: Vec<u16> = (0..64)
+        .flat_map(|_| [0x3C00, 0x3C00, 0x3C00, 0x3C00])
+        .collect();
+    let mut job = hdr_job(&dir, frame, 8, 8);
+    job.corner_radius = Some(3);
+    let path = save_hdr_with(job, "2026-11-13 00-00-01").unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let mut reader = png::Decoder::new(std::io::Cursor::new(&bytes))
+        .read_info()
+        .unwrap();
+    assert_eq!(reader.info().color_type, png::ColorType::Rgba);
+    assert_eq!(reader.info().bit_depth, png::BitDepth::Sixteen);
+    let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+    reader.next_frame(&mut buf).unwrap();
+    let alpha_at = |x: usize, y: usize| {
+        let at = (y * 8 + x) * 8 + 6;
+        u16::from_be_bytes([buf[at], buf[at + 1]])
+    };
+    assert!(alpha_at(0, 0) < 6_000, "the corner should be cut");
+    assert_eq!(alpha_at(4, 4), 65535);
 }

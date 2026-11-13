@@ -12,7 +12,29 @@ pub fn encode(
     height: u32,
     max_cll: Option<f32>,
 ) -> Result<Vec<u8>, String> {
-    let expected = width as usize * height as usize * 3;
+    encode_channels(pq, width, height, max_cll, false)
+}
+
+/// [`encode`] for a picture with an alpha channel: R G B A per pixel, the color PQ coded and not
+/// premultiplied, the alpha a plain 0 to 1 coverage.
+pub fn encode_rgba(
+    pq_and_alpha: &[f32],
+    width: u32,
+    height: u32,
+    max_cll: Option<f32>,
+) -> Result<Vec<u8>, String> {
+    encode_channels(pq_and_alpha, width, height, max_cll, true)
+}
+
+fn encode_channels(
+    pq: &[f32],
+    width: u32,
+    height: u32,
+    max_cll: Option<f32>,
+    alpha: bool,
+) -> Result<Vec<u8>, String> {
+    let channels = if alpha { 4 } else { 3 };
+    let expected = width as usize * height as usize * channels;
     if width == 0 || height == 0 || pq.len() != expected {
         return Err(format!(
             "a {width}x{height} picture needs {expected} values, got {}",
@@ -27,7 +49,11 @@ pub fn encode(
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut out, width, height);
-        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_color(if alpha {
+            png::ColorType::Rgba
+        } else {
+            png::ColorType::Rgb
+        });
         encoder.set_depth(png::BitDepth::Sixteen);
         let mut writer = encoder
             .write_header()

@@ -8,8 +8,8 @@
 //! A full-monitor screenshot of a monitor in HDR mode is the exception: it is drawn into the
 //! same linear working space as the screen (`capture_output_hdr`) and saved as a 16-bit PQ PNG.
 //! So is an area selection on such a monitor: the frozen frame is captured twice, as sRGB for
-//! the screen and in the working space for the file. The window screenshots, and `image_copy`,
-//! still get the sRGB picture.
+//! the screen and in the working space for the file. A window screenshot is HDR too
+//! (`capture_window_hdr`), as a 16-bit RGBA PNG. `image_copy` still gets the sRGB picture.
 //!
 //! Saving: `save.rs` turns the pixels into a file, the clipboard, and a notification on a
 //! worker thread. Capturing is synchronous, nothing else is.
@@ -187,6 +187,25 @@ pub struct HdrCaptured {
     pub height: u32,
     /// What the monitor's final pass is, to turn the working space into the picture's PQ codes.
     pub pass: FinalPass,
+    /// `Some` for a window: the picture is premultiplied with an alpha channel, and its corners
+    /// are rounded by this many pixels. `None` for an opaque picture of a monitor.
+    pub corner_radius: Option<u32>,
+}
+
+/// Everything a picture of a window as it looks on screen draws, ready to render.
+struct ShownFrame {
+    elements: Vec<JffElement>,
+    /// Pixel size of the monitor the elements are drawn for.
+    monitor: (i32, i32),
+    scale: f64,
+    /// The window's rectangle in the monitor's pixels.
+    area: Rect,
+    /// Pixel size the window has when it is whole.
+    size: Size<i32, Physical>,
+    /// Radius of its rounded corners in pixels, 0 for none.
+    corner_radius: i32,
+    /// Keeps the colors the elements were built for active until the picture is rendered.
+    _color_scope: gamut::Scope,
 }
 
 /// Everything a capture of a monitor draws, ready to render.
@@ -449,6 +468,7 @@ impl JffState {
             width: frame.size.0 as u32,
             height: frame.size.1 as u32,
             pass,
+            corner_radius: None,
         })
     }
 
@@ -644,6 +664,23 @@ impl JffState {
         window: &Window,
         color: Option<OutputColor>,
     ) -> Result<Captured, String> {
+        let (elements, scale_factor, size) = self.window_surface_elements(window, color)?;
+        render_to_rgba(
+            self.backend.renderer(),
+            (size.w, size.h),
+            scale_factor,
+            &elements,
+            [0.0; 4],
+        )
+    }
+
+    /// The surfaces of `window` and its menus, drawn with its geometry corner at (0, 0) and
+    /// converted to `color`, with the scale and pixel size of the picture they make.
+    fn window_surface_elements(
+        &mut self,
+        window: &Window,
+        color: Option<OutputColor>,
+    ) -> Result<(Vec<JffElement>, f64, Size<i32, Physical>), String> {
         let geo = window.geometry();
         let (scale_factor, size) = self.window_capture_size(window)?;
         let scale = Scale::from(scale_factor);
@@ -672,13 +709,18 @@ impl JffState {
                 None => elements.push(JffElement::from(surface)),
             }
         }
-        render_to_rgba(
-            renderer,
-            (size.w, size.h),
-            scale_factor,
-            &elements,
-            [0.0; 4],
-        )
+        Ok((elements, scale_factor, size))
+    }
+
+    /// The monitor `window` is on.
+    fn window_monitor(&self, window: &Window) -> Option<Output> {
+        let geo = window.geometry();
+        let pos = self.desk.pos_of(|w| w == window)?;
+        let on = self.rect_for_window(pos, (geo.size.w, geo.size.h));
+        self.outputs
+            .iter()
+            .find(|output| output_rect(output) == on)
+            .cloned()
     }
 
     /// A picture of `window` as it looks on screen: with the blurred wallpaper behind it where
@@ -688,19 +730,51 @@ impl JffState {
         if self.config.blur().off {
             return self.capture_window(window);
         }
+        let frame = self.shown_frame(window, None)?;
+        let monitor = render_to_rgba(
+            self.backend.renderer(),
+            frame.monitor,
+            frame.scale,
+            &frame.elements,
+            BACKGROUND,
+        )?;
+
+        // Cut the window out of the monitor's picture.
+        let (mut rgba, width, height) = crop_rgba(
+            &monitor.rgba,
+            monitor.width as i32,
+            monitor.height as i32,
+            frame.area,
+        )
+        .ok_or("the window is outside the monitor")?;
+        // Square corners, wallpaper in them, is not the window: cut them like the screen does.
+        if (width, height) == (frame.size.w, frame.size.h) {
+            round_corners(&mut rgba, width, height, frame.corner_radius);
+        }
+        Ok(Captured {
+            rgba,
+            width: width as u32,
+            height: height as u32,
+        })
+    }
+
+    /// What a picture of `window` as it looks on screen draws: the window and the wallpaper
+    /// under it, with `hdr` the working space of a monitor in HDR mode.
+    fn shown_frame(
+        &mut self,
+        window: &Window,
+        hdr: Option<WorkingSpace>,
+    ) -> Result<ShownFrame, String> {
         let geo = window.geometry();
         let (scale_factor, size) = self.window_capture_size(window)?;
         let pos = self
             .desk
             .pos_of(|w| w == window)
             .ok_or("the window is gone")?;
-        let on = self.rect_for_window(pos, (geo.size.w, geo.size.h));
         let output = self
-            .outputs
-            .iter()
-            .find(|output| output_rect(output) == on)
-            .cloned()
+            .window_monitor(window)
             .ok_or("the window is on no monitor")?;
+        let on = output_rect(&output);
         let mode = output
             .current_mode()
             .ok_or("the monitor has no mode (it is off)")?;
@@ -715,7 +789,11 @@ impl JffState {
         let radius = self.config.radius();
         let popup_radius = self.config.popup_radius();
         let color = crate::protocol::color_management::capture_color(&self.config);
-        let _color_scope = gamut::enter(color);
+        let color = match hdr {
+            Some(space) => Some(crate::protocol::color_management::hdr_color(color, space)),
+            None => color,
+        };
+        let color_scope = gamut::enter(color);
         let renderer = self.backend.renderer();
         let mut elements: Vec<JffElement> = Vec::new();
         window_elements(
@@ -744,36 +822,86 @@ impl JffState {
             None,
             &[],
         ));
-        let monitor = render_to_rgba(
-            renderer,
-            (mode.size.w, mode.size.h),
-            scale_factor,
-            &elements,
-            BACKGROUND,
-        )?;
 
-        // Cut the window out of the monitor's picture.
-        let area = physical_rect(
-            (pos.0, pos.1, geo.size.w, geo.size.h),
-            (on.0, on.1),
-            scale_factor,
-        );
-        let (mut rgba, width, height) = crop_rgba(
-            &monitor.rgba,
-            monitor.width as i32,
-            monitor.height as i32,
-            area,
-        )
-        .ok_or("the window is outside the monitor")?;
-        // Square corners, wallpaper in them, is not the window: cut them like the screen does.
-        if (width, height) == (size.w, size.h) && !is_fullscreen(window) {
-            let radius = (f64::from(radius) * scale_factor).round() as i32;
-            round_corners(&mut rgba, width, height, radius);
+        Ok(ShownFrame {
+            elements,
+            monitor: (mode.size.w, mode.size.h),
+            scale: scale_factor,
+            area: physical_rect(
+                (pos.0, pos.1, geo.size.w, geo.size.h),
+                (on.0, on.1),
+                scale_factor,
+            ),
+            size,
+            // A fullscreen window has square corners.
+            corner_radius: if is_fullscreen(window) {
+                0
+            } else {
+                (f64::from(radius) * scale_factor).round() as i32
+            },
+            _color_scope: color_scope,
+        })
+    }
+
+    /// A picture of `window` as it looks on screen, in the linear working space of the monitor
+    /// it is on, which is shown as HDR. Premultiplied, with an alpha channel like the sRGB one
+    /// of [`JffState::capture_window_as_shown`].
+    pub(crate) fn capture_window_hdr(&mut self, window: &Window) -> Result<HdrCaptured, String> {
+        let output = self
+            .window_monitor(window)
+            .ok_or("the window is on no monitor")?;
+        let (space, pass) = self
+            .hdr_capture(&output)
+            .ok_or("the monitor of the window is not shown as HDR")?;
+
+        if self.config.blur().off {
+            // Nothing behind the window to show: its own surfaces on a transparent background.
+            let color = crate::protocol::color_management::capture_color(&self.config);
+            let color = Some(crate::protocol::color_management::hdr_color(color, space));
+            let (elements, scale_factor, size) = self.window_surface_elements(window, color)?;
+            let renderer = self.backend.renderer();
+            let linear = hdr_frame::linearize(&mut *renderer, elements, space);
+            let half_rgba = render_to_working(
+                renderer,
+                (size.w, size.h),
+                scale_factor,
+                &linear,
+                hdr_frame::clear_color(space, [0.0; 4]),
+            )?;
+            return Ok(HdrCaptured {
+                half_rgba,
+                width: size.w as u32,
+                height: size.h as u32,
+                pass,
+                corner_radius: Some(0),
+            });
         }
-        Ok(Captured {
-            rgba,
+
+        let frame = self.shown_frame(window, Some(space))?;
+        let renderer = self.backend.renderer();
+        let linear = hdr_frame::linearize(&mut *renderer, frame.elements, space);
+        let monitor = render_to_working(
+            renderer,
+            frame.monitor,
+            frame.scale,
+            &linear,
+            hdr_frame::clear_color(space, BACKGROUND),
+        )?;
+        let (half_rgba, width, height) =
+            crop_channels(&monitor, frame.monitor.0, frame.monitor.1, frame.area, 4)
+                .ok_or("the window is outside the monitor")?;
+        // The monitor was drawn opaque, the corners are cut when the picture is converted.
+        let corner_radius = if (width, height) == (frame.size.w, frame.size.h) {
+            frame.corner_radius.max(0) as u32
+        } else {
+            0
+        };
+        Ok(HdrCaptured {
+            half_rgba,
             width: width as u32,
             height: height as u32,
+            pass,
+            corner_radius: Some(corner_radius),
         })
     }
 
@@ -804,6 +932,7 @@ impl JffState {
             width: picture.width,
             height: picture.height,
             pass: picture.pass,
+            corner_radius: picture.corner_radius,
             dir,
             wants_clipboard: config.copy_to_clipboard,
         });
@@ -843,6 +972,20 @@ impl JffState {
                     .map(|entry| entry.window.clone())
             })
             .ok_or("there is no window to take a picture of")?;
+        let monitor_is_hdr = self
+            .window_monitor(&window)
+            .is_some_and(|output| self.hdr_capture(&output).is_some());
+        if monitor_is_hdr {
+            match self.capture_window_hdr(&window) {
+                Ok(picture) => {
+                    self.queue_save_hdr(picture);
+                    return Ok(());
+                }
+                Err(why) => {
+                    tracing::warn!("no HDR screenshot, taking an sRGB one instead: {why}");
+                }
+            }
+        }
         let picture = self.capture_window_as_shown(&window)?;
         self.queue_save(picture, true);
         Ok(())
@@ -989,6 +1132,7 @@ impl JffState {
                     width: width as u32,
                     height: height as u32,
                     pass,
+                    corner_radius: None,
                 }),
                 None => report_failure("the selection is empty"),
             }

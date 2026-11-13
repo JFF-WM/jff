@@ -86,3 +86,58 @@ fn an_empty_frame_is_an_empty_picture() {
     assert!(picture.codes.is_empty());
     assert_eq!(picture.max_nits, 0.0);
 }
+
+#[test]
+fn corners_are_cut_by_the_alpha_and_nothing_else() {
+    use jff_wm::primitives::hdr_capture::corner_coverage;
+    // a 20 by 20 window with a radius of 6: the very corner is gone, the middle and the edges are not
+    assert!(corner_coverage(0, 0, 20, 20, 6) < 0.05);
+    assert!(corner_coverage(19, 19, 20, 20, 6) < 0.05);
+    assert_eq!(corner_coverage(10, 10, 20, 20, 6), 1.0);
+    assert_eq!(corner_coverage(10, 0, 20, 20, 6), 1.0);
+    assert_eq!(corner_coverage(0, 10, 20, 20, 6), 1.0);
+    // no radius, no cut, a radius bigger than the window is held to half of it
+    assert_eq!(corner_coverage(0, 0, 20, 20, 0), 1.0);
+    assert!(corner_coverage(0, 0, 4, 4, 100) < 0.5);
+}
+
+#[test]
+fn a_half_transparent_pixel_keeps_the_color_it_had() {
+    use jff_wm::primitives::hdr_capture::pq_picture_rgba;
+    let pass = FinalPass::new(203.0, 1000.0, None);
+    // white at half alpha, premultiplied: 0.5 in every component
+    let half_white = [0x3800, 0x3800, 0x3800, 0x3800];
+    let faded = pq_picture_rgba(&pass, &half_white, 1, 0);
+    let solid = pq_picture_rgba(&pass, &[ONE, ONE, ONE, ONE], 1, 0);
+    assert_eq!(faded.codes.len(), 4);
+    for i in 0..3 {
+        assert!((faded.codes[i] - solid.codes[i]).abs() < 1e-3);
+    }
+    assert!((faded.codes[3] - 0.5).abs() < 1e-3);
+    assert!((solid.codes[3] - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn a_clear_pixel_has_no_alpha_and_no_brightness() {
+    use jff_wm::primitives::hdr_capture::pq_picture_rgba;
+    let pass = FinalPass::new(203.0, 1000.0, None);
+    let picture = pq_picture_rgba(&pass, &[0, 0, 0, 0], 1, 0);
+    assert_eq!(picture.codes[3], 0.0);
+    assert!(picture.codes.iter().all(|c| c.is_finite()));
+    assert!(picture.max_nits < 0.01);
+}
+
+#[test]
+fn the_rounded_corners_of_a_picture_come_out_of_its_alpha() {
+    use jff_wm::primitives::hdr_capture::pq_picture_rgba;
+    let pass = FinalPass::new(203.0, 1000.0, None);
+    let frame: Vec<u16> = (0..20 * 20).flat_map(|_| [ONE, ONE, ONE, ONE]).collect();
+    let picture = pq_picture_rgba(&pass, &frame, 20, 6);
+    let alpha = |x: usize, y: usize| picture.codes[(y * 20 + x) * 4 + 3];
+    assert!(alpha(0, 0) < 0.05);
+    assert!(alpha(19, 0) < 0.05);
+    assert!(alpha(0, 19) < 0.05);
+    assert_eq!(alpha(10, 10), 1.0);
+    // the color under the cut corner is the same as everywhere else
+    assert_eq!(picture.codes[0], picture.codes[(10 * 20 + 10) * 4]);
+}
