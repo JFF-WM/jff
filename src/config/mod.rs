@@ -24,6 +24,7 @@
 //! `hdr-tone-map "knee"|"bt2390"` picks how the frame is rolled off under that peak (`"knee"` by default).
 //! `hdr-content-metadata` (on by default, `hdr-content-metadata false` turns it off) fits that roll-off to the content: when a visible PQ surface states how bright it gets (`max_cll`, else the mastering luminance a client sent through wp-color-management), content that fits under the peak is shown as it is, and brighter content is BT.2390-mapped with its own peak as the source, whatever `hdr-tone-map` is. Frames with no such surface keep using `hdr-tone-map`.
 //! `sdr-white`, `hdr-peak`, `hdr-tone-map` and `hdr-content-metadata` only apply to a monitor with `hdr`, `jff check-config` warns when they stand alone.
+//! `hdr` in `output "jff-winit"` simulates HDR when jff runs nested: the frame goes through the same working space and final pass (with `sdr-white`, `hdr-peak` (1000 by default), `hdr-tone-map` and `hdr-content-metadata`), clients are told the output is PQ, and `screenshot-fullscreen` saves the 16-bit PNG. The host window is SDR, so it shows the PQ code values themselves, dithered to 8 bits.
 //! `screenshot-fullscreen` on a monitor in HDR mode saves a 16-bit PNG in PQ and BT.2020 (a `cICP` chunk says so) with the monitor's tone curve, and leaves the clipboard alone. The area and window screenshots are still sRGB.
 //!
 //! Two things that bite when editing the file by hand:

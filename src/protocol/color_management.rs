@@ -132,6 +132,40 @@ pub struct WorkingSpace {
     pub sdr_white: u32,
 }
 
+/// What clients are told about a monitor drawn in HDR with `pass`: PQ (or HLG) in BT.2020 up to its peak, with SDR white at its configured level.
+pub fn hdr_output_description(
+    pass: &crate::primitives::hdr_output::FinalPass,
+    space: WorkingSpace,
+) -> ImageDescription {
+    use crate::primitives::color::{Luminance, NamedPrimaries, TransferFunction};
+    use crate::primitives::hdr::OutputEotf;
+    let (tf, luminance) = match pass.eotf {
+        OutputEotf::Pq => (
+            NamedTf::St2084Pq,
+            Luminance {
+                min: Luminance::PQ.min,
+                max: pass.peak as u32,
+                reference: space.sdr_white,
+            },
+        ),
+        OutputEotf::Hlg => (
+            NamedTf::Hlg,
+            Luminance {
+                reference: space.sdr_white,
+                ..Luminance::HLG
+            },
+        ),
+    };
+    ImageDescription {
+        primaries: NamedPrimaries::Bt2020.chromaticities(),
+        tf: TransferFunction::Named(tf),
+        luminance,
+        max_cll: None,
+        max_fall: None,
+        mastering_luminance: None,
+    }
+}
+
 /// What to convert the surfaces of the monitor `output` to, `None` when it is not managed: the
 /// config has `color-management { off }`, or `color-management "off"` for that monitor. Cheap
 /// enough to ask every frame, so a change of the config applies at once.
@@ -855,7 +889,7 @@ pub fn sync_output_color(state: &mut JffState) {
 fn sync_hdr_descriptions(state: &mut JffState) -> bool {
     let wanted = match &state.backend {
         crate::app::Backend::Tty(tty) => tty.hdr_descriptions(),
-        _ => Vec::new(),
+        crate::app::Backend::Winit(_) => state.winit_hdr_descriptions(),
     };
     let manager = &mut state.color_management;
     let same = wanted.len() == manager.hdr.len()

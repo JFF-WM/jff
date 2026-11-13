@@ -137,6 +137,8 @@ pub struct JffState {
 
     pub backend: Backend,
     pub damage_tracker: OutputDamageTracker,
+    /// What the nested (winit) HDR simulation keeps between frames, see `app/winit.rs`.
+    pub winit_hdr: crate::app::winit::WinitHdr,
     pub outputs: Vec<Output>,
     /// The `wl_output` global of every active output, by output name.
     pub output_globals: HashMap<String, GlobalId>,
@@ -563,6 +565,7 @@ impl JffState {
             start_time: Instant::now(),
             backend,
             damage_tracker,
+            winit_hdr: Default::default(),
             outputs,
             output_globals,
             retiring_globals: Vec::new(),

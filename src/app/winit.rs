@@ -23,11 +23,47 @@ use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
 use crate::render::elements::JffElement;
 use crate::state::JffState;
 
+use crate::config::Config;
+use crate::primitives::hdr::OutputEotf;
+use crate::primitives::hdr_output::{self, FinalPass};
+use crate::protocol::color_management::WorkingSpace;
+use crate::render::effects::hdr::{self as hdr_frame, HdrFrame};
+
 use super::pacing::{advance_frame_sequence, frame_sequence, LastCallback};
 use super::{Backend, BACKGROUND};
 
 /// How often a window hidden behind a covering fullscreen window gets a frame callback.
 const HIDDEN_FRAME_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Peak luminance the simulated HDR output has when `hdr-peak` is not set, in cd/m².
+const SIMULATED_PEAK: u32 = 1000;
+
+/// Bits per color of the host window, what the simulation dithers for.
+const WINDOW_BITS: u32 = 8;
+
+/// What the nested HDR simulation keeps between frames.
+#[derive(Default)]
+pub struct WinitHdr {
+    frame: Option<HdrFrame>,
+    /// The content peak the last frame went out through, for a screenshot of it.
+    content_peak: Option<f32>,
+}
+
+/// The HDR settings of the winit output from the config: `hdr` in `output "jff-winit"`, with the same `sdr-white`, `hdr-peak`, `hdr-tone-map` and `hdr-content-metadata` as a monitor. The panel's gamut is not known, so nothing is mapped to it. The window is an SDR surface of the host: it shows the PQ code values as they are, which is what the signal of a real HDR monitor holds.
+fn hdr_settings(config: &Config, name: &str) -> Option<(WorkingSpace, FinalPass, bool)> {
+    let output = config.output(name).filter(|c| c.hdr)?;
+    let sdr_white = output.sdr_white.unwrap_or(hdr_output::DEFAULT_SDR_WHITE);
+    let peak = output.hdr_peak.unwrap_or(SIMULATED_PEAK);
+    let pass = FinalPass::new(sdr_white as f32, peak as f32, None)
+        .with_tone_map(output.hdr_tone_map.unwrap_or_default())
+        .with_eotf(OutputEotf::Pq)
+        .with_dither(Some(WINDOW_BITS));
+    Some((
+        WorkingSpace { sdr_white },
+        pass,
+        output.hdr_content_metadata.unwrap_or(true),
+    ))
+}
 
 pub fn init_winit() -> anyhow::Result<(Backend, WinitEventLoop, Output)> {
     let (backend, winit_loop) =
@@ -55,6 +91,39 @@ pub fn init_winit() -> anyhow::Result<(Backend, WinitEventLoop, Output)> {
 }
 
 impl JffState {
+    /// The simulated HDR settings of the winit output, `None` when it is SDR.
+    fn winit_hdr_settings(&self) -> Option<(WorkingSpace, FinalPass, bool)> {
+        let output = self.outputs.first()?;
+        hdr_settings(&self.config, &output.name())
+    }
+
+    /// What clients are told about the winit output when it simulates HDR.
+    pub fn winit_hdr_descriptions(
+        &self,
+    ) -> Vec<(String, crate::primitives::color::ImageDescription)> {
+        let Some(output) = self.outputs.first() else {
+            return Vec::new();
+        };
+        hdr_settings(&self.config, &output.name())
+            .map(|(space, pass, _)| {
+                (
+                    output.name(),
+                    crate::protocol::color_management::hdr_output_description(&pass, space),
+                )
+            })
+            .into_iter()
+            .collect()
+    }
+
+    /// The working space and final pass of the winit output for a screenshot, with the content peak of the last frame.
+    pub fn winit_hdr_capture(&self, output: &Output) -> Option<(WorkingSpace, FinalPass)> {
+        if self.outputs.first() != Some(output) {
+            return None;
+        }
+        let (space, pass, _) = self.winit_hdr_settings()?;
+        Some((space, pass.with_content_peak(self.winit_hdr.content_peak)))
+    }
+
     pub fn start_rendering(&mut self) {
         match &self.backend {
             Backend::Winit(winit) => winit.window().request_redraw(),
@@ -151,7 +220,21 @@ impl JffState {
                 &output.name(),
             )
         });
+        // A simulated HDR output composites in the working space, like a monitor in HDR mode.
+        let hdr = self
+            .winit_hdr_settings()
+            .filter(|_| hdr_frame::supported(self.backend.renderer()));
+        let frame_color = match hdr {
+            Some((space, _, _)) => Some(crate::protocol::color_management::hdr_color(
+                frame_color,
+                space,
+            )),
+            None => frame_color,
+        };
         let _color_scope = crate::render::effects::gamut::enter(frame_color);
+        let _light_scope = crate::render::effects::gamut::collect_content_light(
+            hdr.is_some_and(|(_, _, content_metadata)| content_metadata),
+        );
         let Backend::Winit(winit) = &mut self.backend else {
             return;
         };
@@ -250,13 +333,7 @@ impl JffState {
                 } else {
                     let radius = self.config.radius();
                     let popup_radius = self.config.popup_radius();
-                    let color = layer_output.as_ref().and_then(|output| {
-                        crate::protocol::color_management::output_color(
-                            &self.config,
-                            &self.color_management,
-                            &output.name(),
-                        )
-                    });
+                    let color = frame_color;
                     let border = self.config.border();
                     let animate = self.config.window_animations();
                     let (open_time, close_time) = self.config.window_animation_times();
@@ -335,6 +412,45 @@ impl JffState {
             }
         }
 
+        // HDR: composite in the working space, then draw the one element that codes the result.
+        let mut hdr_states = None;
+        if let (Some((space, pass, _)), Some(output)) = (hdr, layer_output.as_ref()) {
+            let renderer = winit.renderer();
+            let linear = hdr_frame::linearize(&mut *renderer, std::mem::take(&mut elements), space);
+            let lights = crate::render::effects::gamut::take_content_light();
+            let state = &mut self.winit_hdr;
+            if !state.frame.as_ref().is_some_and(|f| f.fits(output, &pass)) {
+                state.frame = HdrFrame::new(&mut *renderer, output, pass)
+                    .map_err(|err| tracing::warn!("cannot make the HDR target: {err}"))
+                    .ok();
+            }
+            let background = if locked {
+                crate::protocol::session_lock::LOCKED_BACKGROUND
+            } else {
+                BACKGROUND
+            };
+            let clear = hdr_frame::clear_color(space, background);
+            match state
+                .frame
+                .as_mut()
+                .map(|f| f.render(&mut *renderer, &linear, clear, &lights))
+            {
+                Some(Ok((element, states))) => {
+                    state.content_peak = state.frame.as_ref().and_then(HdrFrame::content_peak);
+                    elements.push(JffElement::Hdr(element));
+                    hdr_states = Some(states);
+                }
+                Some(Err(err)) => {
+                    tracing::warn!("error drawing the HDR frame: {err}");
+                    state.frame = None;
+                    state.content_peak = None;
+                }
+                None => {}
+            }
+        } else {
+            self.winit_hdr = WinitHdr::default();
+        }
+
         let result = {
             let (renderer, mut framebuffer) = match winit.bind() {
                 Ok(bound) => bound,
@@ -367,7 +483,7 @@ impl JffState {
                         let mut feedback = crate::protocol::presentation::take_feedback(
                             &self.desk,
                             output,
-                            &res.states,
+                            hdr_states.as_ref().unwrap_or(&res.states),
                         );
                         feedback.presented::<_, smithay::utils::Monotonic>(
                             crate::protocol::presentation::monotonic_now(),

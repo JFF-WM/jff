@@ -66,9 +66,7 @@ use crate::desk::Desk;
 use crate::feature::outputs::{output_rect, Monitor, MonitorMode};
 use crate::feature::overview_mode::{overview_drag_elements, overview_elements};
 use crate::feature::screenshot::screenshot_elements;
-use crate::primitives::color::{
-    ImageDescription, Luminance, NamedPrimaries, NamedTf, TransferFunction,
-};
+use crate::primitives::color::ImageDescription;
 use crate::primitives::edid::{self, Edid};
 use crate::primitives::frame_clock::{next_presentation_time, wait_until, FALLBACK_REFRESH};
 use crate::primitives::hdr::{self, KernelSupport, OutputEotf, Status, Unavailable};
@@ -1276,31 +1274,8 @@ impl Tty {
             .values()
             .filter_map(|lit| {
                 let hdr = lit.hdr.as_ref()?;
-                let (tf, luminance) = match hdr.pass.eotf {
-                    OutputEotf::Pq => (
-                        NamedTf::St2084Pq,
-                        Luminance {
-                            min: Luminance::PQ.min,
-                            max: hdr.pass.peak as u32,
-                            reference: hdr.space.sdr_white,
-                        },
-                    ),
-                    OutputEotf::Hlg => (
-                        NamedTf::Hlg,
-                        Luminance {
-                            reference: hdr.space.sdr_white,
-                            ..Luminance::HLG
-                        },
-                    ),
-                };
-                let description = ImageDescription {
-                    primaries: NamedPrimaries::Bt2020.chromaticities(),
-                    tf: TransferFunction::Named(tf),
-                    luminance,
-                    max_cll: None,
-                    max_fall: None,
-                    mastering_luminance: None,
-                };
+                let description =
+                    crate::protocol::color_management::hdr_output_description(&hdr.pass, hdr.space);
                 Some((lit.output.name(), description))
             })
             .collect()
