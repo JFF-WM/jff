@@ -104,7 +104,7 @@ border {
     focus-color "#333436"      // the focused window
     focus-color-2 "#ff3c36"    // a second color: the focused border blends between the two
     fade-ms 300                // time to change color, 0 to 5000, 150 by default
-    animate "none"             // "none" (default), "spin" or "sweep": how the focused border moves
+    animate "none"             // "none" (default), spin, sweep, smoke, neon, aurora
     period-ms 3000             // one turn of the animation, up to 600000, 3000 by default
 }
 
