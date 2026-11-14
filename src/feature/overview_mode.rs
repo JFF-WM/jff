@@ -1211,14 +1211,14 @@ impl JffState {
         overview_arrangement(ov, self.config.switcher().thumbnail_height, groups).1
     }
 
-    /// The cells to draw, `shift` px from the grid (while the container is carried): the
+    /// The cells to draw, the carried container's one where `carried` puts it: the
     /// outline and fill, and the name painted at a size that fits the strip above the windows.
     /// The name is painted again only when its text or size changes.
     fn cell_plans(
         &mut self,
         groups: &[Group],
         cells: &[(usize, Thumb)],
-        carried: Option<(ContainerId, (i32, i32))>,
+        carried: Option<(ContainerId, Thumb)>,
     ) -> Vec<CellPlan> {
         let fonts = self.osd.fonts();
         let Some(ov) = self.overview.as_mut() else {
@@ -1233,13 +1233,9 @@ impl JffState {
         let mut plans = Vec::with_capacity(cells.len());
         for (n, (g, cell)) in cells.iter().enumerate() {
             let group = &groups[*g];
-            let (dx, dy) = carried
+            let moved = carried
                 .filter(|(id, _)| *id == group.id)
-                .map_or((0, 0), |(_, shift)| shift);
-            let moved = Thumb {
-                pos: (cell.pos.0 + dx, cell.pos.1 + dy),
-                ..*cell
-            };
+                .map_or(*cell, |(_, moved)| moved);
             let strip = container_view::label_rect(moved);
             let px = (strip.3 * 3 / 5).clamp(10, 28);
             let label = fonts.filter(|_| !group.label.is_empty()).and_then(|fonts| {
@@ -1841,9 +1837,12 @@ impl JffState {
         let target = layout::nearest((at.x, at.y), &rects)
             .map(|i| rects[i])
             .filter(|target| *target != source);
-        // A container goes as a whole, windows and tree.
+        // Over a container of the other monitor its windows join that one, as a single window
+        // does, anywhere else on it the container lands whole.
         if let (Some(target), Some(container)) = (target, drag.container) {
-            self.drop_container(container, target);
+            if !self.drop_container_into(container, at) {
+                self.drop_container(container, target);
+            }
             return;
         }
         let moving = self
@@ -2309,24 +2308,13 @@ impl JffState {
             .get_pointer()
             .map(|p| p.current_location())
             .unwrap_or_default();
-        let group_drag = self.overview.as_ref().and_then(|ov| {
-            let drag = ov.drag.as_ref()?;
-            let id = drag.container?;
-            let (_, cell) = cells.iter().find(|(g, _)| groups[*g].id == id)?;
-            let moved = overview::dragged_thumb(*cell, drag.anchor, (pointer_at.x, pointer_at.y));
-            Some((id, (moved.pos.0 - cell.pos.0, moved.pos.1 - cell.pos.1)))
-        });
-        let cell_plans = self.cell_plans(&groups, &cells, group_drag);
-        let ov = self.overview.as_ref()?;
-        let t = ov.progress();
-        let at = pointer_at;
         // With a wall the dragged thumbnail is as big as one of its squares, so it can be
         // matched with one. On another monitor it is the window's real size, as it will land.
-        let overview_rect = output_rect(&ov.output);
+        let overview_rect = output_rect(&self.overview.as_ref()?.output);
         // (how much the dragged window is scaled, the monitor the pointer is on)
         let drag_wall = wall_cells.first().map(|cell| {
             let rects = self.output_rects();
-            let here = layout::nearest((at.x, at.y), &rects)
+            let here = layout::nearest((pointer_at.x, pointer_at.y), &rects)
                 .map(|i| rects[i])
                 .unwrap_or(overview_rect);
             let on_overview = here == overview_rect;
@@ -2339,6 +2327,45 @@ impl JffState {
             let min_height = if on_overview { cell.3 } else { 0 };
             (scale, here, min_height)
         });
+        // A container being carried moves as a whole, held by the point of its cell the pointer
+        // grabbed, and with a wall it is shrunk like a window is: its cell and every window in
+        // it by the same factor, so the container is as big as a square of the wall.
+        // (the container, its cell in the grid, the cell as carried, the factor)
+        let group_drag = self.overview.as_ref().and_then(|ov| {
+            let drag = ov.drag.as_ref()?;
+            let id = drag.container?;
+            let (_, cell) = cells.iter().find(|(g, _)| groups[*g].id == id)?;
+            let factor = match drag_wall {
+                Some((scale, _, min_height)) => {
+                    let mut factor = scale / cell.scale.max(f64::EPSILON);
+                    let height = f64::from(cell.size.1.max(1)) * factor;
+                    if height < f64::from(min_height) {
+                        factor = f64::from(min_height) / f64::from(cell.size.1.max(1));
+                    }
+                    factor
+                }
+                None => 1.0,
+            };
+            let carried = Thumb {
+                size: (
+                    ((f64::from(cell.size.0) * factor).round() as i32).max(1),
+                    ((f64::from(cell.size.1) * factor).round() as i32).max(1),
+                ),
+                scale: cell.scale * factor,
+                ..*cell
+            };
+            let carried =
+                overview::dragged_thumb(carried, drag.anchor, (pointer_at.x, pointer_at.y));
+            Some((id, *cell, carried, factor))
+        });
+        let cell_plans = self.cell_plans(
+            &groups,
+            &cells,
+            group_drag.map(|(id, _, carried, _)| (id, carried)),
+        );
+        let ov = self.overview.as_ref()?;
+        let t = ov.progress();
+        let at = pointer_at;
 
         let thumbs: Vec<(Window, Thumb)> = self
             .overview_slots()
@@ -2408,16 +2435,26 @@ impl JffState {
                     }
                     None => thumb,
                 };
-                // The windows of a container being carried keep their places in it.
+                // The windows of a container being carried keep their places in it, shrunk
+                // with the cell.
                 let thumb = match group_drag {
-                    Some((id, (dx, dy)))
+                    Some((id, cell, carried, factor))
                         if groups.iter().any(|group| {
                             group.id == id && group.leaves.iter().any(|(leaf, _)| *leaf == window)
                         }) =>
                     {
                         Thumb {
-                            pos: (thumb.pos.0 + dx, thumb.pos.1 + dy),
-                            ..thumb
+                            pos: (
+                                carried.pos.0
+                                    + (f64::from(thumb.pos.0 - cell.pos.0) * factor).round() as i32,
+                                carried.pos.1
+                                    + (f64::from(thumb.pos.1 - cell.pos.1) * factor).round() as i32,
+                            ),
+                            size: (
+                                ((f64::from(thumb.size.0) * factor).round() as i32).max(1),
+                                ((f64::from(thumb.size.1) * factor).round() as i32).max(1),
+                            ),
+                            scale: thumb.scale * factor,
                         }
                     }
                     _ => thumb,
@@ -2454,7 +2491,7 @@ impl JffState {
             .as_ref()
             .and_then(|drag| thumbs.iter().position(|(w, _)| *w == drag.window));
         let dragged_with: Vec<usize> = match group_drag {
-            Some((id, _)) => thumbs
+            Some((id, ..)) => thumbs
                 .iter()
                 .enumerate()
                 .filter(|(i, (window, _))| {

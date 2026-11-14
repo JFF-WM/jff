@@ -23,7 +23,7 @@ use crate::input::grabs::r#move::shrunk_geometry;
 use crate::input::grabs::tile_move::{TileMoveEnd, TileMoveGrab};
 use crate::input::grabs::tile_resize::TileResizeGrab;
 use crate::input::BTN_LEFT;
-use crate::primitives::container_drop::{in_empty_half, leaf_drop, opposite};
+use crate::primitives::container_drop::{in_empty_half, leaf_drop, opposite, LeafDrop};
 use crate::primitives::container_view;
 use crate::primitives::geom;
 use crate::primitives::layout::{self, Rect};
@@ -332,6 +332,69 @@ impl JffState {
         self.desk.raise_where(|w| *w == first);
         let area = self.usable_rect(target);
         self.tile_and_configure(id, area);
+        true
+    }
+
+    /// Container `id` was dropped from the overview with the pointer at `at`, over another
+    /// container that is shown: every window of `id` joins that one, the way a single window
+    /// does ([`JffState::drop_into_existing_container`]). The first is split off the member
+    /// under the pointer, each of the others off the one that went in before it, so they stay
+    /// together. `id` is gone with its last window, and the container they joined is laid out
+    /// again. Returns false, having changed nothing, when `tiling-containers` is off or there
+    /// is no other container under the pointer.
+    pub fn drop_container_into(&mut self, id: ContainerId, at: Point<f64, Logical>) -> bool {
+        if !self.config.tiling_containers() {
+            return false;
+        }
+        let point = (at.x, at.y);
+        let gap = self.config.snap_gap();
+        let Some(target) = self.desk.container_at(point).filter(|target| *target != id) else {
+            return false;
+        };
+        let Some(mut leaf) = self.desk.leaf_at(target, point, gap) else {
+            return false;
+        };
+        let focused = self.desk.container(id).map(|c| c.focused());
+        let members: Vec<(Window, bool)> = self
+            .desk
+            .members(id)
+            .iter()
+            .map(|entry| (entry.window.clone(), Some(entry.id) == focused))
+            .collect();
+        let mut focus = None;
+        let mut joined = false;
+        for (window, was_focused) in &members {
+            let moved = self
+                .desk
+                .move_member(|w| w == window, target, leaf, LeafDrop::Swap, gap);
+            if let Err(err) = moved {
+                tracing::warn!("could not move a window into the container: {err:?}");
+                continue;
+            }
+            joined = true;
+            if let Some(entry) = self.desk.find_by(|w| w == window) {
+                leaf = entry.id;
+            }
+            if *was_focused || focus.is_none() {
+                focus = Some(window.clone());
+            }
+        }
+        if !joined {
+            return false;
+        }
+        self.retile_container(target);
+        // Windows that could not move are still in `id`, if it is still there.
+        if self.desk.container(id).is_some() {
+            self.retile_container(id);
+        }
+        if let Some(window) = focus {
+            self.focus_window(&window);
+        }
+        tracing::info!(
+            "container {} dropped into container {}",
+            id.get(),
+            target.get()
+        );
         true
     }
 
