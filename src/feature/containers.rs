@@ -10,13 +10,12 @@
 //! container joins it, and so does a new window that opens while a container has the keyboard.
 //! Everything else about a drop stays as it is, and with the setting off nothing in here runs.
 
-use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::desktop::Window;
 use smithay::input::pointer::{Focus, GrabStartData};
-use smithay::utils::{Logical, Point, Rectangle, Serial, SERIAL_COUNTER};
+use smithay::utils::{Logical, Point, Serial, SERIAL_COUNTER};
 
 use crate::config::{Border, Config, WindowFacts, WindowRule};
-use crate::desk::{ContainerId, Desk, Entry, Side, WindowMode};
+use crate::desk::{ContainerId, Side, WindowMode};
 use crate::feature::osd::toplevel_names;
 use crate::feature::outputs::output_rect;
 use crate::input::grabs::r#move::shrunk_geometry;
@@ -30,8 +29,6 @@ use crate::primitives::layout::{self, Rect};
 use crate::primitives::tile_tree::Edge;
 use crate::protocol::layer_shell::{ABOVE_WINDOWS, BELOW_WINDOWS};
 use crate::protocol::toplevel_tag;
-use crate::render::effects::border::{container_border_element, BorderPaint};
-use crate::render::elements::JffElement;
 use crate::state::{configure_member, configure_mode, JffState};
 
 /// Width of a container's border when the config has no `border` block of its own to take it
@@ -121,7 +118,7 @@ impl JffState {
 
     /// A drag of `window` ended with the pointer at `at`: when that is over a container that is
     /// shown, the window joins it, split off the member under the pointer (see
-    /// [`Desk::join_container`]), and the container is laid out again. Returns true then, and
+    /// [`crate::desk::Desk::join_container`]), and the container is laid out again. Returns true then, and
     /// false, having changed nothing, when it does not: no container there. Any window joins
     /// but a dialog (a window the user drops on a container wants to be in it, whatever a rule
     /// says). The caller has checked that the
@@ -153,7 +150,7 @@ impl JffState {
     /// one decides. Needs `tiling-containers`, and not the overview or a locked session. Any
     /// kind of window joins but a dialog and one a rule keeps `floating`. The container
     /// has to be on the window's workspace and monitor, shown, and without a fullscreen focused
-    /// member (see [`Desk::container_to_join`]).
+    /// member (see [`crate::desk::Desk::container_to_join`]).
     pub(crate) fn join_container_on_map(&mut self, window: &Window) -> bool {
         if !self.config.tiling_containers() || self.overview_active() || self.session_locked() {
             return false;
@@ -1102,42 +1099,4 @@ pub fn container_border_style(config: &Config) -> Border {
             ..Border::default()
         }
     }
-}
-
-/// The border of the container `entry` is a member of, to push right after the elements of
-/// `entry` while drawing the windows top down, or `None`. Only the lowest member of the
-/// container returns it, so the ring is behind every member and drawn once, and only a container
-/// that has been laid out has one. `origin` is the top-left of the monitor being drawn, in the
-/// shared space.
-///
-/// Not a method: the renderer is borrowed out of the state where this is called, so it takes the
-/// parts it reads.
-pub fn container_border_after(
-    desk: &Desk<Window>,
-    config: &Config,
-    focused: Option<&Window>,
-    renderer: &mut GlesRenderer,
-    entry: &Entry<Window>,
-    origin: Point<i32, Logical>,
-) -> Option<JffElement> {
-    let id = entry.container?;
-    let area = desk.container(id)?.area()?;
-    let lowest = desk
-        .top_down()
-        .filter(|member| member.container == Some(id))
-        .last()?;
-    if lowest.window != entry.window {
-        return None;
-    }
-    let focused = focused.is_some_and(|window| desk.container_of(|w| w == window) == Some(id));
-    let rect = Rectangle::<i32, Logical>::new(
-        (area.0 - origin.x, area.1 - origin.y).into(),
-        (area.2, area.3).into(),
-    );
-    let paint = BorderPaint {
-        style: container_border_style(config),
-        focused,
-    };
-    container_border_element(renderer, id.get(), rect, config.radius(), paint)
-        .map(JffElement::Border)
 }

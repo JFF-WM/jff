@@ -380,17 +380,6 @@ impl JffState {
                             },
                             &mut elements,
                         );
-                        // A container's border is behind all its windows.
-                        if let Some(ring) = crate::feature::containers::container_border_after(
-                            &self.desk,
-                            &self.config,
-                            self.focused_window.as_ref(),
-                            &mut *renderer,
-                            entry,
-                            Point::from((0, 0)),
-                        ) {
-                            elements.push(ring);
-                        }
                     }
                 }
                 // Fills the wallpaper copy: drawn right after the background layers.

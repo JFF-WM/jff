@@ -122,7 +122,7 @@ vec3 cm_from_light(vec3 l, vec2 curve) {
     return pow(l, vec3(1.0 / curve.y));
 }
 
-// Light in the output's primaries to light the output can show. Colors that fit are untouched;
+// Light in the output's primaries to light the output can show. Colors that fit are untouched,
 // the others are clipped, or moved along the line to the grey of the same luminance until the
 // first channel to leave the gamut is exactly on its edge.
 vec3 cm_map_gamut(vec3 c) {
@@ -165,7 +165,7 @@ void main() {
         }
     }
 
-    // Only the window's own rectangle is shaped; what a client draws outside it (a shadow) is
+    // Only the window's own rectangle is shaped, what a client draws outside it (a shadow) is
     // left alone.
     vec2 p = gl_FragCoord.xy;
     bool inside = p.x >= geo_min.x && p.y >= geo_min.y && p.x < geo_max.x && p.y < geo_max.y;

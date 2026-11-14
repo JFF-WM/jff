@@ -1,4 +1,4 @@
-// Pixel shader (Smithay adds the version line): a rounded ring — the outline around the
+// Pixel shader (Smithay adds the version line): a rounded ring - the outline around the
 // selected thumbnail in the overview.
 //
 // The element covers the thumbnail grown by `border` on every side. The ring is what's left of
@@ -37,7 +37,7 @@ uniform vec4 color2;
 uniform float phase;
 // How much of the animation shows: 0.0 none, 1.0 all. Scaled by the focus fade.
 uniform float animated;
-// 0.0: a gradient turning around the ring; 1.0: a narrow highlight travelling around it.
+// 0.0: a gradient turning around the ring, 1.0: a narrow highlight travelling around it.
 uniform float sweep;
 
 // Signed distance to a rounded box centred on the origin: negative inside.
