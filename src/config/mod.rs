@@ -71,6 +71,9 @@ pub const MAX_RADIUS: i32 = 256;
 /// Border around windows: width used when a `border { }` block gives none, its upper bound,
 /// and the focus fade.
 pub const DEFAULT_BORDER_WIDTH: i32 = 2;
+/// Width of a paper border when the config does not give one: the paper needs some room to be
+/// torn in.
+pub const DEFAULT_PAPER_BORDER_WIDTH: i32 = 14;
 pub const MAX_BORDER_WIDTH: i32 = 64;
 pub const DEFAULT_BORDER_FADE_MS: i32 = 150;
 pub const MAX_BORDER_FADE_MS: i32 = 5000;
@@ -794,6 +797,20 @@ pub enum BorderAnimation {
     Spin,
     /// A short highlight of the second colour that travels around the window.
     Sweep,
+    /// Smoke that rises off the border, in `focus-color` close to it and `focus-color-2` as it
+    /// thins out. A turn is one loop of the smoke.
+    Smoke,
+}
+
+/// How a border is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BorderLook {
+    /// A plain ring of `width` pixels.
+    #[default]
+    Plain,
+    /// A sheet of torn paper `width` pixels deep around the window, with a soft shadow. It
+    /// stands still: `animate` does nothing with it. `color` and `focus-color` are the paper.
+    Paper,
 }
 
 /// The `border { … }` block: an outline drawn just outside every window that isn't fullscreen.
@@ -804,6 +821,8 @@ pub enum BorderAnimation {
 pub struct Border {
     /// Width in pixels, 0 = no border.
     pub width: i32,
+    /// How the border is drawn.
+    pub look: BorderLook,
     /// Colour of a window that doesn't have the keyboard.
     pub color: [f32; 4],
     /// Colour of the window that has it.
@@ -829,10 +848,11 @@ impl Border {
     }
 
     /// Whether the focused window's border moves at all. It doesn't with `animate none`, a
-    /// period of 0, or a second colour equal to the first (the motion would be invisible), so
-    /// no frames are spent on it then.
+    /// period of 0, a second colour equal to the first (the motion would be invisible), or the
+    /// paper look, so no frames are spent on it then.
     pub fn animated(&self) -> bool {
         self.on()
+            && self.look == BorderLook::Plain
             && self.animate != BorderAnimation::None
             && self.period_ms > 0
             && self.focus_color_2() != self.focus_color
@@ -843,6 +863,7 @@ impl Default for Border {
     fn default() -> Self {
         Self {
             width: 0,
+            look: BorderLook::Plain,
             color: [0.35, 0.35, 0.40, 1.0],
             focus_color: [0.35, 0.55, 0.95, 1.0],
             fade_ms: DEFAULT_BORDER_FADE_MS,
@@ -1209,6 +1230,8 @@ impl Config {
         if border.animate != BorderAnimation::None && !border.animated() {
             let why = if !border.on() {
                 "the border has width 0"
+            } else if border.look == BorderLook::Paper {
+                "a paper border stands still"
             } else if border.period_ms == 0 {
                 "period-ms is 0"
             } else {
@@ -1891,9 +1914,20 @@ fn parse_border(node: &KdlNode) -> anyhow::Result<Border> {
         width: DEFAULT_BORDER_WIDTH,
         ..Border::default()
     };
+    let mut width_given = false;
     for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
         match child.name().value() {
-            "width" => config.width = int_arg(child, MAX_BORDER_WIDTH)?,
+            "width" => {
+                config.width = int_arg(child, MAX_BORDER_WIDTH)?;
+                width_given = true;
+            }
+            "look" => {
+                config.look = match string_arg(child)?.as_str() {
+                    "plain" => BorderLook::Plain,
+                    "paper" => BorderLook::Paper,
+                    other => bail!("look takes \"plain\" or \"paper\", not {other:?}"),
+                }
+            }
             "color" => config.color = parse_color(&string_arg(child)?)?,
             "focus-color" => config.focus_color = parse_color(&string_arg(child)?)?,
             "fade-ms" => config.fade_ms = int_arg(child, MAX_BORDER_FADE_MS)?,
@@ -1903,12 +1937,18 @@ fn parse_border(node: &KdlNode) -> anyhow::Result<Border> {
                     "none" => BorderAnimation::None,
                     "spin" => BorderAnimation::Spin,
                     "sweep" => BorderAnimation::Sweep,
-                    other => bail!("animate takes \"none\", \"spin\" or \"sweep\", not {other:?}"),
+                    "smoke" => BorderAnimation::Smoke,
+                    other => bail!(
+                        "animate takes \"none\", \"spin\", \"sweep\" or \"smoke\", not {other:?}"
+                    ),
                 }
             }
             "period-ms" => config.period_ms = period_arg(child)?,
             other => bail!("unknown border setting {other:?}"),
         }
+    }
+    if config.look == BorderLook::Paper && !width_given {
+        config.width = DEFAULT_PAPER_BORDER_WIDTH;
     }
     Ok(config)
 }

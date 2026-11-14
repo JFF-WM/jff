@@ -426,7 +426,9 @@ fn ring_program(renderer: &mut GlesRenderer) -> Option<GlesPixelProgram> {
                 UniformName::new("color2", UniformType::_4f),
                 UniformName::new("phase", UniformType::_1f),
                 UniformName::new("animated", UniformType::_1f),
-                UniformName::new("sweep", UniformType::_1f),
+                UniformName::new("style", UniformType::_1f),
+                UniformName::new("margin", UniformType::_1f),
+                UniformName::new("paper", UniformType::_1f),
             ],
         )
         .map_err(|err| tracing::warn!("error compiling the outline shader: {err:#}"))
@@ -500,8 +502,32 @@ pub fn ring_area(inner: Rectangle<i32, Logical>, border: i32) -> Rectangle<i32, 
     )
 }
 
-/// The turning part of a ring (window borders only). The default is a ring that stands still,
-/// which is what the overview's outline is.
+/// What a moving ring does, see [`RingMotion`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RingStyle {
+    /// A two-colour gradient that turns around the ring.
+    #[default]
+    Spin,
+    /// A highlight that travels around the ring.
+    Sweep,
+    /// Smoke rising off the ring's outer edge.
+    Smoke,
+}
+
+impl RingStyle {
+    /// The number the shader's `style` is given.
+    fn uniform(self) -> f32 {
+        match self {
+            Self::Spin => 0.0,
+            Self::Sweep => 1.0,
+            Self::Smoke => 2.0,
+        }
+    }
+}
+
+/// The moving part of a ring (window borders only), and the paper look, which is the one thing
+/// besides motion a border can be. The default is a ring that stands still, which is what the
+/// overview's outline is.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RingMotion {
     /// Second colour (straight RGBA).
@@ -510,8 +536,14 @@ pub struct RingMotion {
     pub phase: f32,
     /// How much of the motion shows, 0.0 (none) to 1.0.
     pub amount: f32,
-    /// A travelling highlight instead of a turning gradient.
-    pub sweep: bool,
+    /// What the motion is.
+    pub style: RingStyle,
+    /// Room the element has around the ring, in pixels: smoke and the shadow of paper need
+    /// some. The `area` of the ring has to be grown by it ([`ring_area`] with
+    /// `border + margin`), 0 for the rest.
+    pub margin: i32,
+    /// A sheet of torn paper instead of a plain ring. It stands still, `amount` is 0.
+    pub paper: bool,
 }
 
 /// A new ring element, with its own id: `area` as [`ring_area`] gave it, the rest as in
@@ -545,7 +577,9 @@ pub fn make_ring(
             Uniform::new("color2", motion.color2),
             Uniform::new("phase", motion.phase),
             Uniform::new("animated", motion.amount),
-            Uniform::new("sweep", if motion.sweep { 1.0f32 } else { 0.0 }),
+            Uniform::new("style", motion.style.uniform()),
+            Uniform::new("margin", motion.margin as f32),
+            Uniform::new("paper", if motion.paper { 1.0f32 } else { 0.0 }),
         ],
         Kind::Unspecified,
     ))

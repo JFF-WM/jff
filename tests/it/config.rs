@@ -8,12 +8,13 @@ use smithay::input::keyboard::Keysym;
 use smithay::input::keyboard::ModifiersState;
 
 use jff_wm::config::{
-    closest, edit_distance, parse_color, Action, BorderAnimation, Config, ConfigWatch, FileStamp,
-    HotCorner, KeyboardConfig, LogLevel, ModeRequest, ScreenshotConfig, Vrr,
+    closest, edit_distance, parse_color, Action, BorderAnimation, BorderLook, Config, ConfigWatch,
+    FileStamp, HotCorner, KeyboardConfig, LogLevel, ModeRequest, ScreenshotConfig, Vrr,
     DEFAULT_BORDER_FADE_MS, DEFAULT_BORDER_PERIOD_MS, DEFAULT_BORDER_WIDTH, DEFAULT_CONFIG,
-    DEFAULT_LOG_PATH, DEFAULT_REPEAT_DELAY, DEFAULT_REPEAT_RATE, DEFAULT_SELECTION_COLOR,
-    DEFAULT_SELECTION_WIDTH, DEFAULT_SWITCHER_SLIDE_MS, DEFAULT_WORKSPACES, MAX_BORDER_PERIOD_MS,
-    MAX_BORDER_WIDTH, MAX_GAPS, MAX_RADIUS, TOP_LEVEL_NODES,
+    DEFAULT_LOG_PATH, DEFAULT_PAPER_BORDER_WIDTH, DEFAULT_REPEAT_DELAY, DEFAULT_REPEAT_RATE,
+    DEFAULT_SELECTION_COLOR, DEFAULT_SELECTION_WIDTH, DEFAULT_SWITCHER_SLIDE_MS,
+    DEFAULT_WORKSPACES, MAX_BORDER_PERIOD_MS, MAX_BORDER_WIDTH, MAX_GAPS, MAX_RADIUS,
+    TOP_LEVEL_NODES,
 };
 use jff_wm::config::{ContainerRule, RuleOutput, WindowFacts, WindowMatch};
 use jff_wm::desk::{Goto, Side};
@@ -566,6 +567,33 @@ fn border_animation_is_read() {
     assert_eq!(sweep.animate, BorderAnimation::Sweep);
     assert_eq!(sweep.period_ms, DEFAULT_BORDER_PERIOD_MS);
     assert!(sweep.animated());
+    let smoke = Config::parse("border { animate \"smoke\"; focus-color-2 \"#fff\"; }")
+        .unwrap()
+        .border();
+    assert_eq!(smoke.animate, BorderAnimation::Smoke);
+    assert!(smoke.animated());
+}
+
+#[test]
+fn a_paper_border_is_read_and_stands_still() {
+    let paper = Config::parse("border { look \"paper\"; }")
+        .unwrap()
+        .border();
+    assert_eq!(paper.look, BorderLook::Paper);
+    // Paper needs room to be torn in: a wider default than a plain ring's.
+    assert_eq!(paper.width, DEFAULT_PAPER_BORDER_WIDTH);
+    let wide = Config::parse("border { look \"paper\"; width 20; }")
+        .unwrap()
+        .border();
+    assert_eq!(wide.width, 20);
+    // A plain border is what it was.
+    let plain = Config::parse("border { }").unwrap().border();
+    assert_eq!(plain.look, BorderLook::Plain);
+    assert_eq!(plain.width, DEFAULT_BORDER_WIDTH);
+    // It does not move, whatever `animate` says.
+    let moving = "border { look \"paper\"; animate \"spin\"; focus-color-2 \"#f00\"; }";
+    assert!(!Config::parse(moving).unwrap().border().animated());
+    assert!(Config::parse("border { look \"torn\"; }").is_err());
 }
 
 #[test]

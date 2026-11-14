@@ -41,9 +41,9 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Transform};
 
-use super::rounded::{is_fullscreen, make_ring, ring_area, RingMotion};
+use super::rounded::{is_fullscreen, make_ring, ring_area, RingMotion, RingStyle};
 use super::surface_alpha::window_multiplier;
-use crate::config::{Border, BorderAnimation};
+use crate::config::{Border, BorderAnimation, BorderLook};
 use crate::primitives::alpha;
 use crate::primitives::overview_grid::{ease_out_cubic, progress};
 
@@ -126,6 +126,12 @@ pub fn amount_target(style: &Border, focused: bool) -> f32 {
         0.0
     }
 }
+
+/// Room around a paper border for its shadow, in pixels.
+const PAPER_SHADOW: i32 = 16;
+
+/// How far smoke rises off a window's border, in pixels.
+const SMOKE_REACH: i32 = 56;
 
 /// What a ring was made from: when this is the same, the same element does.
 #[derive(PartialEq)]
@@ -260,18 +266,37 @@ pub fn border_element(
         let amount = fade_amount(state.from_amount, want_amount, elapsed, fade);
         // At rest (no animation, or faded out) the motion is all zeros: the same key frame
         // after frame, so the ring is the same element and costs nothing.
-        let motion = if amount > 0.0 {
+        let motion = if style.look == BorderLook::Paper {
+            // Paper stands still: the same element frame after frame. It needs room for its
+            // shadow.
+            RingMotion {
+                paper: true,
+                margin: PAPER_SHADOW,
+                ..RingMotion::default()
+            }
+        } else if amount > 0.0 {
             RingMotion {
                 color2: alpha::faded(style.focus_color_2(), visible),
                 phase: phase(now.saturating_duration_since(clock_start()), period),
                 amount,
-                sweep: style.animate == BorderAnimation::Sweep,
+                style: match style.animate {
+                    BorderAnimation::Sweep => RingStyle::Sweep,
+                    BorderAnimation::Smoke => RingStyle::Smoke,
+                    _ => RingStyle::Spin,
+                },
+                margin: if style.animate == BorderAnimation::Smoke {
+                    SMOKE_REACH
+                } else {
+                    0
+                },
+                paper: false,
             }
         } else {
             RingMotion::default()
         };
         let key = RingKey {
-            area: ring_area(geo, width),
+            // Smoke, and the shadow of paper, have room around the ring.
+            area: ring_area(geo, width + motion.margin),
             width,
             radius,
             // Faded only here: the fade state above keeps the colours as configured.
@@ -304,8 +329,8 @@ pub fn border_element(
         id: element_id,
         commit,
         inner,
-        edge: width + 1,
-        reach: radius + width + 1,
+        edge: width + 1 + key.motion.margin,
+        reach: radius + width + 1 + key.motion.margin,
     };
     STATES.with(|states| {
         if let Some(state) = states.borrow_mut().get_mut(&id) {
