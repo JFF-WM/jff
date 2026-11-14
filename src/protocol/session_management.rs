@@ -1,6 +1,10 @@
 //! xdg_session_management_v1: apps ask jff to remember where their windows were,
 //! and put them back next time they start.
 //!
+//! The experimental xx_session_management_v1 (same idea, a few requests and events apart) is
+//! offered next to it, because some builds still ask for that one. Both globals share one store
+//! and one set of sessions, [`SessionRes`] and [`ToplevelRes`] stand for either kind of object.
+//!
 //! A session is just an id the app keeps around. Every window it adds has a name,
 //! and jff saves that window's state under the name (see `desk::session_store`) in
 //! a file, so it survives the app and jff restarting. Saved on change, in
@@ -17,9 +21,14 @@ use super::xdg_session_bindings::server::{
     xdg_session_v1::{self, XdgSessionV1},
     xdg_toplevel_session_v1::XdgToplevelSessionV1,
 };
+use super::xx_session_bindings::server::{
+    xx_session_manager_v1::{self, XxSessionManagerV1},
+    xx_session_v1::{self, XxSessionV1},
+    xx_toplevel_session_v1::{self, XxToplevelSessionV1},
+};
 use smithay::desktop::Window;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::XdgToplevel;
-use smithay::reexports::wayland_server::backend::GlobalId;
+use smithay::reexports::wayland_server::backend::{ClientId, GlobalId};
 use smithay::reexports::wayland_server::{
     protocol::wl_surface::WlSurface, Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch,
     New, Resource,
@@ -41,18 +50,105 @@ struct Member {
 struct Live {
     /// Tells this session apart from an older one with the same id (i.e. one that got replaced).
     serial: u64,
-    resource: XdgSessionV1,
+    resource: SessionRes,
     members: Vec<Member>,
 }
 
 /// A window whose state is waiting on the app's first commit.
 struct Pending {
     saved: SavedWindow,
-    resource: XdgToplevelSessionV1,
+    resource: ToplevelRes,
+    /// What `restored` names, for the sessions that send it along.
+    toplevel: XdgToplevel,
+}
+
+const NAME_IN_USE: &str = "name or toplevel already in the session";
+const ALREADY_MAPPED: &str = "restore_toplevel after the first commit";
+
+/// A session object of either protocol.
+#[derive(Clone)]
+enum SessionRes {
+    Xdg(XdgSessionV1),
+    Xx(XxSessionV1),
+}
+
+impl SessionRes {
+    fn is_alive(&self) -> bool {
+        match self {
+            Self::Xdg(s) => s.is_alive(),
+            Self::Xx(s) => s.is_alive(),
+        }
+    }
+
+    fn client_id(&self) -> Option<ClientId> {
+        match self {
+            Self::Xdg(s) => s.client().map(|c| c.id()),
+            Self::Xx(s) => s.client().map(|c| c.id()),
+        }
+    }
+
+    fn replaced(&self) {
+        match self {
+            Self::Xdg(s) => s.replaced(),
+            Self::Xx(s) => s.replaced(),
+        }
+    }
+
+    fn created(&self, id: String) {
+        match self {
+            Self::Xdg(s) => s.created(id),
+            Self::Xx(s) => s.created(id),
+        }
+    }
+
+    fn restored(&self) {
+        match self {
+            Self::Xdg(s) => s.restored(),
+            Self::Xx(s) => s.restored(),
+        }
+    }
+
+    fn name_in_use(&self) {
+        match self {
+            Self::Xdg(s) => s.post_error(xdg_session_v1::Error::NameInUse, NAME_IN_USE),
+            Self::Xx(s) => s.post_error(xx_session_v1::Error::NameInUse, NAME_IN_USE),
+        }
+    }
+
+    fn already_mapped(&self) {
+        match self {
+            Self::Xdg(s) => s.post_error(xdg_session_v1::Error::AlreadyMapped, ALREADY_MAPPED),
+            Self::Xx(s) => s.post_error(xx_session_v1::Error::AlreadyMapped, ALREADY_MAPPED),
+        }
+    }
+}
+
+/// A toplevel session object of either protocol.
+enum ToplevelRes {
+    Xdg(XdgToplevelSessionV1),
+    Xx(XxToplevelSessionV1),
+}
+
+impl ToplevelRes {
+    fn is_alive(&self) -> bool {
+        match self {
+            Self::Xdg(t) => t.is_alive(),
+            Self::Xx(t) => t.is_alive(),
+        }
+    }
+
+    /// The xx version names the toplevel in the event, the xdg one does not.
+    fn restored(&self, toplevel: &XdgToplevel) {
+        match self {
+            Self::Xdg(t) => t.restored(),
+            Self::Xx(t) => t.restored(toplevel),
+        }
+    }
 }
 
 pub struct SessionManagement {
     _global: GlobalId,
+    _xx_global: GlobalId,
     /// What we remember, by session id, including sessions nobody has open.
     store: Store,
     live: HashMap<String, Live>,
@@ -69,6 +165,7 @@ impl SessionManagement {
     pub fn new(display: &DisplayHandle) -> Self {
         Self {
             _global: display.create_global::<JffState, XdgSessionManagerV1, ()>(1, ()),
+            _xx_global: display.create_global::<JffState, XxSessionManagerV1, ()>(1, ()),
             store: session_store::load_store(),
             live: HashMap::new(),
             pending: HashMap::new(),
@@ -86,6 +183,69 @@ impl SessionManagement {
         );
         session_store::save_store(&self.store);
         self.dirty = false;
+    }
+
+    /// The id a `get_session` for `requested` gets, whether something was saved under it, and
+    /// the serial of the new session.
+    fn pick_id(&mut self, requested: Option<String>) -> (String, bool, u64) {
+        // An id nothing was ever saved under is a new session, per the protocol.
+        let known = requested.clone().filter(|id| self.store.contains_key(id));
+        tracing::info!(
+            "xdg-session: get_session known={} stored_sessions={}",
+            known.is_some(),
+            self.store.len()
+        );
+        // Same as KWin: the id the app asks for is the session id, known or not. Handing
+        // back a different id can make the app think it failed and skip adding its windows
+        // entirely (Firefox sends nothing after `created` when that happens).
+        // Only an id some other app currently has open gets a fresh one.
+        let id = match (&known, &requested) {
+            (Some(id), _) => id.clone(),
+            (None, Some(id)) if !id.is_empty() && !self.live.contains_key(id) => id.clone(),
+            _ => session_store::new_session_id(),
+        };
+        self.next_serial += 1;
+        (id, known.is_some(), self.next_serial)
+    }
+
+    /// Make `session` (already created, with `id` and `serial` from [`Self::pick_id`]) the live
+    /// session for `id`. Returns false, changing nothing, when the same client has that
+    /// session open already: the caller raises `in_use`.
+    fn open(
+        &mut self,
+        client: &Client,
+        session: SessionRes,
+        id: String,
+        serial: u64,
+        known: bool,
+    ) -> bool {
+        if let Some(old) = self.live.get(&id) {
+            if old.resource.is_alive() && old.resource.client_id() == Some(client.id()) {
+                return false;
+            }
+            // Another app is taking the session over: the old one's objects go inert.
+            old.resource.replaced();
+        }
+        if let Some(old) = self.live.remove(&id) {
+            for member in old.members {
+                self.pending.remove(&member.surface);
+                self.applied.remove(&member.surface);
+            }
+        }
+        self.live.insert(
+            id.clone(),
+            Live {
+                serial,
+                resource: session.clone(),
+                members: Vec::new(),
+            },
+        );
+        if known {
+            session.restored();
+        } else {
+            session.created(id);
+        }
+        true
     }
 
     /// The session `data` belongs to, unless it was replaced or ended.
@@ -155,6 +315,19 @@ impl GlobalDispatch<XdgSessionManagerV1, ()> for JffState {
     }
 }
 
+impl GlobalDispatch<XxSessionManagerV1, ()> for JffState {
+    fn bind(
+        _state: &mut JffState,
+        _display: &DisplayHandle,
+        _client: &Client,
+        resource: New<XxSessionManagerV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, JffState>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+
 impl Dispatch<XdgSessionManagerV1, ()> for JffState {
     fn request(
         state: &mut JffState,
@@ -176,24 +349,7 @@ impl Dispatch<XdgSessionManagerV1, ()> for JffState {
         };
         // `reason` just says how much to restore. jff restores the same either way.
         let sm = &mut state.session_management;
-        // An id nothing was ever saved under is a new session, per the protocol.
-        let known = session_id.clone().filter(|id| sm.store.contains_key(id));
-        tracing::info!(
-            "xdg-session: get_session known={} stored_sessions={}",
-            known.is_some(),
-            sm.store.len()
-        );
-        // Same as KWin: the id the app asks for is the session id, known or not. Handing
-        // back a different id can make the app think it failed and skip adding its windows
-        // entirely (Firefox sends nothing after `created` when that happens).
-        // Only an id some other app currently has open gets a fresh one.
-        let id = match (&known, &session_id) {
-            (Some(id), _) => id.clone(),
-            (None, Some(id)) if !id.is_empty() && !sm.live.contains_key(id) => id.clone(),
-            _ => session_store::new_session_id(),
-        };
-        sm.next_serial += 1;
-        let serial = sm.next_serial;
+        let (id, known, serial) = sm.pick_id(session_id);
         let session = data_init.init(
             new_session,
             SessionData {
@@ -201,37 +357,58 @@ impl Dispatch<XdgSessionManagerV1, ()> for JffState {
                 serial,
             },
         );
+        if !sm.open(client, SessionRes::Xdg(session), id, serial, known) {
+            resource.post_error(
+                xdg_session_manager_v1::Error::InUse,
+                "session already in use",
+            );
+        }
+    }
+}
 
-        if let Some(old) = sm.live.get(&id) {
-            if old.resource.is_alive() && old.resource.client().map(|c| c.id()) == Some(client.id())
-            {
-                resource.post_error(
-                    xdg_session_manager_v1::Error::InUse,
-                    "session already in use",
-                );
-                return;
-            }
-            // Another app is taking the session over: the old one's objects go inert.
-            old.resource.replaced();
-        }
-        if let Some(old) = sm.live.remove(&id) {
-            for member in old.members {
-                sm.pending.remove(&member.surface);
-                sm.applied.remove(&member.surface);
-            }
-        }
-        sm.live.insert(
-            id.clone(),
-            Live {
+impl Dispatch<XxSessionManagerV1, ()> for JffState {
+    fn request(
+        state: &mut JffState,
+        client: &Client,
+        resource: &XxSessionManagerV1,
+        request: xx_session_manager_v1::Request,
+        _data: &(),
+        _display: &DisplayHandle,
+        data_init: &mut DataInit<'_, JffState>,
+    ) {
+        tracing::info!("xx-session: manager request {request:?}");
+        let xx_session_manager_v1::Request::GetSession {
+            id: new_session,
+            session: session_id,
+            ..
+        } = request
+        else {
+            return; // destroy: sessions stick around
+        };
+        let sm = &mut state.session_management;
+        let (id, known, serial) = sm.pick_id(session_id);
+        let session = data_init.init(
+            new_session,
+            SessionData {
+                id: id.clone(),
                 serial,
-                resource: session.clone(),
-                members: Vec::new(),
             },
         );
-        if known.is_some() {
-            session.restored();
-        } else {
-            session.created(id);
+        if !sm.open(client, SessionRes::Xx(session), id, serial, known) {
+            resource.post_error(
+                xx_session_manager_v1::Error::InUse,
+                "session already in use",
+            );
+        }
+    }
+}
+
+impl ToplevelSessionData {
+    fn of(data: &SessionData, name: &str) -> Self {
+        Self {
+            id: data.id.clone(),
+            serial: data.serial,
+            name: name.to_owned(),
         }
     }
 }
@@ -247,6 +424,7 @@ impl Dispatch<XdgSessionV1, SessionData> for JffState {
         data_init: &mut DataInit<'_, JffState>,
     ) {
         tracing::info!("xdg-session: session {} request {request:?}", data.id);
+        let session = SessionRes::Xdg(resource.clone());
         match request {
             xdg_session_v1::Request::Destroy => state.session_management.end(data, false),
             xdg_session_v1::Request::Remove => {
@@ -254,16 +432,52 @@ impl Dispatch<XdgSessionV1, SessionData> for JffState {
                 state.session_save_if_dirty();
             }
             xdg_session_v1::Request::AddToplevel { id, toplevel, name } => {
-                state.session_add_toplevel(resource, data, id, &toplevel, name, false, data_init);
+                let member = data_init.init(id, ToplevelSessionData::of(data, &name));
+                let member = ToplevelRes::Xdg(member);
+                state.session_add_toplevel(&session, data, member, &toplevel, name, false);
             }
             xdg_session_v1::Request::RestoreToplevel { id, toplevel, name } => {
-                state.session_add_toplevel(resource, data, id, &toplevel, name, true, data_init);
+                let member = data_init.init(id, ToplevelSessionData::of(data, &name));
+                let member = ToplevelRes::Xdg(member);
+                state.session_add_toplevel(&session, data, member, &toplevel, name, true);
             }
             xdg_session_v1::Request::RemoveToplevel { name } => {
                 if state.session_management.current(data).is_some() {
                     state.session_management.remove_member(&data.id, &name);
                     state.session_save_if_dirty();
                 }
+            }
+        }
+    }
+}
+
+impl Dispatch<XxSessionV1, SessionData> for JffState {
+    fn request(
+        state: &mut JffState,
+        _client: &Client,
+        resource: &XxSessionV1,
+        request: xx_session_v1::Request,
+        data: &SessionData,
+        _display: &DisplayHandle,
+        data_init: &mut DataInit<'_, JffState>,
+    ) {
+        tracing::info!("xx-session: session {} request {request:?}", data.id);
+        let session = SessionRes::Xx(resource.clone());
+        match request {
+            xx_session_v1::Request::Destroy => state.session_management.end(data, false),
+            xx_session_v1::Request::Remove => {
+                state.session_management.end(data, true);
+                state.session_save_if_dirty();
+            }
+            xx_session_v1::Request::AddToplevel { id, toplevel, name } => {
+                let member = data_init.init(id, ToplevelSessionData::of(data, &name));
+                let member = ToplevelRes::Xx(member);
+                state.session_add_toplevel(&session, data, member, &toplevel, name, false);
+            }
+            xx_session_v1::Request::RestoreToplevel { id, toplevel, name } => {
+                let member = data_init.init(id, ToplevelSessionData::of(data, &name));
+                let member = ToplevelRes::Xx(member);
+                state.session_add_toplevel(&session, data, member, &toplevel, name, true);
             }
         }
     }
@@ -289,38 +503,54 @@ impl Dispatch<XdgToplevelSessionV1, ToplevelSessionData> for JffState {
         if format!("{request:?}") != "Remove" {
             return;
         }
-        let sm = &mut state.session_management;
+        state.session_remove_member(data);
+    }
+}
+
+impl Dispatch<XxToplevelSessionV1, ToplevelSessionData> for JffState {
+    fn request(
+        state: &mut JffState,
+        _client: &Client,
+        _resource: &XxToplevelSessionV1,
+        request: xx_toplevel_session_v1::Request,
+        data: &ToplevelSessionData,
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, JffState>,
+    ) {
+        tracing::info!(
+            "xx-session: toplevel session {:?} request {request:?}",
+            data.name
+        );
+        // `destroy` just drops this object, the window stays in the session.
+        if let xx_toplevel_session_v1::Request::Remove = request {
+            state.session_remove_member(data);
+        }
+    }
+}
+
+impl JffState {
+    /// A toplevel session object asked to remove its window from the session.
+    fn session_remove_member(&mut self, data: &ToplevelSessionData) {
+        let sm = &mut self.session_management;
         let current = sm
             .live
             .get(&data.id)
             .is_some_and(|live| live.serial == data.serial);
         if current {
             sm.remove_member(&data.id, &data.name);
-            state.session_save_if_dirty();
+            self.session_save_if_dirty();
         }
     }
-}
 
-impl JffState {
-    #[allow(clippy::too_many_arguments)]
     fn session_add_toplevel(
         &mut self,
-        session: &XdgSessionV1,
+        session: &SessionRes,
         data: &SessionData,
-        id: New<XdgToplevelSessionV1>,
+        member: ToplevelRes,
         toplevel: &XdgToplevel,
         name: String,
         restore: bool,
-        data_init: &mut DataInit<'_, JffState>,
     ) {
-        let member = data_init.init(
-            id,
-            ToplevelSessionData {
-                id: data.id.clone(),
-                serial: data.serial,
-                name: name.clone(),
-            },
-        );
         let Some(surface) = self
             .xdg_shell_state
             .get_toplevel(toplevel)
@@ -339,10 +569,7 @@ impl JffState {
             .iter()
             .any(|m| m.name == name || m.surface == surface)
         {
-            session.post_error(
-                xdg_session_v1::Error::NameInUse,
-                "name or toplevel already in the session",
-            );
+            session.name_in_use();
             return;
         }
         live.members.push(Member {
@@ -353,10 +580,7 @@ impl JffState {
             return;
         }
         if mapped {
-            session.post_error(
-                xdg_session_v1::Error::AlreadyMapped,
-                "restore_toplevel after the first commit",
-            );
+            session.already_mapped();
             return;
         }
         let saved = sm.store.get(&data.id).and_then(|w| w.get(&name)).cloned();
@@ -366,6 +590,7 @@ impl JffState {
                 Pending {
                     saved,
                     resource: member,
+                    toplevel: toplevel.clone(),
                 },
             );
         }
@@ -438,7 +663,7 @@ impl JffState {
             toplevel.with_pending_state(|state| state.size = Some(saved.size.into()));
         }
         // Before the first configure, per the protocol.
-        pending.resource.restored();
+        pending.resource.restored(&pending.toplevel);
         self.session_management
             .applied
             .insert(surface.clone(), saved);

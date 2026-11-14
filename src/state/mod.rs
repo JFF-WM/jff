@@ -2077,7 +2077,12 @@ pub fn configure_mode(
             state.size = Some((w, h).into());
         }
     });
-    toplevel.send_pending_configure();
+    // Before the app's first commit the state only waits: the first configure is sent on that
+    // commit (`send_initial_configure`), after a `restore_toplevel` has had its say. Sending
+    // one now would end that, and make the window look mapped to its session.
+    if toplevel.is_initial_configure_sent() {
+        toplevel.send_pending_configure();
+    }
 }
 
 /// Tell a member of a tiling container the rectangle the tree gave it: its size, and the tiled
