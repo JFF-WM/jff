@@ -1882,6 +1882,12 @@ impl JffState {
             if self.set_member_mode(&window, target) {
                 return;
             }
+            // Snapping starts a container that fills the usable area (with `tiling-containers`).
+            if let WindowMode::Snapped(side) = target {
+                if self.snap_as_container(&window, side) {
+                    return;
+                }
+            }
         }
         let size = self
             .desk

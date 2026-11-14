@@ -489,13 +489,19 @@ impl JffState {
     /// floating window let go there. Over a window of a container, its own or another, it goes
     /// there: the middle of that window swaps the two, an edge puts it beside on that side (see
     /// [`leaf_drop`]), and both containers are laid out again. Anywhere else (off every
-    /// container, on another workspace's) it leaves its container and floats. Over the gap
+    /// container, on another workspace's) it leaves its container and is maximized. Over the gap
     /// between two windows nothing happens.
     pub fn finish_tile_move(&mut self, window: &Window, at: Point<f64, Logical>) {
         let Some(from) = self.desk.container_of(|w| w == window) else {
             return;
         };
         if let Some(mode) = self.edge_drop_mode(at) {
+            // Dragged to the edge that snaps: the container is over, every window of it goes
+            // back to the stack, maximized.
+            if matches!(mode, WindowMode::Snapped(_)) {
+                self.dissolve_container(from, window);
+                return;
+            }
             if let Some(floating) = self.eject_from_container(window, at) {
                 if let Some(toplevel) = window.toplevel() {
                     self.set_mode(toplevel, mode);
@@ -508,7 +514,15 @@ impl JffState {
         let point = (at.x, at.y);
         let gap = self.config.snap_gap();
         let Some(id) = self.desk.container_at(point) else {
-            self.eject_from_container(window, at);
+            // Carried out of every container: it leaves its own and is maximized, on the
+            // monitor it was put down on.
+            if let Some(floating) = self.eject_from_container(window, at) {
+                if let Some(toplevel) = window.toplevel() {
+                    self.set_mode(toplevel, WindowMode::Maximized);
+                }
+                // It goes back to the size it was given on leaving, not the size of its tile.
+                self.desk.set_restore_where(|w| w == window, floating);
+            }
             return;
         };
         let Some((target, rect)) = self.desk.drop_target(id, point, gap) else {
@@ -527,6 +541,33 @@ impl JffState {
             self.retile_container(from);
         }
         self.focus_window(window);
+    }
+
+    /// Take container `id` apart: every member leaves it and is maximized, stacked on top of
+    /// the others, and the container is gone. `keep` (the window the user carried) goes on top
+    /// and has the keyboard. A fullscreen member stays fullscreen.
+    fn dissolve_container(&mut self, id: ContainerId, keep: &Window) {
+        let members: Vec<Window> = self
+            .desk
+            .members(id)
+            .iter()
+            .map(|entry| entry.window.clone())
+            .collect();
+        let others = members.iter().filter(|w| *w != keep);
+        let carried = members.iter().filter(|w| *w == keep);
+        for window in others.chain(carried) {
+            if !self.desk.leave_container(|w| w == window) {
+                continue;
+            }
+            if self.desk.mode_of(|w| w == window) == WindowMode::Fullscreen {
+                continue;
+            }
+            if let Some(toplevel) = window.toplevel() {
+                self.set_mode(toplevel, WindowMode::Maximized);
+            }
+        }
+        self.focus_window(keep);
+        tracing::info!("container {} dissolved", id.get());
     }
 
     /// `container-eject`: take the focused window out of its container.
@@ -573,6 +614,93 @@ impl JffState {
         self.focus_window(window);
         tracing::info!("window left container {}", from.get());
         Some((new_pos, new_size))
+    }
+
+    /// The rectangle a container started by a snap fills: the usable area of `monitor`, the same
+    /// as any other container.
+    fn snapped_area(&self, monitor: Rect) -> Rect {
+        geom::inset_rect(self.panel_free_rect(monitor), self.config.maximize_inset())
+    }
+
+    /// `window` is snapped to `side` (a drag to the edge of the monitor, `snap-*` binds): with
+    /// `tiling-containers` on it starts a container of its own that fills the monitor's usable
+    /// area, tiled together with every other window of the workspace on that monitor, and
+    /// windows dropped on it or opened from it join it from then on. Returns
+    /// true when it did. Returns false, having changed nothing, when it does not, and the
+    /// caller snaps the window as usual: `tiling-containers` is off, the window is in a
+    /// container already or fullscreen, or a `window-rule` keeps it `floating`.
+    pub(crate) fn snap_as_container(&mut self, window: &Window, side: Side) -> bool {
+        if !self.config.tiling_containers() || self.floats_by_rule(window) {
+            return false;
+        }
+        let Some((pos, size)) = self
+            .desk
+            .find_by(|w| w == window)
+            .filter(|e| e.container.is_none() && e.mode != WindowMode::Fullscreen)
+            .map(|e| (e.pos, e.window.geometry().size))
+        else {
+            return false;
+        };
+        let monitor = self.rect_for_window(pos, (size.w, size.h));
+        let area = self.snapped_area(monitor);
+        let name = self
+            .with_facts(window, |facts| {
+                self.config.container_name_for(facts).map(str::to_owned)
+            })
+            .flatten();
+        // Every other window of the workspace on the same monitor is tiled with it, topmost
+        // first: the ones that are in no container, not fullscreen, and that no `window-rule`
+        // keeps floating.
+        let rects = self.output_rects();
+        let monitor_index = layout::nearest(layout::center(pos, (size.w, size.h)), &rects);
+        let others: Vec<Window> = self
+            .desk
+            .top_down()
+            .filter(|e| {
+                e.window != *window && e.container.is_none() && e.mode != WindowMode::Fullscreen
+            })
+            .filter(|e| {
+                let size = e.window.geometry().size;
+                layout::nearest(layout::center(e.pos, (size.w, size.h)), &rects) == monitor_index
+            })
+            .filter(|e| !self.floats_by_rule(&e.window))
+            .map(|e| e.window.clone())
+            .collect();
+        // The first one goes on the side opposite to the snap, the rest split the window that
+        // joined last, along its longer side.
+        let created = match others.first() {
+            Some(first) => {
+                self.desk
+                    .create_container_beside(|w| w == window, |w| w == first, side, name)
+            }
+            None => self.desk.create_container(|w| w == window, name),
+        };
+        let id = match created {
+            Ok(id) => id,
+            Err(err) => {
+                tracing::warn!("could not start a container: {err:?}");
+                return false;
+            }
+        };
+        let gap = self.config.snap_gap();
+        for other in others.iter().skip(1) {
+            if let Err(err) = self.desk.join_container(id, None, |w| w == other, gap) {
+                tracing::warn!("could not add a window to the container: {err:?}");
+            }
+        }
+        // A member does not float, snap or maximize: its place comes from the tree.
+        self.desk.float_in_place_where(|w| w == window);
+        for other in &others {
+            self.desk.float_in_place_where(|w| w == other);
+        }
+        // The snapped window keeps the focus inside the container, as it has the keyboard.
+        self.desk.set_container_focus(|w| w == window);
+        self.tile_and_configure(id, area);
+        tracing::info!(
+            "container {} started by a window snapped {side:?}",
+            id.get()
+        );
+        true
     }
 
     /// Lay container `id` out in `area` and tell every member its rectangle.
