@@ -141,6 +141,10 @@ impl JffState {
 
         let layout = self.layout_focus();
         self.focused_window.clone_from(&layout);
+        // The window in a container that has the focus is the one `container-next` goes on from.
+        if let Some(window) = &layout {
+            self.desk.set_container_focus(|w| w == window);
+        }
 
         let focus = self.compute_keyboard_focus(layout.as_ref());
         // While the overview owns the keyboard, no window is "active": a window must not claim

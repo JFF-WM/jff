@@ -11,6 +11,10 @@
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
+//! `tiling-containers` turns on tiling containers (groups of windows that tile among themselves, see `desk::container`), and is off by default. It accepts a bare name or `#true` / `#false`.
+//! `container-rule { match app-id="…", title="…", tag="…"; name "…" }` (any number, the `match` lines all have to hold, the first rule that fits a window gives the container its name): a rule does not create a container, it names the one the user creates, from the first window that fits. `name` is its only action, `jff check-config` warns about a rule without one, and any other key inside it is an error.
+//! `binds` has five actions for containers: `focus-container "NAME"` focuses the first container with that name on the current workspace (an error toast when there is none), `container-next` and `container-prev` move the focus to the next or previous window of the focused window's container in tree order, wrapping, and do nothing for a window that is in no container. `maximize` on a window of a container makes it fill the container's rectangle, the others stay under it, and `maximize` again (or the window closing) shows the tree again. A window that closes leaves the tree, and the others take its room. `container-drag` picks up the focused window of a container with the pointer: the next left click puts it down (a right click cancels), over another window of a container the middle swaps the two places and an edge puts it beside that window, at the edge of the monitor or off every container it leaves the container and snaps, maximizes or floats as any dropped window does. Dragging a window of a container by its titlebar or with `drag-modifier` does the same. `container-eject` takes the focused window out of its container and floats it. Both do nothing for a window that is in no container.
+//!
 //! `color-management { … }` (`off`: jff does not offer wp-color-management and draws every
 //! surface as it always did, `convert-srgb`: surfaces with no color description, which are sRGB,
 //! are converted to the monitor's colors too, which is what stops them looking oversaturated on a
@@ -153,6 +157,8 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "sh-autostart",
     "outputs",
     "window-rule",
+    "tiling-containers",
+    "container-rule",
     "color-representation",
     "color-management",
     "binds",
@@ -194,6 +200,21 @@ pub enum Action {
     ScreenshotWindow,
     /// Toggle the keyboard-shortcuts inhibitor of the focused window.
     ToggleShortcutsInhibit,
+    /// Focus the first tiling container with this name on the current workspace, or show an
+    /// error toast when there is none (`focus-container "Terminals"`).
+    FocusContainer(String),
+    /// Focus the next (or previous) window of the focused window's tiling container, in tree
+    /// order, wrapping. Does nothing for a window that is in no container.
+    ContainerStep { backwards: bool },
+    /// Pick up the focused window of a tiling container with the pointer: it follows the
+    /// pointer, the next left click puts it down, a right click cancels. Over a window of a
+    /// container it goes there (the middle swaps places, an edge puts it beside that window), at
+    /// the edge of the monitor or off every container it leaves its container and floats, snaps
+    /// or maximizes as a dropped window does. Does nothing for a window that is in no container.
+    ContainerDrag,
+    /// Take the focused window out of its tiling container: it floats where it was, the others
+    /// take its room. Does nothing for a window that is in no container.
+    ContainerEject,
     /// Hand the key (press and release) to the window with this app id, wherever it is and
     /// whatever has the keyboard, so an app's own global hotkey works (`forward-key "com.obsproject.Studio"`).
     ForwardKey(String),
@@ -931,13 +952,7 @@ pub struct WindowRule {
 impl WindowRule {
     /// Whether every `match` line holds for `window`.
     pub fn matches(&self, window: &WindowFacts<'_>) -> bool {
-        self.matches.iter().all(|condition| match condition {
-            WindowMatch::AppId(id) => window.app_id == id.as_str(),
-            WindowMatch::Title(text) => window.title.contains(text.as_str()),
-            WindowMatch::Tag(tag) => window.tag == Some(tag.as_str()),
-            WindowMatch::Dialog(want) => window.dialog == *want,
-            WindowMatch::Restored(want) => window.restored == *want,
-        })
+        all_hold(&self.matches, window)
     }
 
     /// Whether the rule says how the window's mode or size starts: then the window is not
@@ -952,8 +967,38 @@ impl WindowRule {
     }
 }
 
+/// Whether every condition holds for `window`. No conditions: it holds for every window.
+fn all_hold(conditions: &[WindowMatch], window: &WindowFacts<'_>) -> bool {
+    conditions.iter().all(|condition| match condition {
+        WindowMatch::AppId(id) => window.app_id == id.as_str(),
+        WindowMatch::Title(text) => window.title.contains(text.as_str()),
+        WindowMatch::Tag(tag) => window.tag == Some(tag.as_str()),
+        WindowMatch::Dialog(want) => window.dialog == *want,
+        WindowMatch::Restored(want) => window.restored == *want,
+    })
+}
+
 /// The largest side `open-size` takes.
 pub const MAX_RULE_SIZE: i32 = 16384;
+
+/// A `container-rule { match …, name "…" }` block. It does not create a container: it names the
+/// one the user creates, from the first window that fits. A rule without `match` lines fits
+/// every window.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContainerRule {
+    /// Only `app-id`, `title` and `tag` lines: a container is named for what its window is, not
+    /// for how it opened.
+    pub matches: Vec<WindowMatch>,
+    /// `name`: what the container is called. A rule without one does nothing.
+    pub name: Option<String>,
+}
+
+impl ContainerRule {
+    /// Whether every `match` line holds for `window`.
+    pub fn matches(&self, window: &WindowFacts<'_>) -> bool {
+        all_hold(&self.matches, window)
+    }
+}
 
 /// The parsed configuration.
 #[derive(Clone, Debug)]
@@ -996,6 +1041,10 @@ pub struct Config {
     autostart: Vec<Action>,
     /// `window-rule` blocks, in file order.
     window_rules: Vec<WindowRule>,
+    /// `tiling-containers`: windows can be grouped in tiling containers. Off by default.
+    tiling_containers: bool,
+    /// `container-rule` blocks, in file order.
+    container_rules: Vec<ContainerRule>,
     /// `color-representation { yuv }`: draw YUV buffers with the matrix and range the client
     /// declared (wp-color-representation).
     color_representation_yuv: bool,
@@ -1047,6 +1096,8 @@ impl Default for Config {
                 hot_corner: None,
                 autostart: Vec::new(),
                 window_rules: Vec::new(),
+                tiling_containers: false,
+                container_rules: Vec::new(),
                 color_representation_yuv: false,
                 color_management: ColorManagementConfig::default(),
             }
@@ -1149,6 +1200,14 @@ impl Config {
                 warnings.push(format!(
                     "window-rule {n} matches restored windows, which keep their saved monitor, \
                      size and mode: only open-workspace applies"
+                ));
+            }
+        }
+        for (i, rule) in config.container_rules().iter().enumerate() {
+            if rule.name.is_none() {
+                warnings.push(format!(
+                    "container-rule {} has no name, it does nothing",
+                    i + 1
                 ));
             }
         }
@@ -1326,6 +1385,17 @@ impl Config {
             }
         }
 
+        let tiling_containers = parse_flag(&doc, "tiling-containers", false)?;
+        let mut container_rules = Vec::new();
+        for node in doc.nodes() {
+            if node.name().value() == "container-rule" {
+                let n = container_rules.len() + 1;
+                container_rules.push(
+                    parse_container_rule(node).with_context(|| format!("in container-rule {n}"))?,
+                );
+            }
+        }
+
         Ok(Self {
             keyboard,
             binds,
@@ -1354,6 +1424,8 @@ impl Config {
             hot_corner,
             autostart,
             window_rules,
+            tiling_containers,
+            container_rules,
             color_representation_yuv,
             color_management,
         })
@@ -1461,6 +1533,26 @@ impl Config {
     /// The rule a window gets: the first one whose `match` lines all hold.
     pub fn window_rule_for(&self, window: &WindowFacts<'_>) -> Option<&WindowRule> {
         self.window_rules.iter().find(|rule| rule.matches(window))
+    }
+
+    /// Whether windows can be grouped in tiling containers (`tiling-containers`, off by default).
+    pub fn tiling_containers(&self) -> bool {
+        self.tiling_containers
+    }
+
+    /// The `container-rule` blocks, in file order.
+    pub fn container_rules(&self) -> &[ContainerRule] {
+        &self.container_rules
+    }
+
+    /// The name a container gets for `window`, the first one it fits: the first rule whose
+    /// `match` lines all hold and that has a `name`. `None` when no rule gives one. A rule with
+    /// no name does nothing, so it does not hide a later one.
+    pub fn container_name_for(&self, window: &WindowFacts<'_>) -> Option<&str> {
+        self.container_rules
+            .iter()
+            .filter(|rule| rule.matches(window))
+            .find_map(|rule| rule.name.as_deref())
     }
 
     /// The screenshot block.
@@ -1958,6 +2050,39 @@ fn parse_window_rule(node: &KdlNode) -> anyhow::Result<WindowRule> {
     Ok(rule)
 }
 
+/// A `container-rule` block: `match` lines, then `name`.
+fn parse_container_rule(node: &KdlNode) -> anyhow::Result<ContainerRule> {
+    if !node.entries().is_empty() {
+        bail!("container-rule takes a block, not arguments");
+    }
+    let mut rule = ContainerRule::default();
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "match" => {
+                parse_window_match(child, &mut rule.matches)?;
+                if let Some(other) = rule.matches.iter().find(|condition| {
+                    matches!(condition, WindowMatch::Dialog(_) | WindowMatch::Restored(_))
+                }) {
+                    let key = match other {
+                        WindowMatch::Dialog(_) => "dialog",
+                        _ => "restored",
+                    };
+                    bail!("container-rule cannot match {key}: use app-id, title or tag");
+                }
+            }
+            "name" => {
+                let name = string_arg(child)?;
+                if name.is_empty() {
+                    bail!("name takes a name for the container, not an empty string");
+                }
+                rule.name = Some(name);
+            }
+            other => bail!("unknown container-rule setting {other:?}"),
+        }
+    }
+    Ok(rule)
+}
+
 /// One `match` line: `key=value` pairs, all of which have to hold.
 fn parse_window_match(node: &KdlNode, out: &mut Vec<WindowMatch>) -> anyhow::Result<()> {
     if !positional(node).is_empty() {
@@ -2378,6 +2503,16 @@ fn parse_action(node: &KdlNode) -> anyhow::Result<Action> {
             Ok([app_id]) if !app_id.is_empty() => Ok(Action::ForwardKey(app_id)),
             _ => bail!("forward-key takes one app id, like forward-key \"com.obsproject.Studio\""),
         },
+        "focus-container" => match <[String; 1]>::try_from(args) {
+            Ok([name]) if !name.is_empty() => Ok(Action::FocusContainer(name)),
+            _ => bail!(
+                "focus-container takes one container name, like focus-container \"Terminals\""
+            ),
+        },
+        "container-next" => no_args(Action::ContainerStep { backwards: false }),
+        "container-prev" => no_args(Action::ContainerStep { backwards: true }),
+        "container-drag" => no_args(Action::ContainerDrag),
+        "container-eject" => no_args(Action::ContainerEject),
         "quit" => no_args(Action::Quit),
         other => bail!("unknown action {other:?}"),
     }

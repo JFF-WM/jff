@@ -157,6 +157,12 @@ pub struct JffState {
     /// centred for and where they were put. Apps often show a small window first and grow it to
     /// its real size right after, so they are centred again while that goes on.
     pub settling_dialogs: HashMap<WlSurface, (Instant, (i32, i32), (i32, i32))>,
+    /// With `tiling-containers`: the window that had the keyboard when a toplevel was created,
+    /// for as long as the toplevel has not shown. The new window takes the keyboard itself at
+    /// once, so when it first shows this is what tells which window it was opened from (see
+    /// `join_container_on_map`). Only there when a window had it, and not when the overview was
+    /// open or the session locked.
+    pub focus_before_open: HashMap<WlSurface, Window>,
     /// xdg-decoration: lets `no-client-decorations` ask apps to leave out their titlebar.
     #[allow(dead_code)]
     pub xdg_decoration_state: XdgDecorationState,
@@ -574,6 +580,7 @@ impl JffState {
             xdg_dialog_state,
             dialog_toplevels: HashSet::new(),
             settling_dialogs: HashMap::new(),
+            focus_before_open: HashMap::new(),
             xdg_decoration_state,
             shm_state,
             output_manager_state,
@@ -1230,6 +1237,16 @@ impl XdgShellHandler for JffState {
         let pos = (cascade.0 + placed_rect.0, cascade.1 + placed_rect.1);
         self.desk.set_pos_where(|w| *w == window, pos);
         tracing::info!("new toplevel at {pos:?}");
+        // Where the keyboard was before the new window takes it: a container that has it may
+        // take the window in when it shows.
+        if self.config.tiling_containers() && !self.overview_active() && !self.session_locked() {
+            if let Some(before) = self.focused_window() {
+                let root = window.toplevel().map(|t| t.wl_surface().clone());
+                if let Some(root) = root {
+                    self.focus_before_open.insert(root, before);
+                }
+            }
+        }
         // New windows take focus so you can type into them straight away. With the overview
         // open that can't happen (the overview owns the keyboard), so a helper window such as
         // wl-clipboard's would wait for focus forever and block the client that spawned it
@@ -1248,14 +1265,19 @@ impl XdgShellHandler for JffState {
         let closing = self
             .desk
             .find_by(|w| w.toplevel().map(|t| t == &surface).unwrap_or(false))
-            .map(|e| (e.window.clone(), e.pos, e.workspace));
-        if let Some((window, pos, workspace)) = closing {
-            self.start_close_fade(&window, pos, workspace);
+            .map(|e| (e.window.clone(), e.pos, e.workspace, e.container));
+        if let Some((window, pos, workspace, _)) = &closing {
+            self.start_close_fade(window, *pos, *workspace);
         }
         self.desk
             .remove_where(|w| w.toplevel().map(|t| t == &surface).unwrap_or(false));
+        // The tree closed up around it: the others take its room.
+        if let Some((window, _, _, Some(container))) = &closing {
+            self.container_after_close(*container, window);
+        }
         self.dialog_toplevels.remove(surface.wl_surface());
         self.settling_dialogs.remove(surface.wl_surface());
+        self.focus_before_open.remove(surface.wl_surface());
         self.toplevel_drag_gone(surface.wl_surface());
         self.zones_toplevel_gone(surface.wl_surface());
     }
@@ -1309,6 +1331,17 @@ impl XdgShellHandler for JffState {
             return;
         };
         let wl_surface = surface.wl_surface();
+        // A member of a container moves the divider of its tree instead.
+        if let Some(window) = self
+            .desk
+            .find_by(|w| is_window_for(w, wl_surface))
+            .map(|e| e.window.clone())
+        {
+            let edges = crate::input::grabs::resize::edges_from(edges);
+            if self.start_member_resize(&window, start_data.clone(), edges, serial) {
+                return;
+            }
+        }
         if !self.desk.is_floating(|w| is_window_for(w, wl_surface)) {
             return;
         }
@@ -1557,6 +1590,16 @@ impl JffState {
         // The zone has a monitor already.
         if let (true, Some(rule)) = (zoned, rule.as_mut()) {
             rule.output = None;
+        }
+        // `tiling-containers`: whatever opens while a container has the keyboard joins its
+        // layout (a dialog, a restored window, one a rule keeps floating too), and then the
+        // container decides its place and size, not a rule or `maximize-new-windows`.
+        let window = self
+            .desk
+            .find_by(|w| is_window_for(w, root))
+            .map(|entry| entry.window.clone());
+        if window.is_some_and(|window| self.join_container_on_map(&window)) {
+            return;
         }
         if let Some(saved) = restored.as_ref() {
             // A restored window keeps the monitor, size and mode its session saved. A rule only
@@ -1834,6 +1877,12 @@ impl JffState {
     pub fn set_mode(&mut self, surface: &ToplevelSurface, target: WindowMode) {
         let wl_surface = surface.wl_surface();
         let is_this = |w: &Window| is_window_for(w, wl_surface);
+        // A member of a container is placed by its tree: maximize fills the container.
+        if let Some(window) = self.desk.find_by(is_this).map(|e| e.window.clone()) {
+            if self.set_member_mode(&window, target) {
+                return;
+            }
+        }
         let size = self
             .desk
             .find_by(is_this)
@@ -1856,6 +1905,10 @@ impl JffState {
             };
             self.desk
                 .set_mode_where(is_this, target, (x, y), (size.w, size.h));
+            // A fullscreen member covers its container too: on top of the other members.
+            if target == WindowMode::Fullscreen && self.desk.container_of(is_this).is_some() {
+                self.desk.raise_where(is_this);
+            }
             Some((w, h))
         };
         let keep_maximized = self
@@ -2017,6 +2070,32 @@ pub fn configure_mode(
         if let Some((w, h)) = size {
             state.size = Some((w, h).into());
         }
+    });
+    toplevel.send_pending_configure();
+}
+
+/// Tell a member of a tiling container the rectangle the tree gave it: its size, and the tiled
+/// states on all four edges, so it drops the shadow and the rounded corners it would draw
+/// around a floating window. Not maximized, not fullscreen.
+pub fn configure_tiled(toplevel: &ToplevelSurface, size: (i32, i32)) {
+    configure_member(toplevel, size, false);
+}
+
+/// [`configure_tiled`] for a member that is maximized inside its container: it is told it is
+/// maximized (`maximized`) as well, and the size is the container's whole area.
+pub fn configure_member(toplevel: &ToplevelSurface, size: (i32, i32), maximized: bool) {
+    use xdg_toplevel::State as S;
+    toplevel.with_pending_state(|state| {
+        if maximized {
+            state.states.set(S::Maximized);
+        } else {
+            state.states.unset(S::Maximized);
+        }
+        state.states.unset(S::Fullscreen);
+        for flag in [S::TiledLeft, S::TiledRight, S::TiledTop, S::TiledBottom] {
+            state.states.set(flag);
+        }
+        state.size = Some(size.into());
     });
     toplevel.send_pending_configure();
 }

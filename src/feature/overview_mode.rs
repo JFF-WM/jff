@@ -57,7 +57,7 @@ use smithay::utils::{
 use smithay::wayland::shell::wlr_layer::Layer;
 
 use crate::config;
-use crate::desk::WindowMode;
+use crate::desk::{ContainerId, WindowMode};
 use crate::feature::osd::{
     draw_text, half_line, text_width, toplevel_names, Fonts, Picture, Pixel, SHADOW,
 };
@@ -65,6 +65,7 @@ use crate::feature::outputs::output_rect;
 use crate::feature::overview_search::{self as search_ui, Row};
 use crate::input::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use crate::primitives::app_search::{self as apps, DesktopEntry, Pick, Query};
+use crate::primitives::container_view;
 use crate::primitives::geom::Size;
 use crate::primitives::layout::{self, Rect};
 use crate::primitives::overview_grid::{self as overview, Dir, Held, Thumb};
@@ -286,9 +287,43 @@ impl Carry {
 /// A thumbnail being carried by the pointer.
 struct Drag {
     window: Window,
-    /// Where the pointer grabbed it, as fractions of width and height.
+    /// Where the pointer grabbed it, as fractions of width and height. Of the container's cell
+    /// when `container` is set.
     anchor: (f64, f64),
+    /// Set when the window is a member of a container: the whole container, every window of it,
+    /// is what is being carried.
+    container: Option<ContainerId>,
 }
+
+/// A tiling container as the overview shows it: one cell of the grid with its windows inside.
+struct Group {
+    id: ContainerId,
+    /// The name above the cell: the container's name or its first window's app id.
+    label: String,
+    /// The container's rectangle in the real space, border not included.
+    area: Rect,
+    /// Its windows in tree order, each with where it really is.
+    leaves: Vec<(Window, Rect)>,
+    /// The window a click on the cell (and not on a window in it) selects.
+    focused: Window,
+}
+
+/// A container's cell for one frame of the overview, in the shared space.
+struct CellPlan {
+    rect: Rect,
+    /// The painted name and where it goes. `None` while the font loads, or with nothing to say.
+    label: Option<(MemoryRenderBuffer, Point<i32, Logical>)>,
+    /// Stable id of the cell's fill.
+    id: Id,
+}
+
+/// Fill of a container's cell (premultiplied) and the colour of its outline (straight alpha).
+const CELL_FILL: [f32; 4] = [0.05, 0.06, 0.10, 0.40];
+const CELL_OUTLINE: [f32; 4] = [0.75, 0.78, 0.88, 0.60];
+/// Width of the outline of a cell.
+const CELL_OUTLINE_WIDTH: i32 = 2;
+/// Most names remembered painted.
+const MAX_CELL_LABELS: usize = 32;
 
 /// The overview, while open or animating closed.
 pub struct Overview {
@@ -322,6 +357,10 @@ pub struct Overview {
     highlight: Id,
     /// Stable ids of the fills of the workspace wall's squares, one per square.
     wall_ids: Vec<Id>,
+    /// Stable ids of the fills of the containers' cells, one per cell.
+    cell_ids: Vec<Id>,
+    /// The painted names of the containers' cells by text and text size, with their size.
+    cell_labels: HashMap<(String, i32), (MemoryRenderBuffer, (i32, i32))>,
     /// The painted number of each square of the wall: the text size it was painted at, the
     /// buffer, and its size. Painted again only when the size changes.
     wall_labels: Vec<Option<(i32, MemoryRenderBuffer, (i32, i32))>>,
@@ -389,6 +428,13 @@ pub struct OverviewPlan {
     pub selected: Option<usize>,
     /// Index into `thumbs` of the dragged thumbnail (drawn on top).
     pub dragged: Option<usize>,
+    /// Indexes into `thumbs` of the other windows of the container being dragged, drawn right
+    /// behind `dragged`. Empty when a single window is.
+    dragged_with: Vec<usize>,
+    /// The cells of the containers, behind their windows.
+    cells: Vec<CellPlan>,
+    /// How far the cells are shown, 0.0 to 1.0, with the open and close animation.
+    cell_alpha: f32,
     /// Corner radius of windows (the `radius` setting), thumbnails get it shrunk with them.
     pub radius: i32,
     /// Which windows get blur (`blur { ignore-window / only-window }`).
@@ -642,11 +688,17 @@ pub fn overview_elements(
     }
 
     // The dragged thumbnail sits in front of the rest, the workspace wall right behind it.
-    let order = plan
+    // A carried container brings all its windows along, in front.
+    let front: Vec<usize> = plan
         .dragged
         .into_iter()
-        .chain((0..plan.thumbs.len()).filter(|i| Some(*i) != plan.dragged));
-    let wall_at = usize::from(plan.dragged.is_some());
+        .chain(plan.dragged_with.iter().copied())
+        .collect();
+    let order = front
+        .iter()
+        .copied()
+        .chain((0..plan.thumbs.len()).filter(|i| !front.contains(i)));
+    let wall_at = front.len();
     for (n, i) in order.enumerate() {
         if n == wall_at {
             wall_elements(renderer, plan, origin, &mut out);
@@ -668,6 +720,8 @@ pub fn overview_elements(
     if plan.thumbs.len() <= wall_at {
         wall_elements(renderer, plan, origin, &mut out);
     }
+
+    cell_elements(renderer, plan, origin, &mut out);
 
     // The highlight is pushed last so it's drawn behind: only its rim shows. It is a rounded
     // outline following the thumbnail's corners (`radius` shrunk with the thumbnail, fullscreen
@@ -716,6 +770,66 @@ pub fn overview_elements(
         }
     }
     out
+}
+
+/// The cells of the containers: the name in front, then the outline, then the fill, all behind
+/// the windows in the cell and fading in with the overview. Nothing without containers.
+fn cell_elements(
+    renderer: &mut GlesRenderer,
+    plan: &OverviewPlan,
+    origin: Point<i32, Logical>,
+    out: &mut Vec<JffElement>,
+) {
+    if plan.cells.is_empty() || plan.cell_alpha <= 0.01 {
+        return;
+    }
+    let alpha = plan.cell_alpha.clamp(0.0, 1.0);
+    let radius = plan.radius / 2;
+    for cell in &plan.cells {
+        let local = Rectangle::<i32, Logical>::new(
+            (cell.rect.0 - origin.x, cell.rect.1 - origin.y).into(),
+            (cell.rect.2, cell.rect.3).into(),
+        );
+        if let Some((buffer, pos)) = &cell.label {
+            let loc: Point<f64, Physical> =
+                (f64::from(pos.x - origin.x), f64::from(pos.y - origin.y)).into();
+            match MemoryRenderBufferRenderElement::from_buffer(
+                &mut *renderer,
+                loc,
+                buffer,
+                Some(alpha),
+                None,
+                None,
+                Kind::Unspecified,
+            ) {
+                Ok(element) => out.push(JffElement::Memory(element)),
+                Err(err) => tracing::warn!("error drawing a container's name: {err:?}"),
+            }
+        }
+        let [r, g, b, a] = CELL_OUTLINE;
+        if let Some(ring) = ring_element(
+            renderer,
+            local,
+            CELL_OUTLINE_WIDTH,
+            radius,
+            [r, g, b, a * alpha],
+        ) {
+            out.push(JffElement::Ring(ring));
+        }
+        let [r, g, b, a] = CELL_FILL;
+        let a = a * alpha;
+        out.push(JffElement::Solid(SolidColorRenderElement::new(
+            cell.id.clone(),
+            Rectangle::<i32, Physical>::new(
+                (cell.rect.0 - origin.x, cell.rect.1 - origin.y).into(),
+                (cell.rect.2, cell.rect.3).into(),
+            ),
+            CommitCounter::default(),
+            // Solid colours are premultiplied.
+            [r * a, g * a, b * a, a],
+            Kind::Unspecified,
+        )));
+    }
 }
 
 /// The squares of the workspace wall: the outline of the hovered one (and of the shown
@@ -872,11 +986,17 @@ pub fn overview_drag_elements(
     snapshot: Option<&WallpaperSnapshot>,
 ) -> Vec<JffElement> {
     let mut out: Vec<JffElement> = Vec::new();
-    if let Some((window, thumb)) = plan.dragged.and_then(|i| plan.thumbs.get(i)) {
+    // The carried window, and the rest of its container.
+    for i in plan
+        .dragged
+        .into_iter()
+        .chain(plan.dragged_with.iter().copied())
+    {
+        let Some((window, thumb)) = plan.thumbs.get(i) else {
+            continue;
+        };
         if layout::intersects(thumb.rect(), rect) {
-            if let Some(i) = plan.dragged {
-                badge_elements(renderer, plan, i, origin, &mut out);
-            }
+            badge_elements(renderer, plan, i, origin, &mut out);
             thumb_elements(
                 renderer,
                 window,
@@ -1033,6 +1153,121 @@ impl JffState {
             list.push((entry.window.clone(), thumb));
         }
         out
+    }
+
+    /// The tiling containers the overview shows as one cell each: those with all their windows
+    /// among the windows it shows. None in the switcher, which is a row of windows, nor while
+    /// something is typed, which picks windows and not containers.
+    fn overview_groups(&self) -> Vec<Group> {
+        let Some(ov) = self
+            .overview
+            .as_ref()
+            .filter(|ov| ov.switcher.is_none() && !ov.search.active())
+        else {
+            return Vec::new();
+        };
+        let mut groups = Vec::new();
+        for container in self.desk.containers() {
+            let members = self.desk.members(container.id());
+            let leaves: Vec<(Window, Rect)> = members
+                .iter()
+                .map(|entry| {
+                    let size = entry.window.geometry().size;
+                    (
+                        entry.window.clone(),
+                        (entry.pos.0, entry.pos.1, size.w, size.h),
+                    )
+                })
+                .collect();
+            if leaves.is_empty() || !leaves.iter().all(|(leaf, _)| ov.visible.contains(leaf)) {
+                continue;
+            }
+            let rects: Vec<Rect> = leaves.iter().map(|(_, rect)| *rect).collect();
+            let Some(area) = container.area().or_else(|| container_view::bounds(&rects)) else {
+                continue;
+            };
+            let focused = self
+                .desk
+                .find_by_id(container.focused())
+                .map(|entry| entry.window.clone())
+                .unwrap_or_else(|| leaves[0].0.clone());
+            groups.push(Group {
+                id: container.id(),
+                label: container_view::label(container.name(), &app_id_of(&leaves[0].0)),
+                area,
+                leaves,
+                focused,
+            });
+        }
+        groups
+    }
+
+    /// Where the cell of every container in `groups` is in the grid, without the open and close
+    /// animation: the index in `groups` and the cell.
+    fn overview_cells(&self, groups: &[Group]) -> Vec<(usize, Thumb)> {
+        let Some(ov) = self.overview.as_ref() else {
+            return Vec::new();
+        };
+        overview_arrangement(ov, self.config.switcher().thumbnail_height, groups).1
+    }
+
+    /// The cells to draw, `shift` px from the grid (while the container is carried): the
+    /// outline and fill, and the name painted at a size that fits the strip above the windows.
+    /// The name is painted again only when its text or size changes.
+    fn cell_plans(
+        &mut self,
+        groups: &[Group],
+        cells: &[(usize, Thumb)],
+        carried: Option<(ContainerId, (i32, i32))>,
+    ) -> Vec<CellPlan> {
+        let fonts = self.osd.fonts();
+        let Some(ov) = self.overview.as_mut() else {
+            return Vec::new();
+        };
+        while ov.cell_ids.len() < cells.len() {
+            ov.cell_ids.push(Id::new());
+        }
+        if ov.cell_labels.len() > MAX_CELL_LABELS {
+            ov.cell_labels.clear();
+        }
+        let mut plans = Vec::with_capacity(cells.len());
+        for (n, (g, cell)) in cells.iter().enumerate() {
+            let group = &groups[*g];
+            let (dx, dy) = carried
+                .filter(|(id, _)| *id == group.id)
+                .map_or((0, 0), |(_, shift)| shift);
+            let moved = Thumb {
+                pos: (cell.pos.0 + dx, cell.pos.1 + dy),
+                ..*cell
+            };
+            let strip = container_view::label_rect(moved);
+            let px = (strip.3 * 3 / 5).clamp(10, 28);
+            let label = fonts.filter(|_| !group.label.is_empty()).and_then(|fonts| {
+                let text = fit_text(fonts, &group.label, px as f32, strip.2 as f32);
+                if text.is_empty() {
+                    return None;
+                }
+                let key = (text, px);
+                if !ov.cell_labels.contains_key(&key) {
+                    let picture = paint_text(fonts, &key.0, px as f32);
+                    let size = (picture.width, picture.height);
+                    ov.cell_labels
+                        .insert(key.clone(), (buffer_of(&picture), size));
+                }
+                ov.cell_labels.get(&key).map(|(buffer, size)| {
+                    (
+                        buffer.clone(),
+                        Point::from((strip.0, strip.1 + (strip.3 - size.1) / 2)),
+                    )
+                })
+            });
+            plans.push(CellPlan {
+                rect: moved.rect(),
+                label,
+                id: ov.cell_ids[n].clone(),
+            });
+        }
+        plans
     }
 
     /// Whether a thumbnail is being dragged.
@@ -1232,6 +1467,8 @@ impl JffState {
             closing: None,
             highlight: Id::new(),
             wall_ids: Vec::new(),
+            cell_ids: Vec::new(),
+            cell_labels: HashMap::new(),
             wall_labels: Vec::new(),
             switcher: None,
             slide: Slide::still(0),
@@ -1353,7 +1590,8 @@ impl JffState {
         let Some(ov) = self.overview.as_ref() else {
             return Vec::new();
         };
-        let mut thumbs = overview_layout(ov, self.config.switcher().thumbnail_height);
+        let groups = self.overview_groups();
+        let mut thumbs = overview_layout(ov, self.config.switcher().thumbnail_height, &groups);
         if ov.switcher.is_some() {
             let dx = ov.slide.now().round() as i32;
             thumbs = thumbs
@@ -1483,7 +1721,15 @@ impl JffState {
     fn overview_hit(&self, p: Point<f64, Logical>) -> Option<Window> {
         let slots = self.overview_slots();
         let thumbs: Vec<Thumb> = slots.iter().map(|(_, t)| *t).collect();
-        overview::hit_test(&thumbs, (p.x, p.y)).map(|i| slots[i].0.clone())
+        if let Some(i) = overview::hit_test(&thumbs, (p.x, p.y)) {
+            return Some(slots[i].0.clone());
+        }
+        // Not on a window, but in the cell of a container: the container's own window.
+        let groups = self.overview_groups();
+        self.overview_cells(&groups)
+            .into_iter()
+            .find(|(_, cell)| layout::contains(cell.rect(), (p.x, p.y)))
+            .map(|(g, _)| groups[g].focused.clone())
     }
 
     /// Pointer moved: select what it's over. Over empty space the selection stays.
@@ -1542,13 +1788,32 @@ impl JffState {
         let Some((_, thumb)) = slots.iter().find(|(w, _)| *w == window) else {
             return false;
         };
-        let anchor = overview::anchor_in(thumb, (from.x, from.y));
+        // A window of a container takes the whole container with it, held by its cell.
+        let groups = self.overview_groups();
+        let held = groups
+            .iter()
+            .position(|group| group.leaves.iter().any(|(leaf, _)| *leaf == window))
+            .and_then(|g| {
+                let (_, cell) = self
+                    .overview_cells(&groups)
+                    .into_iter()
+                    .find(|(index, _)| *index == g)?;
+                Some((groups[g].id, cell))
+            });
+        let (anchor, container) = match held {
+            Some((id, cell)) => (overview::anchor_in(&cell, (from.x, from.y)), Some(id)),
+            None => (overview::anchor_in(thumb, (from.x, from.y)), None),
+        };
         let Some(ov) = self.overview.as_mut() else {
             return false;
         };
         ov.press_origin = None;
         ov.selected = Some(window.clone());
-        ov.drag = Some(Drag { window, anchor });
+        ov.drag = Some(Drag {
+            window,
+            anchor,
+            container,
+        });
         true
     }
 
@@ -1576,6 +1841,11 @@ impl JffState {
         let target = layout::nearest((at.x, at.y), &rects)
             .map(|i| rects[i])
             .filter(|target| *target != source);
+        // A container goes as a whole, windows and tree.
+        if let (Some(target), Some(container)) = (target, drag.container) {
+            self.drop_container(container, target);
+            return;
+        }
         let moving = self
             .desk
             .find_by(|w| *w == drag.window)
@@ -2025,13 +2295,26 @@ impl JffState {
             let dragging = ov.drag.as_ref().map(|drag| drag.window.clone());
             ov.carry.step(dragging)
         });
-        let ov = self.overview.as_ref()?;
-        let t = ov.progress();
-        let at = self
+        // The containers' cells. A container being carried moves as a whole, by as much as the
+        // pointer moved the cell it holds it by.
+        let groups = self.overview_groups();
+        let cells = self.overview_cells(&groups);
+        let pointer_at = self
             .seat
             .get_pointer()
             .map(|p| p.current_location())
             .unwrap_or_default();
+        let group_drag = self.overview.as_ref().and_then(|ov| {
+            let drag = ov.drag.as_ref()?;
+            let id = drag.container?;
+            let (_, cell) = cells.iter().find(|(g, _)| groups[*g].id == id)?;
+            let moved = overview::dragged_thumb(*cell, drag.anchor, (pointer_at.x, pointer_at.y));
+            Some((id, (moved.pos.0 - cell.pos.0, moved.pos.1 - cell.pos.1)))
+        });
+        let cell_plans = self.cell_plans(&groups, &cells, group_drag);
+        let ov = self.overview.as_ref()?;
+        let t = ov.progress();
+        let at = pointer_at;
         // With a wall the dragged thumbnail is as big as one of its squares, so it can be
         // matched with one. On another monitor it is the window's real size, as it will land.
         let overview_rect = output_rect(&ov.output);
@@ -2070,7 +2353,11 @@ impl JffState {
                     })
                     .unwrap_or(grid);
                 let thumb = overview::lerp_thumb(real, grid, t);
-                let thumb = match ov.drag.as_ref().filter(|drag| drag.window == window) {
+                let thumb = match ov
+                    .drag
+                    .as_ref()
+                    .filter(|drag| drag.window == window && drag.container.is_none())
+                {
                     Some(drag) => {
                         let thumb = match drag_wall {
                             Some((scale, monitor, min_height)) => {
@@ -2116,6 +2403,20 @@ impl JffState {
                     }
                     None => thumb,
                 };
+                // The windows of a container being carried keep their places in it.
+                let thumb = match group_drag {
+                    Some((id, (dx, dy)))
+                        if groups.iter().any(|group| {
+                            group.id == id && group.leaves.iter().any(|(leaf, _)| *leaf == window)
+                        }) =>
+                    {
+                        Thumb {
+                            pos: (thumb.pos.0 + dx, thumb.pos.1 + dy),
+                            ..thumb
+                        }
+                    }
+                    _ => thumb,
+                };
                 (window, thumb)
             })
             .collect();
@@ -2147,6 +2448,20 @@ impl JffState {
             .drag
             .as_ref()
             .and_then(|drag| thumbs.iter().position(|(w, _)| *w == drag.window));
+        let dragged_with: Vec<usize> = match group_drag {
+            Some((id, _)) => thumbs
+                .iter()
+                .enumerate()
+                .filter(|(i, (window, _))| {
+                    Some(*i) != dragged
+                        && groups.iter().any(|group| {
+                            group.id == id && group.leaves.iter().any(|(leaf, _)| leaf == window)
+                        })
+                })
+                .map(|(i, _)| i)
+                .collect(),
+            None => Vec::new(),
+        };
         let selected = ov
             .selected
             .as_ref()
@@ -2174,6 +2489,9 @@ impl JffState {
             thumbs,
             selected,
             dragged,
+            dragged_with,
+            cells: cell_plans,
+            cell_alpha: t as f32,
             radius,
             blur_windows: self.config.blur_windows().clone(),
             search: self.search_plan(),
@@ -2292,7 +2610,35 @@ impl JffState {
 
 /// The number `n` of a workspace, `px` tall, on a transparent canvas just big enough for it.
 fn paint_number(fonts: &Fonts, n: usize, px: f32) -> Picture {
-    let text = n.to_string();
+    paint_text(fonts, &n.to_string(), px)
+}
+
+/// `text` shortened with an ellipsis until it is at most `max_width` px wide at `px`.
+fn fit_text(fonts: &Fonts, text: &str, px: f32, max_width: f32) -> String {
+    let mut text: Vec<char> = text.chars().collect();
+    let shown = |chars: &[char], ellipsis: bool| {
+        let mut out: String = chars.iter().collect();
+        if ellipsis {
+            out.push('\u{2026}');
+        }
+        out
+    };
+    if text_width(&fonts.medium, &shown(&text, false), px) <= max_width {
+        return shown(&text, false);
+    }
+    while !text.is_empty() {
+        text.pop();
+        let candidate = shown(&text, true);
+        if text_width(&fonts.medium, &candidate, px) <= max_width {
+            return candidate;
+        }
+    }
+    String::new()
+}
+
+/// `text`, `px` tall, on a transparent canvas just big enough for it.
+fn paint_text(fonts: &Fonts, text: &str, px: f32) -> Picture {
+    let text = text.to_owned();
     let width = text_width(&fonts.medium, &text, px).ceil() as i32 + 4;
     let height = (px * 1.4).ceil() as i32;
     let mut canvas: Vec<Pixel> = vec![[0.0; 4]; (width * height) as usize];
@@ -2334,8 +2680,19 @@ fn buffer_of(picture: &crate::feature::osd::Picture) -> MemoryRenderBuffer {
 }
 
 /// Where the overview puts its windows, before the switcher's slide: the grid, or in the
-/// switcher a row of fixed-size thumbnails that starts at the left edge.
-fn overview_layout(ov: &Overview, thumbnail_height: Option<i32>) -> Vec<Thumb> {
+/// switcher a row of fixed-size thumbnails that starts at the left edge. One thumbnail per
+/// visible window, the windows of a container (`groups`) inside the container's cell.
+fn overview_layout(ov: &Overview, thumbnail_height: Option<i32>, groups: &[Group]) -> Vec<Thumb> {
+    overview_arrangement(ov, thumbnail_height, groups).0
+}
+
+/// [`overview_layout`], and the cell of every group in `groups` that is shown: its index there
+/// and where its cell is.
+fn overview_arrangement(
+    ov: &Overview,
+    thumbnail_height: Option<i32>,
+    groups: &[Group],
+) -> (Vec<Thumb>, Vec<(usize, Thumb)>) {
     let rect = output_rect(&ov.output);
     let mut area = layout::grow(rect, -MARGIN);
     if ov.switcher.is_none() && ov.search.active() {
@@ -2348,19 +2705,72 @@ fn overview_layout(ov: &Overview, thumbnail_height: Option<i32>) -> Vec<Thumb> {
         }
         area.3 = (area.3 - wanted.bottom).max(1);
     }
-    let sizes: Vec<Size> = ov
-        .visible
+    let window_size = |w: &Window| {
+        let size = w.geometry().size;
+        (size.w, size.h)
+    };
+    if ov.switcher.is_some() {
+        let sizes: Vec<Size> = ov.visible.iter().map(window_size).collect();
+        let thumbs = overview::strip(&sizes, area, GAP, thumbnail_height.unwrap_or(area.3 / 3));
+        return (thumbs, Vec::new());
+    }
+
+    // The grid holds items: a window, or a container with all its windows in one cell.
+    enum Item {
+        Window(usize),
+        Group(usize),
+    }
+    let mut items: Vec<Item> = Vec::new();
+    let mut seen = vec![false; groups.len()];
+    for (i, window) in ov.visible.iter().enumerate() {
+        match groups
+            .iter()
+            .position(|group| group.leaves.iter().any(|(leaf, _)| leaf == window))
+        {
+            Some(g) if !seen[g] => {
+                seen[g] = true;
+                items.push(Item::Group(g));
+            }
+            Some(_) => {}
+            None => items.push(Item::Window(i)),
+        }
+    }
+    let sizes: Vec<Size> = items
         .iter()
-        .map(|w| {
-            let size = w.geometry().size;
-            (size.w, size.h)
+        .map(|item| match item {
+            Item::Window(i) => window_size(&ov.visible[*i]),
+            Item::Group(g) => {
+                let area = groups[*g].area;
+                container_view::cell_size((area.2, area.3))
+            }
         })
         .collect();
-    if ov.switcher.is_some() {
-        overview::strip(&sizes, area, GAP, thumbnail_height.unwrap_or(area.3 / 3))
-    } else {
-        overview::arrange(&sizes, area, GAP)
+    let slots = overview::arrange(&sizes, area, GAP);
+
+    let nowhere = Thumb {
+        pos: (0, 0),
+        size: (1, 1),
+        scale: 1.0,
+    };
+    let mut thumbs = vec![nowhere; ov.visible.len()];
+    let mut cells = Vec::new();
+    for (item, slot) in items.iter().zip(slots) {
+        match item {
+            Item::Window(i) => thumbs[*i] = slot,
+            Item::Group(g) => {
+                let group = &groups[*g];
+                let rects: Vec<Rect> = group.leaves.iter().map(|(_, rect)| *rect).collect();
+                let inside = container_view::leaf_thumbs(slot, group.area, &rects);
+                for ((leaf, _), thumb) in group.leaves.iter().zip(inside) {
+                    if let Some(i) = ov.visible.iter().position(|w| w == leaf) {
+                        thumbs[i] = thumb;
+                    }
+                }
+                cells.push((*g, slot));
+            }
+        }
     }
+    (thumbs, cells)
 }
 
 /// What is selected now, as a position in the lists as shown.
@@ -2450,7 +2860,7 @@ fn switcher_target(ov: &Overview, thumbnail_height: Option<i32>) -> i32 {
         .as_ref()
         .and_then(|s| ov.visible.iter().position(|w| w == s))
         .unwrap_or(0);
-    overview::strip_offset(&overview_layout(ov, thumbnail_height), selected, area)
+    overview::strip_offset(&overview_layout(ov, thumbnail_height, &[]), selected, area)
 }
 
 /// Owns the pointer while the overview is open: windows see nothing, layer surfaces (panels,

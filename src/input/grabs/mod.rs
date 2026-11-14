@@ -2,3 +2,5 @@
 
 pub mod r#move;
 pub mod resize;
+pub mod tile_move;
+pub mod tile_resize;

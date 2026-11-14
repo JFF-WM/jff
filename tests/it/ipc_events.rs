@@ -1,7 +1,8 @@
 //! Tests for `jff_wm::ipc::events`.
 
 use jff_wm::ipc::events::{
-    diff, Event, Group, GroupSet, LayerInfo, OutputColor, OutputInfo, PopupInfo, Snapshot, View,
+    diff, ContainerInfo, ContainerRef, Event, Group, GroupSet, LayerInfo, OutputColor, OutputInfo,
+    PopupInfo, Snapshot, View,
 };
 use jff_wm::primitives::color::{ImageDescription, NamedPrimaries};
 
@@ -20,6 +21,7 @@ fn view(id: u64) -> View {
         output: Some("DP-1".to_string()),
         workspace: 1,
         pid: Some(4242),
+        container: None,
     }
 }
 
@@ -686,7 +688,7 @@ fn a_view_is_written_like_the_documented_example() {
         v.to_json(),
         "{\"id\":1,\"app_id\":\"foot\",\"title\":\"~\",\"x\":40,\"y\":40,\"width\":800,\
              \"height\":600,\"maximized\":false,\"fullscreen\":false,\"focused\":true,\
-             \"output\":\"DP-1\",\"workspace\":1,\"pid\":4242}"
+             \"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\"container\":null}"
     );
     v.app_id = None;
     v.title = None;
@@ -694,7 +696,108 @@ fn a_view_is_written_like_the_documented_example() {
     assert!(v.to_json().contains("\"app_id\":null,\"title\":null"));
     assert!(v.to_json().contains("\"output\":null"));
     v.pid = None;
-    assert!(v.to_json().ends_with("\"pid\":null}"));
+    assert!(v.to_json().contains("\"pid\":null,\"container\":null}"));
+}
+
+#[test]
+fn a_view_in_a_container_names_it() {
+    let mut v = view(1);
+    v.container = Some(ContainerRef {
+        id: 3,
+        name: Some("Terminals".to_string()),
+    });
+    assert!(v
+        .to_json()
+        .ends_with("\"pid\":4242,\"container\":{\"id\":3,\"name\":\"Terminals\"}}"));
+    v.container = Some(ContainerRef { id: 4, name: None });
+    assert!(v
+        .to_json()
+        .ends_with("\"container\":{\"id\":4,\"name\":null}}"));
+    // it is spliced flat into view-opened as well
+    assert!(Event::ViewOpened(v)
+        .to_json()
+        .ends_with("\"container\":{\"id\":4,\"name\":null}}"));
+}
+
+#[test]
+fn joining_leaving_or_renaming_a_container_is_a_view_container_event() {
+    let named = |name: Option<&str>| {
+        Some(ContainerRef {
+            id: 2,
+            name: name.map(str::to_string),
+        })
+    };
+    let mut plain = view(1);
+    let mut joined = view(1);
+    joined.container = named(None);
+    let events = diff(
+        &snapshot(vec![plain.clone()]),
+        &snapshot(vec![joined.clone()]),
+    );
+    assert_eq!(
+        events,
+        [Event::ViewContainer {
+            id: 1,
+            container: named(None)
+        }]
+    );
+    assert_eq!(
+        events[0].to_json(),
+        "{\"event\":\"view-container\",\"id\":1,\"container\":{\"id\":2,\"name\":null}}"
+    );
+    assert_eq!(events[0].group(), Group::Views);
+
+    let mut renamed = view(1);
+    renamed.container = named(Some("Mail"));
+    assert_eq!(
+        diff(&snapshot(vec![joined.clone()]), &snapshot(vec![renamed])).len(),
+        1
+    );
+
+    plain.container = None;
+    let left = diff(
+        &snapshot(vec![joined.clone()]),
+        &snapshot(vec![plain.clone()]),
+    );
+    assert_eq!(
+        left[0].to_json(),
+        "{\"event\":\"view-container\",\"id\":1,\"container\":null}"
+    );
+    // nothing changed, nothing said
+    assert!(diff(&snapshot(vec![joined.clone()]), &snapshot(vec![joined])).is_empty());
+}
+
+#[test]
+fn a_container_is_listed_with_its_views_and_area() {
+    let info = ContainerInfo {
+        id: 1,
+        name: Some("Terminals".to_string()),
+        workspace: 2,
+        output: Some("DP-1".to_string()),
+        area: Some((10, 20, 1900, 1040)),
+        views: vec![3, 4],
+        focused: Some(4),
+        maximized: None,
+    };
+    assert_eq!(
+        info.to_json(),
+        "{\"id\":1,\"name\":\"Terminals\",\"workspace\":2,\"output\":\"DP-1\",\"x\":10,\"y\":20,\
+         \"width\":1900,\"height\":1040,\"views\":[3,4],\"focused\":4,\"maximized\":null}"
+    );
+    let bare = ContainerInfo {
+        name: None,
+        output: None,
+        area: None,
+        views: vec![],
+        focused: None,
+        maximized: Some(3),
+        ..info
+    };
+    assert_eq!(
+        bare.to_json(),
+        "{\"id\":1,\"name\":null,\"workspace\":2,\"output\":null,\"x\":null,\"y\":null,\
+         \"width\":null,\"height\":null,\"views\":[],\"focused\":null,\"maximized\":3}"
+    );
 }
 
 #[test]
@@ -704,7 +807,8 @@ fn events_are_written_as_one_json_line_each() {
             Event::ViewOpened(view(5)),
             "{\"event\":\"view-opened\",\"id\":5,\"app_id\":\"foot\",\"title\":\"~\",\
                  \"x\":40,\"y\":40,\"width\":800,\"height\":600,\"maximized\":false,\
-                 \"fullscreen\":false,\"focused\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242}",
+                 \"fullscreen\":false,\"focused\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\
+                 \"container\":null}",
         ),
         (
             Event::ViewClosed { id: 5 },

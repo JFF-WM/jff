@@ -315,6 +315,76 @@ pub fn border_element(
     Some(element)
 }
 
+thread_local! {
+    /// The last ring of each container, by container id. A container's border does not fade
+    /// or turn: it changes colour at once, with the focus.
+    static CONTAINER_RINGS: RefCell<HashMap<u64, (RingKey, BorderElement)>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Most container rings remembered. The table is emptied when it grows past this.
+const MAX_CONTAINER_RINGS: usize = 64;
+
+/// The ring around the container `id`, whose rectangle (the windows, border not included) is
+/// `area`, or `None` when the shader is unavailable. `paint.focused` is whether the window that
+/// has the keyboard is one of its members. Push it after the elements of the container's lowest
+/// window, so it is drawn behind them all.
+///
+/// The same element comes back while nothing about the ring changed, so Smithay repaints
+/// nothing, like [`border_element`] for a window at rest.
+pub fn container_border_element(
+    renderer: &mut GlesRenderer,
+    id: u64,
+    area: Rectangle<i32, Logical>,
+    radius: i32,
+    paint: BorderPaint,
+) -> Option<BorderElement> {
+    let style = paint.style;
+    if !style.on() || area.size.w <= 0 || area.size.h <= 0 {
+        return None;
+    }
+    let key = RingKey {
+        area: ring_area(area, style.width),
+        width: style.width,
+        radius,
+        color: target(&paint),
+        motion: RingMotion::default(),
+        working: super::gamut::working().is_some(),
+    };
+    let (cached, previous) = CONTAINER_RINGS.with(|rings| {
+        let mut rings = rings.borrow_mut();
+        if rings.len() > MAX_CONTAINER_RINGS {
+            rings.clear();
+        }
+        let cached = rings
+            .get(&id)
+            .filter(|(last, _)| *last == key)
+            .map(|(_, element)| element.clone());
+        let previous = rings
+            .get(&id)
+            .map(|(_, element)| (element.id.clone(), element.commit));
+        (cached, previous)
+    });
+    if let Some(element) = cached {
+        return Some(element);
+    }
+    let inner = make_ring(renderer, key.area, key.width, radius, key.color, key.motion)?;
+    let (element_id, mut commit) =
+        previous.unwrap_or_else(|| (Id::new(), CommitCounter::default()));
+    commit.increment();
+    let element = BorderElement {
+        id: element_id,
+        commit,
+        inner,
+        edge: style.width + 1,
+        reach: radius + style.width + 1,
+    };
+    CONTAINER_RINGS.with(|rings| {
+        rings.borrow_mut().insert(id, (key, element.clone()));
+    });
+    Some(element)
+}
+
 /// A window's border as a render element.
 ///
 /// Wraps the ring's `PixelShaderElement`. That one spans the window and its border, and

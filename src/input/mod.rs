@@ -30,6 +30,7 @@ use crate::feature::overview_mode::{overview_key, typed_char, OverviewKey};
 use crate::feature::screenshot::{report_failure, screenshot_key, ScreenshotKey};
 use crate::input::grabs::r#move::{shrunk_geometry, MoveGrab};
 use crate::input::grabs::resize::ResizeGrab;
+use crate::input::grabs::tile_move::TileMoveEnd;
 use crate::ipc::ViewId;
 use crate::primitives::geom;
 use crate::primitives::layout;
@@ -685,6 +686,10 @@ impl JffState {
                 // windows stay as they are.
                 self.click_layer(layer);
             }
+            // The border of a tiling container, outside its windows, selects the container.
+            if !matches!(under, Some(Under::Window(..))) {
+                self.border_click(at);
+            }
             if let Some(Under::Window(window, surface, _)) = under {
                 tracing::debug!("button {} pressed on surface {:?}", button, surface.id());
                 self.focus_window(&window);
@@ -808,6 +813,12 @@ impl JffState {
                 }
             }
             Action::ToggleShortcutsInhibit => self.toggle_shortcuts_inhibit(),
+            Action::FocusContainer(name) => {
+                self.focus_container_named(&name);
+            }
+            Action::ContainerStep { backwards } => self.focus_container_step(backwards),
+            Action::ContainerDrag => self.start_focused_tile_move(),
+            Action::ContainerEject => self.eject_focused(),
             // Handled where the key is, it needs the key and its state.
             Action::ForwardKey(_) => {}
             Action::Quit => self.loop_signal.stop(),
@@ -849,6 +860,15 @@ impl JffState {
         let Some(toplevel) = window.toplevel().cloned() else {
             return false;
         };
+        let local = (
+            location.x - initial_pos.0 as f64,
+            location.y - initial_pos.1 as f64,
+        );
+        let edges = geom::nearest_corner(local, (size.w, size.h));
+        // A member of a container moves the divider of its tree: the windows beside it follow.
+        if self.start_member_resize(window, start_data.clone(), edges, serial) {
+            return true;
+        }
         if !self.desk.is_floating(|w| w == window) {
             self.desk.float_in_place_where(|w| w == window);
             configure_mode(
@@ -858,11 +878,6 @@ impl JffState {
                 Some((size.w, size.h)),
             );
         }
-        let local = (
-            location.x - initial_pos.0 as f64,
-            location.y - initial_pos.1 as f64,
-        );
-        let edges = geom::nearest_corner(local, (size.w, size.h));
         let grab = ResizeGrab::new(start_data, toplevel, edges, initial_pos, (size.w, size.h));
         pointer.set_grab(self, grab, serial, Focus::Clear);
         true
@@ -885,6 +900,11 @@ impl JffState {
         serial: smithay::utils::Serial,
         zone: Option<ZoneDrag>,
     ) -> bool {
+        // A window of a tiling container is carried to another place in the layout and not moved
+        // by itself, its place comes from the tree.
+        if self.desk.container_of(|w| w == window).is_some() {
+            return self.start_tile_move(window, start_data, serial, TileMoveEnd::Release);
+        }
         let Some((pos, size)) = self
             .desk
             .find_by(|w| w == window)

@@ -103,6 +103,74 @@ pub struct View {
     /// credentials. Null when jff can't tell. Windows of one client share it, and for an
     /// X11 window it is xwayland-satellite's pid, not the X11 app's.
     pub pid: Option<u32>,
+    /// The tiling container the window is a member of, `None` for a window in none.
+    pub container: Option<ContainerRef>,
+}
+
+/// The tiling container a view is a member of: what a view says about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContainerRef {
+    pub id: u64,
+    pub name: Option<String>,
+}
+
+impl ContainerRef {
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"id\":{},\"name\":{}}}",
+            self.id,
+            json_opt(self.name.as_deref())
+        )
+    }
+}
+
+/// The JSON of a view's container: the object, or null.
+fn json_container(container: Option<&ContainerRef>) -> String {
+    container.map_or_else(|| "null".to_string(), ContainerRef::to_json)
+}
+
+/// One tiling container, as the `containers` command lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContainerInfo {
+    pub id: u64,
+    pub name: Option<String>,
+    /// The workspace it sits on, counting from 1.
+    pub workspace: usize,
+    pub output: Option<String>,
+    /// The rectangle its windows are laid out in, `None` until it has been laid out.
+    pub area: Option<(i32, i32, i32, i32)>,
+    /// The view ids of its windows, in tree order.
+    pub views: Vec<u64>,
+    /// The view that has the focus inside it.
+    pub focused: Option<u64>,
+    /// The view that is maximized inside it, if one is.
+    pub maximized: Option<u64>,
+}
+
+impl ContainerInfo {
+    pub fn to_json(&self) -> String {
+        let (x, y, width, height) = match self.area {
+            Some((x, y, w, h)) => (x.to_string(), y.to_string(), w.to_string(), h.to_string()),
+            None => (
+                "null".to_string(),
+                "null".to_string(),
+                "null".to_string(),
+                "null".to_string(),
+            ),
+        };
+        let views: Vec<String> = self.views.iter().map(u64::to_string).collect();
+        format!(
+            "{{\"id\":{},\"name\":{},\"workspace\":{},\"output\":{},\"x\":{x},\"y\":{y},\
+             \"width\":{width},\"height\":{height},\"views\":[{}],\"focused\":{},\"maximized\":{}}}",
+            self.id,
+            json_opt(self.name.as_deref()),
+            self.workspace,
+            json_opt(self.output.as_deref()),
+            views.join(","),
+            json_id(self.focused),
+            json_id(self.maximized),
+        )
+    }
 }
 
 impl View {
@@ -110,7 +178,7 @@ impl View {
     fn members(&self) -> String {
         format!(
             "\"id\":{},\"app_id\":{},\"title\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\
-             \"maximized\":{},\"fullscreen\":{},\"focused\":{},\"output\":{},\"workspace\":{},\"pid\":{}",
+             \"maximized\":{},\"fullscreen\":{},\"focused\":{},\"output\":{},\"workspace\":{},\"pid\":{},\"container\":{}",
             self.id,
             json_opt(self.app_id.as_deref()),
             json_opt(self.title.as_deref()),
@@ -124,6 +192,7 @@ impl View {
             json_opt(self.output.as_deref()),
             self.workspace,
             self.pid.map_or_else(|| "null".to_string(), |pid| pid.to_string()),
+            json_container(self.container.as_ref()),
         )
     }
 
@@ -478,6 +547,11 @@ pub enum Event {
         id: u64,
         workspace: usize,
     },
+    /// The window joined a container, left it, or its container was renamed.
+    ViewContainer {
+        id: u64,
+        container: Option<ContainerRef>,
+    },
     Workspace {
         workspace: usize,
         count: usize,
@@ -524,7 +598,8 @@ impl Event {
             | Event::Drag { .. }
             | Event::Maximized { .. }
             | Event::Fullscreen { .. }
-            | Event::ViewWorkspace { .. } => Group::Views,
+            | Event::ViewWorkspace { .. }
+            | Event::ViewContainer { .. } => Group::Views,
             Event::Focus { .. } => Group::Focus,
             Event::Workspace { .. } => Group::Workspaces,
             Event::OutputAdded(_) | Event::OutputRemoved { .. } | Event::OutputChanged(_) => {
@@ -578,6 +653,12 @@ impl Event {
             }
             Event::ViewWorkspace { id, workspace } => {
                 format!("{{\"event\":\"view-workspace\",\"id\":{id},\"workspace\":{workspace}}}")
+            }
+            Event::ViewContainer { id, container } => {
+                format!(
+                    "{{\"event\":\"view-container\",\"id\":{id},\"container\":{}}}",
+                    json_container(container.as_ref())
+                )
             }
             Event::Workspace { workspace, count } => {
                 format!("{{\"event\":\"workspace\",\"workspace\":{workspace},\"count\":{count}}}")
@@ -719,6 +800,12 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
             events.push(Event::ViewWorkspace {
                 id,
                 workspace: after.workspace,
+            });
+        }
+        if before.container != after.container {
+            events.push(Event::ViewContainer {
+                id,
+                container: after.container.clone(),
             });
         }
         if old.dragging == Some(id) && new.dragging != Some(id) {

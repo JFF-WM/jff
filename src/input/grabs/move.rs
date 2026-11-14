@@ -219,6 +219,7 @@ impl PointerGrab<JffState> for MoveGrab {
 
     fn unset(&mut self, data: &mut JffState) {
         data.dragging_view = None;
+        let with_zone = self.zone.is_some();
         if let Some(zone) = self.zone.take() {
             data.zone_drag_end(zone);
         }
@@ -231,6 +232,15 @@ impl PointerGrab<JffState> for MoveGrab {
         } else {
             None
         };
+        // The edge of the monitor keeps meaning snap or maximize. Anywhere else, a window let go
+        // in the empty half beside a snapped one starts a container (with `tiling-containers`).
+        if self.moved
+            && at_edge.is_none()
+            && !with_zone
+            && data.drop_into_container(&window, self.last)
+        {
+            return;
+        }
         let back = match self.back_to {
             Some(WindowMode::Maximized) => Some(WindowMode::Maximized),
             Some(mode) if !self.moved => Some(mode),

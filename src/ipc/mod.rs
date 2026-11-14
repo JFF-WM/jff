@@ -17,6 +17,7 @@
 //! fullscreen [ID]            make a view fullscreen
 //! unfullscreen [ID]          leave fullscreen
 //! focus ID                   raise a view and give it the keyboard (switches workspace if needed)
+//! containers                 the tiling containers on the current workspace
 //! workspaces                 the shown workspace and how many there are
 //! workspace N|next|prev      show a workspace (N counts from 1)
 //! move-to-workspace N [ID]   send a view (the focused one without an ID) to workspace N
@@ -50,10 +51,20 @@
 //! `{"ok":true,"views":[...],"workspace":2,"count":9}`. A view is
 //! `{"id":1,"app_id":"foot","title":"~","x":40,"y":40,"width":800,"height":600,
 //!   "maximized":false,"fullscreen":false,"focused":true,"output":"DP-1","workspace":1,
-//!   "pid":4242}`.
+//!   "pid":4242,"container":null}`.
 //! `id` is assigned when the window appears and never reused while jff runs. `pid` is the
 //! process id of the client that owns the window (null when unknown), an X11 window reports
-//! xwayland-satellite's pid.
+//! xwayland-satellite's pid. `container` is `{"id":1,"name":"Terminals"}` for a window that is a
+//! member of a tiling container (`name` is null for a container without one), null for any
+//! other window. It is in `views`, `focused`, `view-info`, `status` and the `watch` snapshot.
+//!
+//! `containers` replies `{"ok":true,"workspace":2,"containers":[CONTAINER,...]}`, the
+//! containers on the shown workspace, oldest first. A container is
+//! `{"id":1,"name":null,"workspace":2,"output":"DP-1","x":0,"y":0,"width":1920,"height":1080,
+//!   "views":[3,4],"focused":4,"maximized":null}`: `views` are the view ids of its windows in tree
+//! order, `focused` the one that has the focus inside it, `maximized` the one that fills it
+//! (null when none does), and `x`, `y`, `width` and `height` the rectangle it is laid out in
+//! (all null before it has been laid out).
 //!
 //! `outputs` replies `{"ok":true,"outputs":[OUTPUT,...]}`, each OUTPUT what `watch` describes
 //! below (`name`, `x`, `y`, `width`, `height`, `scanout`, `adaptive_sync`, `color`), as it is
@@ -101,6 +112,7 @@
 //! maximized        id, on                                    views
 //! fullscreen       id, on                                    views
 //! view-workspace   id, workspace                             views
+//! view-container   id, container (see `container` above)     views
 //! focus            id, previous (view ids, or null)          focus
 //! workspace        workspace, count                          workspaces
 //! output-added     name, x, y, width, height, scanout, adaptive_sync, color   outputs
@@ -212,8 +224,8 @@ use crate::desk::Goto;
 use crate::feature::outputs::output_rect;
 use crate::input::{spawn_command, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use crate::ipc::events::{
-    ClickInfo, ClickTarget, Event, Group, GroupSet, LayerInfo, OutputColor, OutputInfo, PopupInfo,
-    Snapshot, View,
+    ClickInfo, ClickTarget, ContainerInfo, ContainerRef, Event, Group, GroupSet, LayerInfo,
+    OutputColor, OutputInfo, PopupInfo, Snapshot, View,
 };
 use crate::primitives::json::{json_str, pretty};
 use crate::protocol::layer_shell::{is_mapped, Under};
@@ -277,6 +289,8 @@ pub enum Request {
     Fullscreen(Option<u64>, bool),
     Focus(u64),
     Workspaces,
+    /// `containers`: the tiling containers on the shown workspace.
+    Containers,
     Workspace(Goto),
     /// Workspace number, counted from 1, as typed.
     MoveToWorkspace(Option<u64>, usize),
@@ -303,7 +317,7 @@ pub enum Request {
 
 pub const COMMANDS: &str =
     "views, status, outputs, focused, view-info, close, maximize, unmaximize, toggle-maximize, \
-     fullscreen, unfullscreen, focus, workspaces, workspace, move-to-workspace, spawn, spawn-sh, \
+     fullscreen, unfullscreen, focus, containers, workspaces, workspace, move-to-workspace, spawn, spawn-sh, \
      screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
@@ -424,6 +438,7 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
     match command {
         "views" => no_id(Request::Views),
         "focused" => no_id(Request::Focused),
+        "containers" => no_id(Request::Containers),
         "view-info" => Ok(Request::Info(id)),
         "close" => Ok(Request::Close(id)),
         "maximize" => Ok(Request::Maximize(id, Maximize::On)),
@@ -487,6 +502,15 @@ impl JffState {
                 Some(window) => format!("{{\"ok\":true,\"view\":{}}}\n", self.view_json(&window)),
                 None => "{\"ok\":true,\"view\":null}\n".to_string(),
             }),
+            Request::Containers => Ok(format!(
+                "{{\"ok\":true,\"workspace\":{},\"containers\":[{}]}}\n",
+                self.current_workspace() + 1,
+                self.container_list()
+                    .iter()
+                    .map(ContainerInfo::to_json)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )),
             Request::Info(id) => {
                 let window = self.target_window(id)?;
                 Ok(format!(
@@ -651,6 +675,49 @@ impl JffState {
             .collect()
     }
 
+    /// The tiling containers on the shown workspace, oldest first, as `containers` lists them.
+    fn container_list(&self) -> Vec<ContainerInfo> {
+        let view_id = |window: &Window| window.user_data().get::<ViewId>().map(|id| id.0);
+        self.desk
+            .containers_on(self.current_workspace())
+            .into_iter()
+            .map(|container| {
+                let of = |id| {
+                    self.desk
+                        .find_by_id(id)
+                        .and_then(|entry| view_id(&entry.window))
+                };
+                ContainerInfo {
+                    id: container.id().get(),
+                    name: container.name().map(str::to_owned),
+                    workspace: container.workspace() + 1,
+                    output: Some(container.output().to_owned()).filter(|name| !name.is_empty()),
+                    area: container.area(),
+                    views: self
+                        .desk
+                        .members(container.id())
+                        .into_iter()
+                        .filter_map(|entry| view_id(&entry.window))
+                        .collect(),
+                    focused: of(container.focused()),
+                    maximized: container.zoomed().and_then(of),
+                }
+            })
+            .collect()
+    }
+
+    /// The container `window` is a member of, as a view says it.
+    fn container_ref(&self, window: &Window) -> Option<ContainerRef> {
+        let container = self
+            .desk
+            .container_of(|w| w == window)
+            .and_then(|id| self.desk.container(id))?;
+        Some(ContainerRef {
+            id: container.id().get(),
+            name: container.name().map(str::to_owned),
+        })
+    }
+
     /// Every visible view, as JSON objects, top-to-bottom stacking order.
     fn views_json(&self) -> Vec<String> {
         self.view_list().iter().map(View::to_json).collect()
@@ -740,6 +807,7 @@ impl JffState {
             output,
             workspace,
             pid: self.window_pid(window),
+            container: self.container_ref(window),
         }
     }
 

@@ -398,7 +398,7 @@ impl JffState {
     }
 
     /// The monitor that covers exactly `rect`.
-    fn output_for_rect(&self, rect: Rect) -> Option<Output> {
+    pub(crate) fn output_for_rect(&self, rect: Rect) -> Option<Output> {
         self.outputs
             .iter()
             .find(|output| output_rect(output) == rect)

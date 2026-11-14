@@ -45,6 +45,10 @@ fn requests_are_parsed() {
     );
     assert_eq!(parse_request("focus 4"), Ok(Request::Focus(4)));
     assert_eq!(parse_request("workspaces"), Ok(Request::Workspaces));
+    assert_eq!(parse_request("containers"), Ok(Request::Containers));
+    assert_eq!(parse_request(" containers \n"), Ok(Request::Containers));
+    assert!(parse_request("containers 3").is_err());
+    assert!(COMMANDS.contains("containers"));
     assert_eq!(
         parse_request("screenshot-area"),
         Ok(Request::ScreenshotArea)

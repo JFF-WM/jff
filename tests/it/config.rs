@@ -15,7 +15,7 @@ use jff_wm::config::{
     DEFAULT_SELECTION_WIDTH, DEFAULT_SWITCHER_SLIDE_MS, DEFAULT_WORKSPACES, MAX_BORDER_PERIOD_MS,
     MAX_BORDER_WIDTH, MAX_GAPS, MAX_RADIUS, TOP_LEVEL_NODES,
 };
-use jff_wm::config::{RuleOutput, WindowFacts, WindowMatch};
+use jff_wm::config::{ContainerRule, RuleOutput, WindowFacts, WindowMatch};
 use jff_wm::desk::{Goto, Side};
 use jff_wm::primitives::hdr_output::ToneMap;
 
@@ -1246,6 +1246,233 @@ fn check_config_warns_about_rules_that_do_nothing() {
 }
 
 #[test]
+fn tiling_containers_are_off_unless_asked_for() {
+    assert!(!Config::default().tiling_containers());
+    assert!(!Config::parse("").unwrap().tiling_containers());
+    assert!(TOP_LEVEL_NODES.contains(&"tiling-containers"));
+    assert!(TOP_LEVEL_NODES.contains(&"container-rule"));
+    // the bare name, `#true`/`#false` and the quoted spellings the other flags take
+    assert!(Config::parse("tiling-containers")
+        .unwrap()
+        .tiling_containers());
+    assert!(Config::parse("tiling-containers #true")
+        .unwrap()
+        .tiling_containers());
+    assert!(Config::parse(r#"tiling-containers "on""#)
+        .unwrap()
+        .tiling_containers());
+    assert!(!Config::parse("tiling-containers #false")
+        .unwrap()
+        .tiling_containers());
+    assert!(Config::parse("tiling-containers 3").is_err());
+    assert!(Config::parse("tiling-containers #true #true").is_err());
+}
+
+#[test]
+fn the_flag_and_the_rules_do_not_depend_on_each_other() {
+    let rules_only = Config::parse(r#"container-rule { match app-id="a"; name "A"; }"#).unwrap();
+    assert!(!rules_only.tiling_containers());
+    assert_eq!(rules_only.container_rules().len(), 1);
+    let flag_only = Config::parse("tiling-containers").unwrap();
+    assert!(flag_only.tiling_containers());
+    assert!(flag_only.container_rules().is_empty());
+    assert!(Config::default().container_rules().is_empty());
+}
+
+#[test]
+fn container_rule_reads_matches_and_name() {
+    let config = Config::parse(
+        r#"
+container-rule {
+    match app-id="foot"
+    match title="build" tag="dev"
+    name "Terminals"
+}
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.container_rules(),
+        &[ContainerRule {
+            matches: vec![
+                WindowMatch::AppId("foot".into()),
+                WindowMatch::Title("build".into()),
+                WindowMatch::Tag("dev".into()),
+            ],
+            name: Some("Terminals".into()),
+        }]
+    );
+}
+
+#[test]
+fn container_rule_needs_every_match_line_to_hold() {
+    let config =
+        Config::parse(r#"container-rule { match app-id="ff"; match tag="browser"; name "Web"; }"#)
+            .unwrap();
+    assert_eq!(
+        config.container_name_for(&facts("ff", Some("browser"))),
+        Some("Web")
+    );
+    assert_eq!(config.container_name_for(&facts("ff", Some("other"))), None);
+    assert_eq!(config.container_name_for(&facts("ff", None)), None);
+    assert_eq!(
+        config.container_name_for(&facts("zzz", Some("browser"))),
+        None
+    );
+    let titled = WindowFacts {
+        title: "Mozilla Firefox",
+        ..facts("ff", Some("browser"))
+    };
+    assert_eq!(config.container_name_for(&titled), Some("Web"));
+}
+
+#[test]
+fn container_rule_matches_by_title_contains() {
+    let config =
+        Config::parse(r#"container-rule { match title="build"; name "Builds"; }"#).unwrap();
+    let hit = WindowFacts {
+        title: "cargo build --release",
+        ..facts("foot", None)
+    };
+    assert_eq!(config.container_name_for(&hit), Some("Builds"));
+    assert_eq!(config.container_name_for(&facts("foot", None)), None);
+}
+
+#[test]
+fn container_rule_first_match_wins() {
+    let config = Config::parse(
+        r#"
+container-rule { match app-id="ff"; name "First"; }
+container-rule { match app-id="ff"; name "Second"; }
+container-rule { name "Anything"; }
+"#,
+    )
+    .unwrap();
+    assert_eq!(config.container_name_for(&facts("ff", None)), Some("First"));
+    // a rule with no `match` fits every window
+    assert_eq!(
+        config.container_name_for(&facts("zzz", None)),
+        Some("Anything")
+    );
+}
+
+#[test]
+fn a_container_rule_without_a_name_does_not_hide_a_later_one() {
+    let config = Config::parse(
+        r#"
+container-rule { match app-id="ff"; }
+container-rule { match app-id="ff"; name "Web"; }
+"#,
+    )
+    .unwrap();
+    assert_eq!(config.container_name_for(&facts("ff", None)), Some("Web"));
+    let nameless = Config::parse(r#"container-rule { match app-id="ff"; }"#).unwrap();
+    assert_eq!(nameless.container_name_for(&facts("ff", None)), None);
+}
+
+#[test]
+fn container_rule_and_window_rule_do_not_mix() {
+    let config = Config::parse(
+        r#"
+window-rule { match app-id="ff"; floating; }
+container-rule { match app-id="ff"; name "Web"; }
+"#,
+    )
+    .unwrap();
+    assert_eq!(config.window_rules().len(), 1);
+    assert_eq!(config.container_rules().len(), 1);
+    assert!(config.window_rule_for(&facts("ff", None)).is_some());
+    assert_eq!(config.container_name_for(&facts("ff", None)), Some("Web"));
+}
+
+#[test]
+fn container_rule_rejects_bad_input() {
+    for bad in [
+        // an unknown key inside the block
+        r#"container-rule { match app-id="x"; name "X"; floating; }"#,
+        r#"container-rule { match app-id="x"; name "X"; open-workspace 2; }"#,
+        r#"container-rule { match app-id="x"; name "X"; wallpaper "w.png"; }"#,
+        r#"container-rule { colour "red"; }"#,
+        // matches
+        r#"container-rule { match; name "X"; }"#,
+        r#"container-rule { match "firefox"; name "X"; }"#,
+        r#"container-rule { match colour="red"; name "X"; }"#,
+        r#"container-rule { match app-id=3; name "X"; }"#,
+        r#"container-rule { match dialog=#true; name "X"; }"#,
+        r#"container-rule { match restored=#true; name "X"; }"#,
+        r#"container-rule { match app-id="x" dialog=#false; name "X"; }"#,
+        // the name
+        r#"container-rule { name; }"#,
+        r#"container-rule { name ""; }"#,
+        r#"container-rule { name 3; }"#,
+        r#"container-rule { name "A" "B"; }"#,
+        // the block itself
+        r#"container-rule "X""#,
+        r#"container-rule name="X""#,
+    ] {
+        assert!(Config::parse(bad).is_err(), "{bad} should not parse");
+        assert!(Config::check_text(bad).is_err(), "{bad} should not check");
+    }
+}
+
+#[test]
+fn container_rule_names_the_rule_in_its_error() {
+    let err = Config::parse(
+        r#"
+container-rule { name "A"; }
+container-rule { name "B"; nope; }
+"#,
+    )
+    .unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("container-rule 2"), "{text}");
+    assert!(text.contains("\"nope\""), "{text}");
+}
+
+#[test]
+fn check_config_warns_about_a_container_rule_without_a_name() {
+    let warnings = Config::check_text(r#"container-rule { match app-id="x"; }"#).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("container-rule 1"), "{warnings:?}");
+    assert!(warnings[0].contains("no name"), "{warnings:?}");
+
+    // the number is the rule's place among the container-rules
+    let warnings = Config::check_text(
+        r#"
+container-rule { name "A"; }
+container-rule { match app-id="x"; }
+"#,
+    )
+    .unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("container-rule 2"), "{warnings:?}");
+}
+
+#[test]
+fn check_config_accepts_the_container_settings() {
+    let ok = r#"
+tiling-containers
+container-rule { match app-id="foot"; name "Terminals"; }
+container-rule { name "Everything else"; }
+"#;
+    assert_eq!(Config::check_text(ok).unwrap(), Vec::<String>::new());
+    // no "unknown setting" warning for either node
+    let warnings = Config::check_text("tiling-containers #false").unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn check_config_hints_at_a_misspelled_container_setting() {
+    let warnings = Config::check_text("container-rules { }\ntiling-container").unwrap();
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(warnings[0].contains("\"container-rule\""), "{warnings:?}");
+    assert!(
+        warnings[1].contains("\"tiling-containers\""),
+        "{warnings:?}"
+    );
+}
+
+#[test]
 fn color_representation_yuv_is_off_unless_asked_for() {
     assert!(!Config::default().color_representation_yuv());
     assert!(TOP_LEVEL_NODES.contains(&"color-representation"));
@@ -1703,4 +1930,83 @@ fn check_warns_about_content_metadata_without_hdr_and_is_quiet_with_it() {
     assert!(warnings[0].contains("hdr-content-metadata") && warnings[0].contains("no `hdr`"));
     let quiet = r#"outputs { output "DP-1" { hdr; hdr-content-metadata #false; } }"#;
     assert!(Config::check_text(quiet).unwrap().is_empty());
+}
+
+#[test]
+fn container_actions_are_parsed_from_their_names() {
+    let config = Config::parse(
+        r#"binds {
+                Alt+J { container-next; }
+                Alt+K { container-prev; }
+                Alt+T { focus-container "Terminals"; }
+            }"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.action_for(&mods(false, true, false, false), Keysym::j),
+        Some(&Action::ContainerStep { backwards: false })
+    );
+    assert_eq!(
+        config.action_for(&mods(false, true, false, false), Keysym::k),
+        Some(&Action::ContainerStep { backwards: true })
+    );
+    assert_eq!(
+        config.action_for(&mods(false, true, false, false), Keysym::t),
+        Some(&Action::FocusContainer("Terminals".into()))
+    );
+}
+
+#[test]
+fn container_actions_check_their_arguments() {
+    assert!(Config::parse("binds { Alt+J { container-next 1; } }").is_err());
+    assert!(Config::parse(r#"binds { Alt+K { container-prev "x"; } }"#).is_err());
+    assert!(Config::parse("binds { Alt+T { focus-container; } }").is_err());
+    assert!(Config::parse(r#"binds { Alt+T { focus-container ""; } }"#).is_err());
+    assert!(Config::parse(r#"binds { Alt+T { focus-container "a" "b"; } }"#).is_err());
+    assert!(Config::parse("binds { Alt+T { focus-container 3; } }").is_err());
+}
+
+#[test]
+fn no_container_action_is_bound_by_default() {
+    let config = Config::default();
+    for key in [Keysym::j, Keysym::k, Keysym::t] {
+        assert_eq!(
+            config.action_for(&mods(false, true, false, false), key),
+            None
+        );
+    }
+}
+
+#[test]
+fn container_drag_and_eject_are_parsed_from_their_names() {
+    let config = Config::parse(
+        r#"binds {
+                Alt+D { container-drag; }
+                Alt+E { container-eject; }
+            }"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.action_for(&mods(false, true, false, false), Keysym::d),
+        Some(&Action::ContainerDrag)
+    );
+    assert_eq!(
+        config.action_for(&mods(false, true, false, false), Keysym::e),
+        Some(&Action::ContainerEject)
+    );
+}
+
+#[test]
+fn container_drag_and_eject_take_no_arguments() {
+    assert!(Config::parse("binds { Alt+D { container-drag 1; } }").is_err());
+    assert!(Config::parse(r#"binds { Alt+E { container-eject "x"; } }"#).is_err());
+}
+
+#[test]
+fn container_drag_can_be_bound_to_a_mouse_button() {
+    let config = Config::parse("binds { Alt+MouseBack { container-drag; } }").unwrap();
+    assert_eq!(
+        config.button_action_for(&mods(false, true, false, false), 0x113),
+        Some(&Action::ContainerDrag)
+    );
 }
