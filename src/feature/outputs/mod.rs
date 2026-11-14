@@ -96,6 +96,7 @@ impl JffState {
     /// there). Then the closest monitor with room is used, so a second window doesn't open on
     /// top of a maximized first one. A window that isn't shown yet counts
     /// as filling its monitor when new windows are maximized, since that is what it will do.
+    /// A monitor with a tiling container on it is filled too.
     pub fn placement_output_index(&self) -> Option<usize> {
         let rects = self.output_rects();
         if rects.is_empty() {
@@ -113,6 +114,19 @@ impl JffState {
         let mut filled = vec![false; rects.len()];
         for entry in self.desk.all_top_down() {
             if !self.desk.is_visible(entry) {
+                continue;
+            }
+            // A container fills its monitor, whatever the modes of its members say: they are
+            // placed by the tree, and float as far as the desk is concerned.
+            if let Some(area) = entry
+                .container
+                .and_then(|id| self.desk.container(id))
+                .and_then(|container| container.area())
+            {
+                let at = layout::center((area.0, area.1), (area.2, area.3));
+                if let Some(i) = layout::nearest(at, &rects) {
+                    filled[i] = true;
+                }
                 continue;
             }
             let fills = match entry.mode {
