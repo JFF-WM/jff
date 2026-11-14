@@ -7,12 +7,12 @@
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
 //! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
-//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, the first rule that fits a window applies), and
+//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
 //! `tiling-containers` turns on tiling containers (groups of windows that tile among themselves, see `desk::container`), and is off by default. It accepts a bare name or `#true` / `#false`.
-//! `container-rule { match app-id="…", title="…", tag="…"; name "…" }` (any number, the `match` lines all have to hold, the first rule that fits a window gives the container its name): a rule does not create a container, it names the one the user creates, from the first window that fits. `name` is its only action, `jff check-config` warns about a rule without one, and any other key inside it is an error.
+//! `container-rule { match app-id="…", title="…", tag="…", name "…" }` (any number, the `match` lines all have to hold, the first rule that fits a window gives the container its name): a rule does not create a container, it names the one the user creates, from the first window that fits. `name` is its only action, `jff check-config` warns about a rule without one, and any other key inside it is an error.
 //! `binds` has five actions for containers: `focus-container "NAME"` focuses the first container with that name on the current workspace (an error toast when there is none), `container-next` and `container-prev` move the focus to the next or previous window of the focused window's container in tree order, wrapping, and do nothing for a window that is in no container. `maximize` on a window of a container makes it fill the container's rectangle, the others stay under it, and `maximize` again (or the window closing) shows the tree again. A window that closes leaves the tree, and the others take its room. `container-drag` picks up the focused window of a container with the pointer: the next left click puts it down (a right click cancels), over another window of a container the middle swaps the two places and an edge puts it beside that window, at the edge of the monitor or off every container it leaves the container and snaps, maximizes or floats as any dropped window does. Dragging a window of a container by its titlebar or with `drag-modifier` does the same. `container-eject` takes the focused window out of its container and floats it. Both do nothing for a window that is in no container.
 //!
 //! `color-management { … }` (`off`: jff does not offer wp-color-management and draws every
@@ -913,7 +913,8 @@ pub enum WindowMatch {
     AppId(String),
     /// The title contains this text.
     Title(String),
-    /// The tag the app set with xdg-toplevel-tag is exactly this.
+    /// The tag of the window is exactly this: the one a `tag` rule or the `tag` IPC command gave
+    /// it, else the one the app set with xdg-toplevel-tag.
     Tag(String),
     /// The window is a dialog (it has a parent, or said so with xdg-dialog) or is not.
     Dialog(bool),
@@ -947,6 +948,9 @@ pub struct WindowRule {
     pub size: Option<(i32, i32)>,
     /// `floating #true`: the window stays floating, whatever `maximize-new-windows` says.
     pub floating: bool,
+    /// `tag "name"`: the window gets this tag of the user's, which `match tag` and the other
+    /// rules see from then on. It is its own step, see [`Config::user_tag_for`].
+    pub tag: Option<String>,
 }
 
 impl WindowRule {
@@ -963,7 +967,19 @@ impl WindowRule {
 
     /// Whether the rule has any action at all.
     pub fn has_actions(&self) -> bool {
-        self.output.is_some() || self.workspace.is_some() || self.places_window()
+        self.output.is_some()
+            || self.workspace.is_some()
+            || self.places_window()
+            || self.tag.is_some()
+    }
+
+    /// Whether `tag` is all the rule does. Such a rule only names windows, so it does not use up
+    /// the one rule a window gets for its placement.
+    pub fn only_tags(&self) -> bool {
+        self.tag.is_some()
+            && self.output.is_none()
+            && self.workspace.is_none()
+            && !self.places_window()
     }
 }
 
@@ -1530,9 +1546,23 @@ impl Config {
         &self.window_rules
     }
 
-    /// The rule a window gets: the first one whose `match` lines all hold.
+    /// The rule a window gets: the first one whose `match` lines all hold. A rule that only
+    /// gives a `tag` is passed over, see [`Config::user_tag_for`].
     pub fn window_rule_for(&self, window: &WindowFacts<'_>) -> Option<&WindowRule> {
-        self.window_rules.iter().find(|rule| rule.matches(window))
+        self.window_rules
+            .iter()
+            .find(|rule| !rule.only_tags() && rule.matches(window))
+    }
+
+    /// The tag the user's rules give a window: that of the first rule with a `tag` whose `match`
+    /// lines all hold (`window` has the tag the app set, if any). It does not depend on which
+    /// rule the window gets for its placement, so a rule that places OBS and one that tags its
+    /// docks can both apply. `None` when no rule tags it.
+    pub fn user_tag_for(&self, window: &WindowFacts<'_>) -> Option<&str> {
+        self.window_rules
+            .iter()
+            .filter(|rule| rule.matches(window))
+            .find_map(|rule| rule.tag.as_deref())
     }
 
     /// Whether windows can be grouped in tiling containers (`tiling-containers`, off by default).
@@ -2041,6 +2071,13 @@ fn parse_window_rule(node: &KdlNode) -> anyhow::Result<WindowRule> {
                 }
             }
             "floating" => rule.floating = flag_value(child)?,
+            "tag" => {
+                let tag = string_arg(child)?;
+                if tag.trim().is_empty() {
+                    bail!("tag takes a name for the window, not an empty string");
+                }
+                rule.tag = Some(tag);
+            }
             other => bail!("unknown window-rule setting {other:?}"),
         }
     }

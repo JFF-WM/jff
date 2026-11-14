@@ -18,6 +18,8 @@
 //! unfullscreen [ID]          leave fullscreen
 //! focus ID                   raise a view and give it the keyboard (switches workspace if needed)
 //! containers                 the tiling containers on the current workspace
+//! tag [NAME [ID]]            give a view (the focused one without an ID) a tag of yours, or show its tag without arguments
+//! untag [ID]                 take the tag you gave a view away again
 //! workspaces                 the shown workspace and how many there are
 //! workspace N|next|prev      show a workspace (N counts from 1)
 //! move-to-workspace N [ID]   send a view (the focused one without an ID) to workspace N
@@ -227,7 +229,7 @@ use crate::ipc::events::{
     ClickInfo, ClickTarget, ContainerInfo, ContainerRef, Event, Group, GroupSet, LayerInfo,
     OutputColor, OutputInfo, PopupInfo, Snapshot, View,
 };
-use crate::primitives::json::{json_str, pretty};
+use crate::primitives::json::{json_opt, json_str, pretty};
 use crate::protocol::layer_shell::{is_mapped, Under};
 use crate::state::JffState;
 
@@ -276,6 +278,17 @@ pub enum ClickButton {
     Middle,
 }
 
+/// What `tag` and `untag` ask for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TagOp {
+    /// `tag`: say what the tag of the view is.
+    Show,
+    /// `tag NAME`: give it this one.
+    Set(String),
+    /// `untag`: take the user's tag away.
+    Clear,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     Views,
@@ -291,6 +304,8 @@ pub enum Request {
     Workspaces,
     /// `containers`: the tiling containers on the shown workspace.
     Containers,
+    /// `tag [NAME [ID]]` and `untag [ID]`: what to do with the user's tag of a view.
+    Tag(Option<u64>, TagOp),
     Workspace(Goto),
     /// Workspace number, counted from 1, as typed.
     MoveToWorkspace(Option<u64>, usize),
@@ -317,7 +332,7 @@ pub enum Request {
 
 pub const COMMANDS: &str =
     "views, status, outputs, focused, view-info, close, maximize, unmaximize, toggle-maximize, \
-     fullscreen, unfullscreen, focus, containers, workspaces, workspace, move-to-workspace, spawn, spawn-sh, \
+     fullscreen, unfullscreen, focus, containers, tag, untag, workspaces, workspace, move-to-workspace, spawn, spawn-sh, \
      screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
@@ -397,6 +412,15 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         ("click", _) => return Err("click needs left, right or middle".to_string()),
         ("workspace", ["next"]) => return Ok(Request::Workspace(Goto::Next)),
         ("workspace", ["prev"]) => return Ok(Request::Workspace(Goto::Prev)),
+        ("tag", []) => return Ok(Request::Tag(None, TagOp::Show)),
+        ("tag", [name]) => return Ok(Request::Tag(None, TagOp::Set((*name).to_string()))),
+        ("tag", [name, id]) => {
+            let id = id
+                .parse::<u64>()
+                .map_err(|_| format!("{id:?} is not a view id"))?;
+            return Ok(Request::Tag(Some(id), TagOp::Set((*name).to_string())));
+        }
+        ("tag", _) => return Err("tag takes a name and optionally a view id".to_string()),
         ("workspace", [n]) => {
             return Ok(Request::Workspace(Goto::To(parse_workspace_number(n)? - 1)));
         }
@@ -440,6 +464,7 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         "focused" => no_id(Request::Focused),
         "containers" => no_id(Request::Containers),
         "view-info" => Ok(Request::Info(id)),
+        "untag" => Ok(Request::Tag(id, TagOp::Clear)),
         "close" => Ok(Request::Close(id)),
         "maximize" => Ok(Request::Maximize(id, Maximize::On)),
         "unmaximize" => Ok(Request::Maximize(id, Maximize::Off)),
@@ -516,6 +541,27 @@ impl JffState {
                 Ok(format!(
                     "{{\"ok\":true,\"view\":{}}}\n",
                     self.view_json(&window)
+                ))
+            }
+            Request::Tag(id, op) => {
+                let window = self.target_window(id)?;
+                let surface = window
+                    .toplevel()
+                    .map(|toplevel| toplevel.wl_surface().clone())
+                    .ok_or("the view cannot be tagged")?;
+                match op {
+                    TagOp::Show => {}
+                    TagOp::Set(name) => {
+                        crate::protocol::toplevel_tag::set_user_tag(&surface, Some(name));
+                    }
+                    TagOp::Clear => crate::protocol::toplevel_tag::set_user_tag(&surface, None),
+                }
+                let view = window.user_data().get::<ViewId>().map_or(0, |id| id.0);
+                // `tag` is what rules see, `app_tag` is what the app set itself, if it did.
+                Ok(format!(
+                    "{{\"ok\":true,\"id\":{view},\"tag\":{},\"app_tag\":{}}}\n",
+                    json_opt(crate::protocol::toplevel_tag::tag_of(&surface).as_deref()),
+                    json_opt(crate::protocol::toplevel_tag::app_tag_of(&surface).as_deref()),
                 ))
             }
             Request::Close(id) => {

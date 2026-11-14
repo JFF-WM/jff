@@ -122,7 +122,8 @@ impl JffState {
     /// shown, the window joins it, split off the member under the pointer (see
     /// [`Desk::join_container`]), and the container is laid out again. Returns true then, and
     /// false, having changed nothing, when it does not: no container there. Any window joins
-    /// but a dialog, one a `window-rule` keeps `floating` too. The caller has checked that the
+    /// but a dialog (a window the user drops on a container wants to be in it, whatever a rule
+    /// says). The caller has checked that the
     /// window is floating or maximized and in no container.
     fn drop_into_existing_container(&mut self, window: &Window, at: Point<f64, Logical>) -> bool {
         let point = (at.x, at.y);
@@ -149,7 +150,7 @@ impl JffState {
     /// (see `focus_before_open`), because the new window takes the keyboard itself at once: that
     /// is what it was opened from. When the user moved the keyboard to another window since, that
     /// one decides. Needs `tiling-containers`, and not the overview or a locked session. Any
-    /// kind of window joins but a dialog: a restored one, one a rule keeps floating. The container
+    /// kind of window joins but a dialog and one a rule keeps `floating`. The container
     /// has to be on the window's workspace and monitor, shown, and without a fullscreen focused
     /// member (see [`Desk::container_to_join`]).
     pub(crate) fn join_container_on_map(&mut self, window: &Window) -> bool {
@@ -163,8 +164,9 @@ impl JffState {
             return false;
         };
         let opened_from = self.focus_before_open.remove(&root);
-        // A dialog is not tiled: it is centred over its parent like anywhere else.
-        if self.is_dialog(window) {
+        // A dialog is not tiled: it is centred over its parent like anywhere else. Nor is a
+        // window a `window-rule` keeps `floating` (the docks of OBS, say), it opens where it is.
+        if self.is_dialog(window) || self.floats_by_rule(window) {
             return false;
         }
         let current = self.focused_window();

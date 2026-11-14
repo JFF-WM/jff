@@ -5,7 +5,12 @@
 //! Apps are asked to set it before their first commit, which is when rules are matched, but it
 //! may change later. A later change does not move a window that has been placed already.
 //!
-//! The tag and description live in the surface's data map, so they go away with the surface.
+//! A tag can also be given by the user: a `tag "…"` line of a `window-rule`, or the `tag` IPC
+//! command. That one wins over the app's, so `match tag="…"` and the layout of a window do not
+//! depend on a title that changes. It is kept apart, an app setting its own tag later does not
+//! undo it.
+//!
+//! The tags and description live in the surface's data map, so they go away with the surface.
 
 use std::sync::Mutex;
 
@@ -41,6 +46,8 @@ impl ToplevelTagManager {
 #[derive(Default)]
 struct ToplevelTagData {
     tag: Mutex<Option<String>>,
+    /// Given by the user (a rule or the IPC), wins over `tag`.
+    user_tag: Mutex<Option<String>>,
     description: Mutex<Option<String>>,
 }
 
@@ -69,9 +76,30 @@ fn with_data<T>(surface: &WlSurface, f: impl FnOnce(&ToplevelTagData) -> T) -> T
     })
 }
 
-/// The tag `surface` set, `None` when it set none (or an empty one).
+/// The tag of `surface` that rules see: the one the user gave it, else the one the app set.
+/// `None` when it has neither.
 pub fn tag_of(surface: &WlSurface) -> Option<String> {
+    with_data(surface, |data| {
+        let user = data.user_tag.lock().unwrap().clone();
+        user.or_else(|| data.tag.lock().unwrap().clone())
+    })
+}
+
+/// The tag the app set on `surface` itself, `None` when it set none (or an empty one).
+pub fn app_tag_of(surface: &WlSurface) -> Option<String> {
     with_data(surface, |data| data.tag.lock().unwrap().clone())
+}
+
+/// The tag the user gave `surface`, `None` when there is none.
+pub fn user_tag_of(surface: &WlSurface) -> Option<String> {
+    with_data(surface, |data| data.user_tag.lock().unwrap().clone())
+}
+
+/// Give `surface` a tag of the user's (`None` or an empty one takes it away again). It is cut to
+/// the same length as the app's.
+pub fn set_user_tag(surface: &WlSurface, tag: Option<String>) {
+    let tag = tag.map(clamp).filter(|tag| !tag.is_empty());
+    with_data(surface, |data| *data.user_tag.lock().unwrap() = tag);
 }
 
 /// The description `surface` set, `None` when it set none (or an empty one).

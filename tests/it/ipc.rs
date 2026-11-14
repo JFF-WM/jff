@@ -9,8 +9,8 @@ use std::os::unix::net::UnixStream;
 use jff_wm::desk::Goto;
 use jff_wm::ipc::events::{Group, GroupSet};
 use jff_wm::ipc::{
-    parse_request, split_style, ClickButton, Maximize, Outbox, Request, Subscriber, COMMANDS,
-    MAX_PENDING,
+    parse_request, split_style, ClickButton, Maximize, Outbox, Request, Subscriber, TagOp,
+    COMMANDS, MAX_PENDING,
 };
 use jff_wm::primitives::json::{json_opt, json_str, pretty};
 
@@ -506,4 +506,25 @@ fn the_style_flags_come_before_the_command() {
 
     let args = words("--pretty");
     assert!(split_style(&args).1.is_empty());
+}
+
+#[test]
+fn tag_and_untag_are_parsed() {
+    assert_eq!(parse_request("tag"), Ok(Request::Tag(None, TagOp::Show)));
+    assert_eq!(
+        parse_request("tag obs-dock"),
+        Ok(Request::Tag(None, TagOp::Set("obs-dock".to_string())))
+    );
+    assert_eq!(
+        parse_request("tag obs-dock 12"),
+        Ok(Request::Tag(Some(12), TagOp::Set("obs-dock".to_string())))
+    );
+    assert_eq!(parse_request("untag"), Ok(Request::Tag(None, TagOp::Clear)));
+    assert_eq!(
+        parse_request("untag 4"),
+        Ok(Request::Tag(Some(4), TagOp::Clear))
+    );
+    assert!(parse_request("tag a 1 2").is_err());
+    assert!(parse_request("tag a b").is_err());
+    assert!(COMMANDS.contains("tag"));
 }

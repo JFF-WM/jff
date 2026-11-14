@@ -2010,3 +2010,49 @@ fn container_drag_can_be_bound_to_a_mouse_button() {
         Some(&Action::ContainerDrag)
     );
 }
+
+#[test]
+fn a_tag_rule_names_windows_without_using_up_their_placement_rule() {
+    let config = Config::parse(
+        r#"
+window-rule { match app-id="com.obsproject.Studio"; tag "obs-dock"; }
+window-rule { match app-id="com.obsproject.Studio"; floating; }
+window-rule { match tag="obs-dock"; open-workspace 2; }
+"#,
+    )
+    .unwrap();
+    let rules = config.window_rules();
+    assert_eq!(rules[0].tag.as_deref(), Some("obs-dock"));
+    assert!(rules[0].has_actions());
+    assert!(rules[0].only_tags());
+    assert!(!rules[1].only_tags());
+
+    let obs = facts("com.obsproject.Studio", None);
+    assert_eq!(config.user_tag_for(&obs), Some("obs-dock"));
+    // The rule that only tags is passed over: the window gets the one that places it.
+    assert_eq!(config.window_rule_for(&obs), Some(&rules[1]));
+    // Once it has the tag, a rule can match on it.
+    let tagged = facts("com.obsproject.Studio", Some("obs-dock"));
+    assert_eq!(config.window_rule_for(&tagged), Some(&rules[1]));
+    let other = facts("foot", Some("obs-dock"));
+    assert_eq!(config.window_rule_for(&other), Some(&rules[2]));
+    assert_eq!(config.user_tag_for(&facts("foot", None)), None);
+}
+
+#[test]
+fn the_first_tag_that_fits_wins_and_an_empty_tag_is_an_error() {
+    let config = Config::parse(
+        r#"
+window-rule { match title="Fontes"; tag "a"; }
+window-rule { match app-id="x"; tag "b"; }
+"#,
+    )
+    .unwrap();
+    let both = WindowFacts {
+        title: "Fontes",
+        ..facts("x", None)
+    };
+    assert_eq!(config.user_tag_for(&both), Some("a"));
+    assert_eq!(config.user_tag_for(&facts("x", None)), Some("b"));
+    assert!(Config::parse(r#"window-rule { match app-id="x"; tag ""; }"#).is_err());
+}

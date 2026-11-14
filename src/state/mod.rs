@@ -1669,6 +1669,22 @@ impl JffState {
             return None;
         }
         let (app_id, title) = crate::feature::osd::toplevel_names(root);
+        // The tag the user's rules give the window, decided before the rest so that every rule
+        // below (and the container and layout code later) sees it. One that was set by hand
+        // already (the IPC) is kept.
+        if crate::protocol::toplevel_tag::user_tag_of(root).is_none() {
+            let app_tag = crate::protocol::toplevel_tag::app_tag_of(root);
+            let named = self.config.user_tag_for(&WindowFacts {
+                app_id: &app_id,
+                title: &title,
+                tag: app_tag.as_deref(),
+                dialog,
+                restored,
+            });
+            if let Some(tag) = named {
+                crate::protocol::toplevel_tag::set_user_tag(root, Some(tag.to_owned()));
+            }
+        }
         let tag = crate::protocol::toplevel_tag::tag_of(root);
         let facts = WindowFacts {
             app_id: &app_id,
