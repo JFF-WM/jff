@@ -2,89 +2,124 @@
 //
 // Copy this file to ~/.config/jff/config.kdl (or point $JFF_CONFIG at it) and edit.
 // Every block is optional: anything you leave out uses the built-in default.
+//
+// jff reloads the file when you save it (or on the `reload-config` bind). Check a file without
+// starting jff with `jff check-config [FILE]`: it reports errors and warns about unknown
+// top-level nodes, which are otherwise silently ignored. An unknown key INSIDE a known block
+// is an error.
+//
+// Flags (`maximize-new-windows`, `no-client-decorations`, `numlock`, `include-cursor`,
+// `copy-to-clipboard`, `enable` in `log`, `hdr`, ...) accept a bare name (`numlock`),
+// `#true` / `#false`, `"true"` / `"false"`, `"yes"` / `"no"` or `"on"` / `"off"`.
+// Colors are written as "#rgb", "#rgba", "#rrggbb" or "#rrggbbaa".
+//
+// Lines that start with // and show a default value are the built-in behavior: uncomment and
+// change them to taste. Lines marked "off by default" do nothing until you turn them on.
 
-// Number of workspaces.
+// ---------------------------------------------------------------------------------------------
+// Workspaces
+// ---------------------------------------------------------------------------------------------
+
+// Number of workspaces: 1 to 64, 9 by default.
+// With `per-output`, every monitor has a workspace of its own instead of all monitors switching
+// together.
 workspaces { count 5; per-output }
 //workspaces 5 { per-output } // number plus block also works
+//workspaces 9                // just the number
 
-// Workspace wall.
+// Workspace wall (off by default). While you drag a thumbnail in the overview, a square per
+// workspace appears to drop it on. `workspace-wall` alone turns it on, `workspace-wall #false`
+// or `off` inside the block turns it off.
 workspace-wall {
-    height 240
-    thumbnails #true
+    height 240      // px, 32 to 400, 96 by default
+    thumbnails #true // draw the windows in the squares (on by default)
 }
 
-// Maximize new windows when they open.
+// ---------------------------------------------------------------------------------------------
+// Windows
+// ---------------------------------------------------------------------------------------------
+
+// Maximize new windows when they open (on by default). A window-rule can override it.
 maximize-new-windows #true
 
 // Draw windows without client-side decorations (titlebars) where the app allows it.
 no-client-decorations #true
 
-// Tearing. Off by default. With it on, a fullscreen window that covers the monitor and asked
+// Restore the apps of the last session (off by default). While on, jff remembers every open
+// window (its app id, workspace and monitor) in $XDG_STATE_HOME/jff-wm/open-apps. At the next
+// start, after `autostart` has run, each of those apps is started once and its windows are put
+// back on the monitor and workspace they were on. Apps already in `autostart` are not started
+// twice, apps with no .desktop file are skipped. The monitor and workspace saved here win over
+// those of a window-rule. Read at startup: turning it on in a running session starts saving,
+// and the next session restores. While it is off, jff neither reads nor writes the list.
+// restore-apps #true
+
+// Tiling containers (off by default): groups of windows that tile among themselves. Needed by
+// `open-in-container` in a window-rule, `container-rule`, and the container binds below.
+// tiling-containers #true
+
+// Hold this key and drag with the mouse to move/resize windows. Alt (the default), Super, Ctrl
+// or Shift.
+drag-modifier "Super"
+
+// Hot corner: resting the pointer in a square at the top-left of a monitor opens the overview
+// (and closes it again if it is open). Off unless this block (or `hot-corner N`) exists.
+// `hot-corner 0` turns it off. While it is on, the pointer cannot change monitor through the
+// corner's `size` px of edge.
+hot-corner {
+    size 10         // px, 0 to 64, 4 by default
+    dwell-ms 50     // how long the pointer has to rest, 0 to 5000, 250 by default
+    //monitor "DP-1" // only on this monitor, repeat the line for more. Default: every monitor
+}
+//hot-corner 6      // just the size
+
+// Global hotkeys (xx-hotkey-v1, off by default): clients may bind their own hotkeys, which then
+// work whatever has the keyboard. See also `forward-key` in binds.
+global-hotkeys #true
+
+// Tearing (off by default). With it on, a fullscreen window that covers the monitor and asked
 // for tearing (wp_tearing_control_v1, which games use) is shown with async page flips: lower
 // input lag, visible tearing. Anything else, and any frame the hardware can't flip this way,
 // is shown normally. Needs a Smithay with async page flips.
 // allow-tearing #true
 
-// Hold this key and drag with the mouse to move/resize windows.
-drag-modifier "Super"
+// ---------------------------------------------------------------------------------------------
+// Looks
+// ---------------------------------------------------------------------------------------------
 
-// enable global hotkeys
-global-hotkeys #true
+// Gap in px around maximized windows and between snapped ones: 0 to 512, 0 by default.
+gaps 10
 
-screenshot {
-    // Where screenshots are saved. Leave out to only copy to the clipboard.
-    path "~/Pictures/"
-    include-cursor #false
-    copy-to-clipboard #true
+// Corner radius of windows in px: 0 to 256, 0 by default.
+radius 12
+
+// Corner radius of popups (menus, tooltips) in px, 0 to 256. Leave out to use `radius`.
+// popup-radius 8
+
+// Window border. Having the block at all turns borders on (2 px unless `width` says otherwise,
+// `width 0` turns them off again).
+border {
+    width 3                    // px, 0 to 64
+    color "#333567"            // unfocused windows
+    focus-color "#333436"      // the focused window
+    focus-color-2 "#ff3c36"    // a second color: the focused border blends between the two
+    fade-ms 300                // time to change color, 0 to 5000, 150 by default
+    animate "none"             // "none" (default), "spin" or "sweep": how the focused border moves
+    period-ms 3000             // one turn of the animation, up to 600000, 3000 by default
 }
 
-osd {
-    // off
-    timeout-ms 5000
-    font "Inter"
-}
-
+// Window animations. `window-animations #false`, or `off` inside the block, turns them off.
 window-animations {
-    open "slide" // zoom, slide, pop, none. Zoom, slide
-    open-ms 250
-    close-ms 80
+    open "slide"    // "fade" (default), "zoom", "slide", "pop" or "none"
+    open-ms 250     // 0 to 10000, 100 by default
+    close-ms 80     // 0 to 10000, 80 by default
 }
-
-// Overview and switcher: how the selected thumbnail is outlined.
-overview {
-    selection-color "#333567"
-    selection-width 3
-}
-
 // A second window-animations block is ignored (only the first one counts), so this one is
 // kept as a commented alternative:
 // window-animations {
 //     open-ms 100
 //     close-ms 80
 // }
-
-hot-corner {
-    size 10
-    dwell-ms 50
-}
-
-switcher {
-    thumbnail-height 640   // px, 32 to 4096
-    slide-ms 150           // 0 to 2000, 0 = jump instead of slide
-}
-
-border {
-    width 3
-    color "#333567"
-    focus-color "#333436"
-    focus-color-2 "#ff3c36"
-    fade-ms 300
-    animate "none" // spin, sweep, none
-    period-ms 3000
-}
-
-gaps 10
-radius 12
 
 // Background blur. Blur is OFF unless this block exists, writing it turns it on.
 // It only shows on surfaces that are (partly) transparent, for example a terminal with
@@ -103,15 +138,70 @@ blur {
     //ignore-window "firefox-developer-edition"
     //ignore-layer "jfshell-Bottom"   // layer-surface namespaces that never get blur
     //ignore-layer "selection"
-    passes 5            // 1-31, each pass doubles the radius
-    offset 3.0          // sample stretch, bigger = blurrier (and blockier)
+    passes 5            // 1-31, each pass doubles the radius, 3 by default
+    offset 3.0          // sample stretch, bigger = blurrier (and blockier), above 0, 3.0 by default
     //all-windows       // blur every window, not just those that ask for it
     //all-layers        // also blur panels/launchers on top/overlay layers
     //behind-windows    // also blur windows behind (default: wallpaper only)
     //off               // turn blur off without deleting the settings
 }
 
-// Programs started with the session.
+// Overview (and switcher): how the selected thumbnail is outlined.
+overview {
+    selection-color "#333567" // "#rrggbbaa", a translucent blue by default
+    selection-width 3         // px, 0 for no outline, 4 by default
+}
+
+// Window switcher (the `switch-window` binds): a row of thumbnails, most recently used first.
+switcher {
+    thumbnail-height 640   // px, 32 to 4096. Leave out for the default size
+    slide-ms 150           // 0 to 2000, 0 = jump instead of slide, 120 by default
+}
+
+// On-screen display: toasts for volume-like changes, errors, and so on.
+osd {
+    //off             // no toasts. Errors are still shown
+    timeout-ms 5000   // 100 to 60000, 1800 by default
+    font "Inter"      // a family name, "sans-serif" by default
+}
+
+// Screenshots.
+screenshot {
+    // Where screenshots are saved. Leave out to only copy to the clipboard.
+    path "~/Pictures/"
+    include-cursor #false     // off by default
+    copy-to-clipboard #true   // on by default
+}
+
+// Write jff's log to a file (off by default).
+log {
+    enable
+    path "/tmp/"          // a file, or a folder ending in "/". Optional, default /tmp/jff.log
+    level "debug"         // "error", "warn", "info" (default), "debug" or "trace"
+}
+
+// ---------------------------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------------------------
+
+keyboard {
+    // Keyboard layout (XKB). Examples: layout "us", layout "br" + variant "abnt2".
+    xkb {
+        layout "us"
+        // variant "intl"
+        // options "grp:alt_shift_toggle,caps:escape"
+        // rules "evdev"
+        // model "pc105"
+    }
+    repeat-delay 300    // ms before a held key repeats, 200 by default
+    repeat-rate 40      // repeats per second, 25 by default
+    //numlock #true     // Num Lock state at startup and after a keymap change, on by default
+}
+
+// ---------------------------------------------------------------------------------------------
+// Programs started with the session (they see WAYLAND_DISPLAY, DISPLAY and the portal vars)
+// ---------------------------------------------------------------------------------------------
+
 // autostart "cmd" "arg" ...  runs a program directly.
 // sh-autostart "cmd"         runs a line through the shell (pipes, &, variables).
 // Examples (uncomment and adjust):
@@ -119,71 +209,55 @@ blur {
 // sh-autostart "waybar"
 // autostart "gnome-keyring-daemon" "--start" "--components=secrets"
 
-binds {
-    // Programs
-    Alt+Return { terminal; }
-    // Alt+D { spawn "fuzzel", }              // app launcher, needs fuzzel installed
-    // Super+L { spawn-sh "swaylock", }       // lock screen, needs swaylock installed
-
-    // global hotkeys for OBS Studio
-    Ctrl+Shift+g { forward-key "com.obsproject.Studio"; }
-    Ctrl+Alt+g { forward-key "com.obsproject.Studio"; }
-
-    // Windows
-    Alt+M { maximize; }
-    Super+F { fullscreen; }
-    Alt+Q { close; }
-    Alt+O { overview; }
-    // MouseBack { overview, }                // mouse side button
-
-    // Session
-    Alt+Shift+R { reload-config; }
-    Ctrl+Alt+BackSpace { quit; }
-
-    // Screenshots
-    Print { screenshot-area; }
-    Ctrl+Print { screenshot-fullscreen; }
-    Alt+Print { screenshot-window; }
-
-    // Workspaces
-    Alt+1 { workspace 1; }
-    Alt+2 { workspace 2; }
-    Alt+3 { workspace 3; }
-    Alt+4 { workspace 4; }
-    Alt+5 { workspace 5; }
-    Alt+6 { workspace 6; }
-    Alt+7 { workspace 7; }
-    Alt+8 { workspace 8; }
-    Alt+9 { workspace 9; }
-    Ctrl+Alt+Right { workspace-next; }
-    Ctrl+Alt+Left { workspace-prev; }
-    Alt+Shift+1 { move-to-workspace 1; }
-    Alt+Shift+2 { move-to-workspace 2; }
-    Alt+Shift+3 { move-to-workspace 3; }
-    Alt+Shift+4 { move-to-workspace 4; }
-    Alt+Shift+5 { move-to-workspace 5; }
-    Alt+Shift+6 { move-to-workspace 6; }
-    Alt+Shift+7 { move-to-workspace 7; }
-    Alt+Shift+8 { move-to-workspace 8; }
-    Alt+Shift+9 { move-to-workspace 9; }
-}
-
+// ---------------------------------------------------------------------------------------------
 // Monitors. Optional: without this block monitors use their preferred mode.
 // Use the name your monitor has (for example from `wlr-randr`), one block per monitor.
+// `jff-winit` is the name of the window jff opens when it runs nested inside another desktop.
+// ---------------------------------------------------------------------------------------------
+
 // outputs {
 //     output "HDMI-A-1" {
+//         //off                              // turn this monitor off
 //         position 0 0                       // top-left corner in the shared desktop
-//         mode "1920x1080@60"                // WIDTHxHEIGHT@REFRESH
-//         adaptive-sync "fullscreen"         // "off", "fullscreen" or "always" (quoted)
-//         content-type-hint
-//         // icc-profile "/path/to/profile.icm"
+//         mode "1920x1080@60"                // WIDTHxHEIGHT or WIDTHxHEIGHT@REFRESH
+//         adaptive-sync "fullscreen"         // "off", "fullscreen" (default) or "always" (quoted)
+//         content-type-hint                  // tell the monitor what is on screen (game, video...)
+//         icc-profile "~/.local/share/icc/panel.icc" // the monitor's colors, see color-management
+//         color-management #false            // this monitor is not color managed ("off" works too)
 //     }
 //     output "DP-1" {
 //         position 1920 0                    // place it to the right of the first
 //         mode "1920x1080@144"
+//
+//         // HDR (off by default): signal this monitor as HDR10 (PQ, BT.2020) when its EDID and
+//         // the connector allow it. The settings below only apply to a monitor with `hdr`,
+//         // `jff check-config` warns when they stand alone.
+//         hdr
+//         sdr-white 203                      // cd/m2 SDR white is shown at, 10 to 1000, 203 by default
+//         hdr-peak 1000                      // replaces the peak the EDID states, 100 to 10000
+//         hdr-tone-map "bt2390"              // how the frame is rolled off under the peak: "knee" (default) or "bt2390"
+//         hdr-content-metadata #true         // fit the roll-off to the content's own peak (on by default)
+//     }
+//     output "jff-winit" {
+//         hdr                                // simulate HDR when nested (hdr-peak is 1000 by default here)
 //     }
 // }
 
+// Color management (wp-color-management). On by default. With no block, surfaces a client
+// tagged with another gamut or curve than the monitor's are converted to it.
+// color-management {
+//     off                        // do not offer wp-color-management, draw every surface as it always was (needs a restart)
+//     convert-srgb               // convert untagged (sRGB) surfaces too: stops them looking oversaturated on a wide-gamut panel, give the monitor an `icc-profile`
+//     fullscreen-passthrough     // never convert a fullscreen window, so it can still be scanned out
+// }
+
+// Color representation (wp-color-representation). Off by default. With `yuv`, video that says
+// which YUV matrix and range it uses (BT.709 limited range, say) is drawn with exactly those,
+// instead of whatever the graphics driver assumes (BT.601 limited). Such a surface is drawn
+// by the renderer, so it does not get direct scanout.
+// color-representation { yuv }
+
+// ---------------------------------------------------------------------------------------------
 // Window rules. Any number of blocks.
 //
 // A window gets the FIRST rule whose `match` lines all hold, top to bottom, so put specific
@@ -191,7 +265,7 @@ binds {
 //
 //   match app-id="..."     the app id, exactly
 //   match title="..."      the title contains this text
-//   match tag="..."        the tag the app set (xdg-toplevel-tag), exactly
+//   match tag="..."        the tag of the window: the app's own (xdg-toplevel-tag) or yours (`tag` below)
 //   match dialog=#true     a dialog (has a parent, or said so), #false: not a dialog
 //   match restored=#true   put back by the app's session, #false: a new window
 //   (several match lines, or several key=value pairs on one line, must all hold,
@@ -201,10 +275,24 @@ binds {
 //   open-on-output "pointer"   the monitor the pointer is on
 //   open-workspace N       1 to 64
 //   open-maximized #true   #false keeps the window floating
-//   open-size W H          pixels, kept inside the monitor
+//   open-size W H          pixels, 1 to 16384, kept inside the monitor
 //   floating               keep the window floating (no auto-maximize)
+//   open-in-container "NAME"   join the container of that name on the window's workspace and
+//                          monitor, or start one that fills the usable area. Needs
+//                          `tiling-containers`. A dialog joins too: use `match dialog=#false` or
+//                          a tag to keep dialogs out. Cannot be combined with `floating`
+//   tag "NAME"             give the window a tag of yours, which `match tag` and every rule sees
+//                          from then on, whatever its title changes to. A rule with only a `tag`
+//                          does not use up the one rule a window gets
 //
 // Change DP-1 and HDMI-A-2 below to your monitor names.
+// ---------------------------------------------------------------------------------------------
+
+// A rule with only a tag: names the window, and the rules below can match it.
+// window-rule {
+//     match app-id="firefox-developer-edition" title="Picture-in-Picture"
+//     tag "picture-in-picture"
+// }
 
 // A tagged browser window: first monitor, workspace 1, maximized.
 window-rule {
@@ -256,6 +344,13 @@ window-rule {
     open-on-output "pointer"
 }
 
+// Terminals open in a container named "Terminals" (needs `tiling-containers`).
+// window-rule {
+//     match app-id="foot" dialog=#false
+//
+//     open-in-container "Terminals"
+// }
+
 // Keep last. Windows an app's session put back go to workspace 1. They keep the monitor,
 // size and mode that were saved, so only open-workspace applies to them.
 window-rule {
@@ -264,26 +359,124 @@ window-rule {
     open-workspace 1
 }
 
-// Color representation (wp-color-representation). Off by default. With `yuv`, video that says
-// which YUV matrix and range it uses (BT.709 limited range, say) is drawn with exactly those,
-// instead of whatever the graphics driver assumes (BT.601 limited). Such a surface is drawn
-// by the renderer, so it does not get direct scanout.
-// color-representation { yuv }
+// ---------------------------------------------------------------------------------------------
+// Container rules (need `tiling-containers`). Any number of blocks.
+//
+// A container rule does not create a container, it names the one you create, from the first
+// window that fits. The `match` lines all have to hold (app-id, title or tag, not dialog or
+// restored), the first rule that fits a window applies.
+//   name "NAME"     the container's name, for `focus-container` and `open-in-container`
+//   layout "NAME"   apply the saved container layout NAME (see `save-container-layout`) every time
+//                   a window that fits the rule joins a container, so tagged windows find their
+//                   slot as they open
+// `jff check-config` warns about a rule with neither.
+// ---------------------------------------------------------------------------------------------
 
-keyboard {
-    // Keyboard layout (XKB). Examples: layout "us", layout "br" + variant "abnt2".
-    xkb {
-        layout "us"
-        // variant "intl"
-        // options "grp:alt_shift_toggle,caps:escape"
-    }
-    repeat-delay 300    // ms before a held key repeats
-    repeat-rate 40      // repeats per second
-}
+// container-rule {
+//     match app-id="foot"
+//     name "Terminals"
+// }
+// container-rule {
+//     match tag="dev"
+//     name "Dev"
+//     layout "Dev"
+// }
 
-// add log file
-log {
-    enable
-    path "/tmp/"   // optional, default /tmp/
-    level "debug"         // optional, default "info"
+// ---------------------------------------------------------------------------------------------
+// Key bindings: "Mod+Mod+Key" { action, }
+//
+// Modifiers: Ctrl, Alt, Shift, Super (also Logo, Mod4). The key is an XKB keysym name (Return,
+// Tab, 1, F5, Print...), or MouseBack / MouseForward for the side buttons of a mouse.
+// Workspace numbers count from 1. The built-in binds (Alt+Return terminal, Alt+M maximize,
+// Alt+F fullscreen, Alt+Q close, Alt+O overview, Alt+Tab switch-window, Alt+1..9 workspaces...)
+// are only used when there is no config file at all. Once you have one, only the binds in it
+// exist, so list everything you want to keep.
+//
+// Actions:
+//   terminal                      open $JFF_TERMINAL, $TERMINAL, or alacritty
+//   spawn "prog" "arg" ...        run a program directly
+//   spawn-sh "line"               run a line through the shell
+//   maximize / fullscreen         toggle on the focused window
+//   snap-left / snap-right / snap-top / snap-bottom
+//   close                         ask the focused window to close
+//   overview                      every window of the monitor as a thumbnail
+//   switch-window / switch-window-back   the window switcher (press again to move on, letting go of the modifier picks)
+//   workspace N / workspace-next / workspace-prev
+//   move-to-workspace N           send the focused window there
+//   reload-config / quit
+//   screenshot-area / screenshot-fullscreen / screenshot-window
+//   toggle-shortcuts-inhibit      let the focused window's keyboard-shortcuts inhibitor go, or come back
+//   forward-key "APP-ID"          hand the key to that app's window without focusing it, for its own global hotkeys
+//   Needing `tiling-containers`:
+//   focus-container "NAME"        focus the first container with that name on this workspace
+//   container-next / container-prev   move the focus through the focused window's container
+//   container-drag                pick up the focused window of a container with the pointer (click to drop, right click cancels)
+//   container-eject               take the focused window out of its container and float it
+//   save-container-layout "NAME"  save the shape of the focused window's container
+//   apply-container-layout "NAME" put the container in that shape again
+// ---------------------------------------------------------------------------------------------
+
+binds {
+    // Programs
+    Alt+Return { terminal; }
+    // Alt+D { spawn "fuzzel", }              // app launcher, needs fuzzel installed
+    // Super+L { spawn-sh "swaylock", }       // lock screen, needs swaylock installed
+
+    // global hotkeys for OBS Studio
+    Ctrl+Shift+g { forward-key "com.obsproject.Studio"; }
+    Ctrl+Alt+g { forward-key "com.obsproject.Studio"; }
+
+    // Windows
+    Alt+M { maximize; }
+    Super+F { fullscreen; }
+    Alt+Q { close; }
+    Alt+O { overview; }
+    Alt+Tab { switch-window; }
+    Alt+Shift+Tab { switch-window-back; }
+    // MouseBack { overview, }                // mouse side button
+    // Alt+Left { snap-left, }
+    // Alt+Right { snap-right, }
+    // Alt+Up { snap-top, }
+    // Alt+Down { snap-bottom, }
+    // Super+Escape { toggle-shortcuts-inhibit, }
+
+    // Tiling containers (need `tiling-containers`)
+    // Super+T { focus-container "Terminals", }
+    // Super+J { container-next, }
+    // Super+K { container-prev, }
+    // Super+D { container-drag, }
+    // Super+E { container-eject, }
+    // Super+S { save-container-layout "Dev", }
+    // Super+A { apply-container-layout "Dev", }
+
+    // Session
+    Alt+Shift+R { reload-config; }
+    Ctrl+Alt+BackSpace { quit; }
+
+    // Screenshots
+    Print { screenshot-area; }
+    Ctrl+Print { screenshot-fullscreen; }
+    Alt+Print { screenshot-window; }
+
+    // Workspaces
+    Alt+1 { workspace 1; }
+    Alt+2 { workspace 2; }
+    Alt+3 { workspace 3; }
+    Alt+4 { workspace 4; }
+    Alt+5 { workspace 5; }
+    Alt+6 { workspace 6; }
+    Alt+7 { workspace 7; }
+    Alt+8 { workspace 8; }
+    Alt+9 { workspace 9; }
+    Ctrl+Alt+Right { workspace-next; }
+    Ctrl+Alt+Left { workspace-prev; }
+    Alt+Shift+1 { move-to-workspace 1; }
+    Alt+Shift+2 { move-to-workspace 2; }
+    Alt+Shift+3 { move-to-workspace 3; }
+    Alt+Shift+4 { move-to-workspace 4; }
+    Alt+Shift+5 { move-to-workspace 5; }
+    Alt+Shift+6 { move-to-workspace 6; }
+    Alt+Shift+7 { move-to-workspace 7; }
+    Alt+Shift+8 { move-to-workspace 8; }
+    Alt+Shift+9 { move-to-workspace 9; }
 }
