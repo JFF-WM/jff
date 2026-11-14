@@ -528,3 +528,43 @@ fn tag_and_untag_are_parsed() {
     assert!(parse_request("tag a b").is_err());
     assert!(COMMANDS.contains("tag"));
 }
+
+#[test]
+fn container_layout_requests_are_parsed() {
+    assert_eq!(
+        parse_request("layout-save Dev"),
+        Ok(Request::LayoutSave("Dev".into(), None))
+    );
+    assert_eq!(
+        parse_request("layout-save Dev 7"),
+        Ok(Request::LayoutSave("Dev".into(), Some(7)))
+    );
+    assert_eq!(
+        parse_request("layout-apply Dev"),
+        Ok(Request::LayoutApply("Dev".into(), None))
+    );
+    assert_eq!(
+        parse_request("layout-apply Dev 7"),
+        Ok(Request::LayoutApply("Dev".into(), Some(7)))
+    );
+    assert_eq!(parse_request("layout-list"), Ok(Request::LayoutList));
+    assert_eq!(
+        parse_request("layout-delete Dev"),
+        Ok(Request::LayoutDelete("Dev".into()))
+    );
+    assert!(parse_request("layout-save").is_err());
+    assert!(parse_request("layout-save Dev x").is_err());
+    assert!(parse_request("layout-save Dev 7 8").is_err());
+    assert!(parse_request("layout-apply").is_err());
+    assert!(parse_request("layout-list 3").is_err());
+    assert!(parse_request("layout-delete").is_err());
+    assert!(parse_request("layout-delete a b").is_err());
+    for command in [
+        "layout-save",
+        "layout-apply",
+        "layout-list",
+        "layout-delete",
+    ] {
+        assert!(COMMANDS.contains(command));
+    }
+}

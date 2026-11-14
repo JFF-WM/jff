@@ -17,6 +17,7 @@ pub mod hdr_png;
 pub mod hdr_scanout;
 pub mod json;
 pub mod layout;
+pub mod layout_template;
 pub mod overview_grid;
 pub mod region;
 pub mod scroll_steps;

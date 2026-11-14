@@ -819,6 +819,8 @@ impl JffState {
             Action::ContainerStep { backwards } => self.focus_container_step(backwards),
             Action::ContainerDrag => self.start_focused_tile_move(),
             Action::ContainerEject => self.eject_focused(),
+            Action::SaveContainerLayout(name) => self.container_layout_bind(&name, true),
+            Action::ApplyContainerLayout(name) => self.container_layout_bind(&name, false),
             // Handled where the key is, it needs the key and its state.
             Action::ForwardKey(_) => {}
             Action::Quit => self.loop_signal.stop(),

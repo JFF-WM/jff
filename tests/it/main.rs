@@ -29,6 +29,7 @@ mod input_timestamps;
 mod ipc;
 mod ipc_events;
 mod layout;
+mod layout_template;
 mod logging;
 mod osd;
 mod outputs;

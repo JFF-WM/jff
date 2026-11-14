@@ -12,8 +12,8 @@
 //! unknown key *inside* a known block is an error.
 //!
 //! `tiling-containers` turns on tiling containers (groups of windows that tile among themselves, see `desk::container`), and is off by default. It accepts a bare name or `#true` / `#false`.
-//! `container-rule { match app-id="…", title="…", tag="…", name "…" }` (any number, the `match` lines all have to hold, the first rule that fits a window gives the container its name): a rule does not create a container, it names the one the user creates, from the first window that fits. `name` is its only action, `jff check-config` warns about a rule without one, and any other key inside it is an error.
-//! `binds` has five actions for containers: `focus-container "NAME"` focuses the first container with that name on the current workspace (an error toast when there is none), `container-next` and `container-prev` move the focus to the next or previous window of the focused window's container in tree order, wrapping, and do nothing for a window that is in no container. `maximize` on a window of a container makes it fill the container's rectangle, the others stay under it, and `maximize` again (or the window closing) shows the tree again. A window that closes leaves the tree, and the others take its room. `container-drag` picks up the focused window of a container with the pointer: the next left click puts it down (a right click cancels), over another window of a container the middle swaps the two places and an edge puts it beside that window, at the edge of the monitor or off every container it leaves the container and snaps, maximizes or floats as any dropped window does. Dragging a window of a container by its titlebar or with `drag-modifier` does the same. `container-eject` takes the focused window out of its container and floats it. Both do nothing for a window that is in no container.
+//! `container-rule { match app-id="…", title="…", tag="…", name "…" }` (any number, the `match` lines all have to hold, the first rule that fits a window gives the container its name): a rule does not create a container, it names the one the user creates, from the first window that fits. `name` and `layout "NAME"` are its actions (`layout` applies the saved container layout NAME, see `save-container-layout`, every time a window that fits the rule joins a container, so tagged windows find their slot as they open), `jff check-config` warns about a rule with neither, and any other key inside it is an error.
+//! `binds` has five actions for containers: `focus-container "NAME"` focuses the first container with that name on the current workspace (an error toast when there is none), `container-next` and `container-prev` move the focus to the next or previous window of the focused window's container in tree order, wrapping, and do nothing for a window that is in no container. `maximize` on a window of a container makes it fill the container's rectangle, the others stay under it, and `maximize` again (or the window closing) shows the tree again. A window that closes leaves the tree, and the others take its room. `container-drag` picks up the focused window of a container with the pointer: the next left click puts it down (a right click cancels), over another window of a container the middle swaps the two places and an edge puts it beside that window, at the edge of the monitor or off every container it leaves the container and snaps, maximizes or floats as any dropped window does. Dragging a window of a container by its titlebar or with `drag-modifier` does the same. `container-eject` takes the focused window out of its container and floats it. Both do nothing for a window that is in no container. `save-container-layout "NAME"` saves the shape of the focused window's container (its splits and ratios, one slot per window, the slot of a tagged window keeps the tag, see `window-rule` `tag`) and `apply-container-layout "NAME"` puts the container in that shape again: each window goes to the slot with its tag, the others fill the free slots in their current order, a slot with no window closes up and a window with no slot is split off the last one. Both show an error toast when they cannot. The layouts are kept in `$XDG_STATE_HOME/jff-wm/container-layouts` (see `jff msg layout-list`).
 //!
 //! `color-management { … }` (`off`: jff does not offer wp-color-management and draws every
 //! surface as it always did, `convert-srgb`: surfaces with no color description, which are sRGB,
@@ -215,6 +215,10 @@ pub enum Action {
     /// Take the focused window out of its tiling container: it floats where it was, the others
     /// take its room. Does nothing for a window that is in no container.
     ContainerEject,
+    /// Save the focused window's container layout under this name (`save-container-layout "Dev"`).
+    SaveContainerLayout(String),
+    /// Lay out the focused window's container as the saved layout of this name says (`apply-container-layout "Dev"`).
+    ApplyContainerLayout(String),
     /// Hand the key (press and release) to the window with this app id, wherever it is and
     /// whatever has the keyboard, so an app's own global hotkey works (`forward-key "com.obsproject.Studio"`).
     ForwardKey(String),
@@ -1005,8 +1009,10 @@ pub struct ContainerRule {
     /// Only `app-id`, `title` and `tag` lines: a container is named for what its window is, not
     /// for how it opened.
     pub matches: Vec<WindowMatch>,
-    /// `name`: what the container is called. A rule without one does nothing.
+    /// `name`: what the container is called.
     pub name: Option<String>,
+    /// `layout`: the saved container layout applied whenever a window that fits joins a container.
+    pub layout: Option<String>,
 }
 
 impl ContainerRule {
@@ -1220,9 +1226,9 @@ impl Config {
             }
         }
         for (i, rule) in config.container_rules().iter().enumerate() {
-            if rule.name.is_none() {
+            if rule.name.is_none() && rule.layout.is_none() {
                 warnings.push(format!(
-                    "container-rule {} has no name, it does nothing",
+                    "container-rule {} has no name or layout, it does nothing",
                     i + 1
                 ));
             }
@@ -1583,6 +1589,14 @@ impl Config {
             .iter()
             .filter(|rule| rule.matches(window))
             .find_map(|rule| rule.name.as_deref())
+    }
+
+    /// The saved layout to apply when `window` joins a container: that of the first rule that fits and has a `layout`.
+    pub fn container_layout_for(&self, window: &WindowFacts<'_>) -> Option<&str> {
+        self.container_rules
+            .iter()
+            .filter(|rule| rule.matches(window))
+            .find_map(|rule| rule.layout.as_deref())
     }
 
     /// The screenshot block.
@@ -2114,6 +2128,13 @@ fn parse_container_rule(node: &KdlNode) -> anyhow::Result<ContainerRule> {
                 }
                 rule.name = Some(name);
             }
+            "layout" => {
+                let layout = string_arg(child)?;
+                if layout.trim().is_empty() {
+                    bail!("layout takes the name of a saved layout, not an empty string");
+                }
+                rule.layout = Some(layout);
+            }
             other => bail!("unknown container-rule setting {other:?}"),
         }
     }
@@ -2550,6 +2571,18 @@ fn parse_action(node: &KdlNode) -> anyhow::Result<Action> {
         "container-prev" => no_args(Action::ContainerStep { backwards: true }),
         "container-drag" => no_args(Action::ContainerDrag),
         "container-eject" => no_args(Action::ContainerEject),
+        "save-container-layout" => match <[String; 1]>::try_from(args) {
+            Ok([name]) if !name.trim().is_empty() => Ok(Action::SaveContainerLayout(name)),
+            _ => bail!(
+                "save-container-layout takes one layout name, like save-container-layout \"Dev\""
+            ),
+        },
+        "apply-container-layout" => match <[String; 1]>::try_from(args) {
+            Ok([name]) if !name.trim().is_empty() => Ok(Action::ApplyContainerLayout(name)),
+            _ => bail!(
+                "apply-container-layout takes one layout name, like apply-container-layout \"Dev\""
+            ),
+        },
         "quit" => no_args(Action::Quit),
         other => bail!("unknown action {other:?}"),
     }

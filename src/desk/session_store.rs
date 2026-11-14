@@ -52,7 +52,7 @@ fn mode_from_name(name: &str) -> Option<WindowMode> {
     })
 }
 
-fn escape(s: &str) -> String {
+pub(super) fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -66,7 +66,7 @@ fn escape(s: &str) -> String {
     out
 }
 
-fn unescape(s: &str) -> String {
+pub(super) fn unescape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -139,8 +139,8 @@ pub fn parse_store(text: &str) -> Store {
     store
 }
 
-/// `$XDG_STATE_HOME/jff-wm/sessions`, next to the other state jff keeps.
-pub fn store_path() -> Option<PathBuf> {
+/// `$XDG_STATE_HOME/jff-wm/FILE`, where jff keeps its state.
+pub(super) fn state_file(file: &str) -> Option<PathBuf> {
     let absolute = |name: &str| {
         std::env::var_os(name)
             .map(PathBuf::from)
@@ -148,7 +148,12 @@ pub fn store_path() -> Option<PathBuf> {
     };
     let state =
         absolute("XDG_STATE_HOME").or_else(|| absolute("HOME").map(|h| h.join(".local/state")))?;
-    Some(state.join("jff-wm").join("sessions"))
+    Some(state.join("jff-wm").join(file))
+}
+
+/// `$XDG_STATE_HOME/jff-wm/sessions`, next to the other state jff keeps.
+pub fn store_path() -> Option<PathBuf> {
+    state_file("sessions")
 }
 
 pub fn load_store() -> Store {

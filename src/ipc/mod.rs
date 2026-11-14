@@ -18,6 +18,10 @@
 //! unfullscreen [ID]          leave fullscreen
 //! focus ID                   raise a view and give it the keyboard (switches workspace if needed)
 //! containers                 the tiling containers on the current workspace
+//! layout-save NAME [ID]      save the layout of a view's container as NAME (without ID: the focused view's, else the only container's)
+//! layout-apply NAME [ID]     lay that container out the way the saved layout NAME says
+//! layout-list                the saved container layouts
+//! layout-delete NAME         forget a saved layout
 //! tag [NAME [ID]]            give a view (the focused one without an ID) a tag of yours, or show its tag without arguments
 //! untag [ID]                 take the tag you gave a view away again
 //! workspaces                 the shown workspace and how many there are
@@ -67,6 +71,8 @@
 //! order, `focused` the one that has the focus inside it, `maximized` the one that fills it
 //! (null when none does), and `x`, `y`, `width` and `height` the rectangle it is laid out in
 //! (all null before it has been laid out).
+//!
+//! `layout-save` replies `{"ok":true,"name":"Dev","layout":"h0.7(_,@browser)","slots":[null,"browser"]}`, `layout-apply` replies `{"ok":true,"name":"Dev","slots":2,"empty":0,"extra":0}`, `layout-list` replies `{"ok":true,"layouts":[{"name":..,"layout":..,"slots":[..]}]}`, a tagged window goes to the slot with its tag, layouts are in `$XDG_STATE_HOME/jff-wm/container-layouts`.
 //!
 //! `outputs` replies `{"ok":true,"outputs":[OUTPUT,...]}`, each OUTPUT what `watch` describes
 //! below (`name`, `x`, `y`, `width`, `height`, `scanout`, `adaptive_sync`, `color`), as it is
@@ -306,6 +312,14 @@ pub enum Request {
     Containers,
     /// `tag [NAME [ID]]` and `untag [ID]`: what to do with the user's tag of a view.
     Tag(Option<u64>, TagOp),
+    /// `layout-save NAME [ID]`: keep the layout of the view's container.
+    LayoutSave(String, Option<u64>),
+    /// `layout-apply NAME [ID]`: lay the view's container out as the saved layout says.
+    LayoutApply(String, Option<u64>),
+    /// `layout-list`: the saved layouts.
+    LayoutList,
+    /// `layout-delete NAME`: forget a saved layout.
+    LayoutDelete(String),
     Workspace(Goto),
     /// Workspace number, counted from 1, as typed.
     MoveToWorkspace(Option<u64>, usize),
@@ -332,7 +346,7 @@ pub enum Request {
 
 pub const COMMANDS: &str =
     "views, status, outputs, focused, view-info, close, maximize, unmaximize, toggle-maximize, \
-     fullscreen, unfullscreen, focus, containers, tag, untag, workspaces, workspace, move-to-workspace, spawn, spawn-sh, \
+     fullscreen, unfullscreen, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, spawn, spawn-sh, \
      screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
@@ -340,6 +354,21 @@ fn parse_workspace_number(word: &str) -> Result<usize, String> {
         .ok()
         .filter(|n| *n >= 1)
         .ok_or_else(|| format!("{word:?} is not a workspace number (they count from 1)"))
+}
+
+/// The slot tags of `template` as a JSON array, `null` for a free slot.
+fn layout_slots_json(template: &crate::primitives::layout_template::Template) -> String {
+    let slots: Vec<String> = template.slots().into_iter().map(json_opt).collect();
+    format!("[{}]", slots.join(","))
+}
+
+/// `layout-save` or `layout-apply` (`command`) for the layout `name` and the view `id`.
+fn layout_request(command: &str, name: &str, id: Option<u64>) -> Request {
+    if command == "layout-save" {
+        Request::LayoutSave(name.to_string(), id)
+    } else {
+        Request::LayoutApply(name.to_string(), id)
+    }
 }
 
 pub fn parse_request(line: &str) -> Result<Request, String> {
@@ -421,6 +450,24 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
             return Ok(Request::Tag(Some(id), TagOp::Set((*name).to_string())));
         }
         ("tag", _) => return Err("tag takes a name and optionally a view id".to_string()),
+        ("layout-save" | "layout-apply", [name]) => {
+            return Ok(layout_request(command, name, None));
+        }
+        ("layout-save" | "layout-apply", [name, id]) => {
+            let id = id
+                .parse::<u64>()
+                .map_err(|_| format!("{id:?} is not a view id"))?;
+            return Ok(layout_request(command, name, Some(id)));
+        }
+        ("layout-save" | "layout-apply", _) => {
+            return Err(format!(
+                "{command} takes a layout name and optionally a view id"
+            ));
+        }
+        ("layout-list", []) => return Ok(Request::LayoutList),
+        ("layout-list", _) => return Err("layout-list takes no arguments".to_string()),
+        ("layout-delete", [name]) => return Ok(Request::LayoutDelete((*name).to_string())),
+        ("layout-delete", _) => return Err("layout-delete takes a layout name".to_string()),
         ("workspace", [n]) => {
             return Ok(Request::Workspace(Goto::To(parse_workspace_number(n)? - 1)));
         }
@@ -536,6 +583,48 @@ impl JffState {
                     .collect::<Vec<_>>()
                     .join(",")
             )),
+            Request::LayoutSave(name, id) => {
+                let window = self.layout_target(id)?;
+                let template = self.save_container_layout(&name, &window)?;
+                Ok(format!(
+                    "{{\"ok\":true,\"name\":{},\"layout\":{},\"slots\":{}}}\n",
+                    json_str(&name),
+                    json_str(&template.to_text()),
+                    layout_slots_json(&template),
+                ))
+            }
+            Request::LayoutApply(name, id) => {
+                let window = self.layout_target(id)?;
+                let applied = self.apply_container_layout(&name, &window)?;
+                Ok(format!(
+                    "{{\"ok\":true,\"name\":{},\"slots\":{},\"empty\":{},\"extra\":{}}}\n",
+                    json_str(&name),
+                    applied.slots,
+                    applied.empty,
+                    applied.extra,
+                ))
+            }
+            Request::LayoutList => {
+                let layouts: Vec<String> = crate::desk::layout_store::load_layouts()
+                    .iter()
+                    .map(|(name, template)| {
+                        format!(
+                            "{{\"name\":{},\"layout\":{},\"slots\":{}}}",
+                            json_str(name),
+                            json_str(&template.to_text()),
+                            layout_slots_json(template),
+                        )
+                    })
+                    .collect();
+                Ok(format!(
+                    "{{\"ok\":true,\"layouts\":[{}]}}\n",
+                    layouts.join(",")
+                ))
+            }
+            Request::LayoutDelete(name) => {
+                self.delete_container_layout(&name)?;
+                Ok("{\"ok\":true}\n".to_string())
+            }
             Request::Info(id) => {
                 let window = self.target_window(id)?;
                 Ok(format!(
@@ -788,6 +877,30 @@ impl JffState {
             None => self
                 .focused_window()
                 .ok_or_else(|| "no focused view".to_string()),
+        }
+    }
+
+    /// The window a layout request is about: the view `id`, else the focused one when it is in a container, else the focused window of the only container on the shown workspace.
+    fn layout_target(&self, id: Option<u64>) -> Result<Window, String> {
+        if id.is_some() {
+            return self.target_window(id);
+        }
+        let focused = self.focused_window();
+        if focused
+            .as_ref()
+            .is_some_and(|w| self.desk.container_of(|c| c == w).is_some())
+        {
+            return self.target_window(None);
+        }
+        let containers = self.desk.containers_on(self.current_workspace());
+        match containers.as_slice() {
+            [only] => self
+                .desk
+                .find_by_id(only.focused())
+                .map(|entry| entry.window.clone())
+                .ok_or_else(|| "the container has no windows".to_string()),
+            [] => Err("there is no tiling container on this workspace".to_string()),
+            _ => Err("the focused view is not in a container and there are several: pass the id of a view of the one you mean".to_string()),
         }
     }
 

@@ -1868,3 +1868,120 @@ fn a_container_that_was_never_laid_out_has_no_drop_target() {
     let (d, c) = container_of(&["a", "b"], &["a", "b"], Axis::Horizontal);
     assert_eq!(d.drop_target(c, (10.0, 10.0), 0), None);
 }
+
+// ---- apply_container_layout ----
+
+mod apply_layout {
+    use super::*;
+    use jff_wm::desk::LayoutApplied;
+    use jff_wm::primitives::layout_template::Template;
+
+    fn tags(
+        tags: &'static [(&'static str, &'static str)],
+    ) -> impl Fn(&&'static str) -> Option<String> {
+        move |w| {
+            tags.iter()
+                .find(|(window, _)| window == w)
+                .map(|(_, tag)| (*tag).to_owned())
+        }
+    }
+
+    #[test]
+    fn a_tagged_window_takes_the_slot_with_its_tag() {
+        // `k1` and `k2` are two terminals, `ff` the browser, split in three: k1 | k2 | ff.
+        let (mut d, c) = container_of(&["k1", "k2", "ff"], &["k1", "k2", "ff"], Axis::Horizontal);
+        let template = Template::parse("h0.7(@browser,_)").unwrap();
+
+        let applied = d
+            .apply_container_layout(c, &template, tags(&[("ff", "browser")]), 0)
+            .unwrap();
+
+        // The browser is on the left, in the 70% slot, and the terminals share the rest.
+        assert_eq!(leaves(&d, c)[0], "ff");
+        assert_eq!(
+            applied,
+            LayoutApplied {
+                slots: 2,
+                empty: 0,
+                extra: 1
+            }
+        );
+        assert_eq!(leaves(&d, c).len(), 3);
+    }
+
+    #[test]
+    fn the_ratios_of_the_layout_are_the_ones_the_tree_has_after() {
+        let (mut d, c) = container_of(&["k1", "k2"], &["k1", "k2"], Axis::Horizontal);
+        let template = Template::parse("h0.7(_,_)").unwrap();
+        d.apply_container_layout(c, &template, tags(&[]), 0)
+            .unwrap();
+        let tiles = d.tile_container(c, (0, 0, 1000, 500), 0);
+        let width = |w: &'static str| {
+            let id = id_of(&d, w);
+            tiles.iter().find(|(t, _)| *t == id).unwrap().1 .2
+        };
+        assert_eq!(width("k1"), 700);
+        assert_eq!(width("k2"), 300);
+    }
+
+    #[test]
+    fn applying_again_keeps_the_places_of_windows_no_tag_decides() {
+        let (mut d, c) = container_of(&["k1", "k2"], &["k1", "k2"], Axis::Horizontal);
+        let template = Template::parse("h0.7(_,_)").unwrap();
+        // The user swapped the two.
+        let k2 = id_of(&d, "k2");
+        d.move_member(|w| *w == "k1", c, k2, LeafDrop::Swap, 0)
+            .unwrap();
+        assert_eq!(leaves(&d, c), vec!["k2", "k1"]);
+        d.apply_container_layout(c, &template, tags(&[]), 0)
+            .unwrap();
+        assert_eq!(leaves(&d, c), vec!["k2", "k1"]);
+    }
+
+    #[test]
+    fn slots_with_no_window_are_closed_up() {
+        let (mut d, c) = container_of(&["k1", "k2"], &["k1", "k2"], Axis::Horizontal);
+        let template = Template::parse("h0.5(_,v0.5(@browser,v0.5(_,_)))").unwrap();
+        let applied = d
+            .apply_container_layout(c, &template, tags(&[]), 0)
+            .unwrap();
+        // Four slots, two windows: nothing is lost, the two windows are in the container.
+        assert_eq!(applied.slots, 4);
+        assert_eq!(applied.empty, 2);
+        assert_eq!(leaves(&d, c).len(), 2);
+    }
+
+    #[test]
+    fn the_members_and_the_focus_are_the_same_after() {
+        let (mut d, c) = container_of(&["k1", "k2", "ff"], &["k1", "k2", "ff"], Axis::Horizontal);
+        let focused = d.container(c).unwrap().focused();
+        let template = Template::parse("h0.5(@browser,_)").unwrap();
+        d.apply_container_layout(c, &template, tags(&[("ff", "browser")]), 0)
+            .unwrap();
+        let mut now = leaves(&d, c);
+        now.sort_unstable();
+        assert_eq!(now, vec!["ff", "k1", "k2"]);
+        assert_eq!(d.container(c).unwrap().focused(), focused);
+    }
+
+    #[test]
+    fn the_stack_follows_the_new_tree_order() {
+        let (mut d, c) = container_of(&["k1", "k2", "ff"], &["k1", "k2", "ff"], Axis::Horizontal);
+        let template = Template::parse("h0.5(@browser,_)").unwrap();
+        d.apply_container_layout(c, &template, tags(&[("ff", "browser")]), 0)
+            .unwrap();
+        let order = leaves(&d, c);
+        assert_eq!(bottom_up(&mut d), order);
+    }
+
+    #[test]
+    fn a_container_that_is_gone_is_an_error_and_changes_nothing() {
+        let (mut d, c) = container_of(&["k1"], &["k1"], Axis::Horizontal);
+        d.leave_container(|w| *w == "k1");
+        let template = Template::parse("_").unwrap();
+        assert_eq!(
+            d.apply_container_layout(c, &template, tags(&[]), 0),
+            Err(ContainerError::NoSuchContainer)
+        );
+    }
+}

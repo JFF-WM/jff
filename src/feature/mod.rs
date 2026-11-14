@@ -2,6 +2,7 @@
 
 pub mod app_icons;
 pub mod app_index;
+pub mod container_layouts;
 pub mod containers;
 pub mod dnd;
 pub mod icc;

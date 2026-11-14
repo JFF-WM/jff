@@ -99,6 +99,11 @@ impl<W: Copy + Eq> TileTree<W> {
         }
     }
 
+    /// A tree that is `root`. The caller makes sure no window is a leaf twice.
+    pub fn from_root(root: Node<W>) -> Self {
+        Self { root: Some(root) }
+    }
+
     /// The root of the tree, `None` when it is empty. For callers that need its shape.
     pub fn root(&self) -> Option<&Node<W>> {
         self.root.as_ref()

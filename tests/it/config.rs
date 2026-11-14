@@ -1300,6 +1300,7 @@ container-rule {
                 WindowMatch::Tag("dev".into()),
             ],
             name: Some("Terminals".into()),
+            layout: None,
         }]
     );
 }
@@ -2055,4 +2056,64 @@ window-rule { match app-id="x"; tag "b"; }
     assert_eq!(config.user_tag_for(&both), Some("a"));
     assert_eq!(config.user_tag_for(&facts("x", None)), Some("b"));
     assert!(Config::parse(r#"window-rule { match app-id="x"; tag ""; }"#).is_err());
+}
+
+#[test]
+fn container_layout_binds_take_a_name() {
+    let config = Config::parse(
+        r#"binds {
+                Alt+S { save-container-layout "Dev"; }
+                Alt+L { apply-container-layout "Dev"; }
+            }"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.action_for(&mods(false, true, false, false), Keysym::s),
+        Some(&Action::SaveContainerLayout("Dev".into()))
+    );
+    assert_eq!(
+        config.action_for(&mods(false, true, false, false), Keysym::l),
+        Some(&Action::ApplyContainerLayout("Dev".into()))
+    );
+    for bad in [
+        "save-container-layout;",
+        r#"save-container-layout "";"#,
+        r#"save-container-layout "a" "b";"#,
+        "save-container-layout 3;",
+        "apply-container-layout;",
+        r#"apply-container-layout "  ";"#,
+    ] {
+        assert!(
+            Config::parse(&format!("binds {{ Alt+S {{ {bad} }} }}")).is_err(),
+            "{bad} was accepted"
+        );
+    }
+}
+
+#[test]
+fn container_rule_can_name_a_layout_to_apply() {
+    let config = Config::parse(
+        r#"container-rule { match app-id="com.obsproject.Studio"; layout "obs"; }
+container-rule { match app-id="kitty"; name "Terms"; }"#,
+    )
+    .unwrap();
+    let facts = |app_id| WindowFacts {
+        app_id,
+        title: "",
+        tag: None,
+        dialog: false,
+        restored: false,
+    };
+    assert_eq!(
+        config.container_layout_for(&facts("com.obsproject.Studio")),
+        Some("obs")
+    );
+    assert_eq!(config.container_layout_for(&facts("kitty")), None);
+    assert_eq!(
+        config.container_name_for(&facts("com.obsproject.Studio")),
+        None
+    );
+    assert!(Config::parse(r#"container-rule { layout ""; }"#).is_err());
+    assert!(Config::parse(r#"container-rule { layout; }"#).is_err());
+    assert!(Config::parse(r#"container-rule { layout "a" "b"; }"#).is_err());
 }

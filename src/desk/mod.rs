@@ -10,15 +10,17 @@
 //! down. A member does not own its position: [`Desk::tile_container`] derives it from the tree.
 
 pub mod container;
+pub mod layout_store;
 pub mod session_store;
 
 use std::collections::HashMap;
 
-pub use container::{Container, ContainerError, ContainerId, WindowId};
+pub use container::{Container, ContainerError, ContainerId, LayoutApplied, WindowId};
 
 use crate::primitives::container_drop::{
     axis_for, in_rect, snapped_is_first, split_axis, LeafDrop,
 };
+use crate::primitives::layout_template::Template;
 use crate::primitives::tile_tree::{Axis, Edge, Rect, Removal, SplitError, TileTree};
 
 pub type Pos = (i32, i32);
@@ -920,6 +922,55 @@ impl<W> Desk<W> {
         // in the stack.
         self.gather_members(container, false);
         Ok(())
+    }
+
+    /// Rebuilds the tree of `container` from `template`, windows matched to slots by `tag` (see [`Template::fill`]), extras split off the last leaf.
+    pub fn apply_container_layout(
+        &mut self,
+        container: ContainerId,
+        template: &Template,
+        tag: impl Fn(&W) -> Option<String>,
+        gap: i32,
+    ) -> Result<LayoutApplied, ContainerError> {
+        let Some(ci) = self.container_index(container) else {
+            return Err(ContainerError::NoSuchContainer);
+        };
+        let (order, area) = match self.containers.get(ci) {
+            Some(c) => (c.tree.leaves(), c.area),
+            None => return Err(ContainerError::NoSuchContainer),
+        };
+        let windows: Vec<(WindowId, Option<String>)> = order
+            .iter()
+            .filter_map(|id| self.find_by_id(*id).map(|e| (*id, tag(&e.window))))
+            .collect();
+        let Some(fill) = template.fill(&windows) else {
+            return Err(ContainerError::NoSuchWindow);
+        };
+        let mut tree = TileTree::from_root(fill.root);
+        for window in &fill.extra {
+            let Some(at) = tree.leaves().last().copied() else {
+                break;
+            };
+            let axis = area
+                .and_then(|area| {
+                    tree.layout(area, gap)
+                        .into_iter()
+                        .find(|(leaf, _)| *leaf == at)
+                        .map(|(_, rect)| split_axis(rect))
+                })
+                .unwrap_or(Axis::Horizontal);
+            // A window is never a leaf twice, so this cannot fail.
+            let _ = tree.split(at, axis, *window);
+        }
+        if let Some(c) = self.containers.get_mut(ci) {
+            c.tree = tree;
+        }
+        self.gather_members(container, false);
+        Ok(LayoutApplied {
+            slots: template.slots().len(),
+            empty: fill.empty,
+            extra: fill.extra.len(),
+        })
     }
 
     /// Where a member dropped at `p` on `container` lands: the leaf under `p` and its rectangle

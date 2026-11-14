@@ -110,6 +110,7 @@ impl JffState {
         self.desk.float_in_place_where(|w| w == window);
 
         let area = geom::inset_rect(free, self.config.maximize_inset());
+        self.auto_apply_layout_any(id, &[snapped.clone(), window.clone()]);
         self.tile_and_configure(id, area);
         tracing::info!(
             "container {} started beside a window snapped {side:?}",
@@ -175,14 +176,12 @@ impl JffState {
         } else {
             current
         };
-        let Some(focus) = focus else {
-            return false;
-        };
-        let Some(id) = self
-            .desk
-            .container_to_join(|w| *w == focus, |w| w == window)
-        else {
-            return false;
+        let joinable = focus.and_then(|focus| {
+            self.desk
+                .container_to_join(|w| *w == focus, |w| w == window)
+        });
+        let Some(id) = joinable else {
+            return self.start_layout_container(window);
         };
         let gap = self.config.snap_gap();
         if let Err(err) = self.desk.join_container(id, None, |w| w == window, gap) {
@@ -197,8 +196,74 @@ impl JffState {
     /// `window` has just joined container `id`: lay the container out again, configuring every
     /// member, and give the keyboard to the window.
     fn finish_join(&mut self, id: ContainerId, window: &Window) {
+        self.auto_apply_layout(id, window);
         self.retile_container(id);
         self.focus_window(window);
+    }
+
+    /// Applies the `container-rule` `layout` that fits `window`, which just joined container `id`, if there is one.
+    fn auto_apply_layout(&mut self, id: ContainerId, window: &Window) -> bool {
+        let layout = self
+            .with_facts(window, |facts| {
+                self.config.container_layout_for(facts).map(str::to_owned)
+            })
+            .flatten();
+        let Some(layout) = layout else {
+            return false;
+        };
+        match self.apply_layout_to(id, &layout) {
+            Ok(_) => true,
+            Err(why) => {
+                tracing::warn!("container-rule layout {layout:?} not applied: {why}");
+                false
+            }
+        }
+    }
+
+    /// Applies the first `container-rule` `layout` that fits one of `windows`, the members of the new container `id`.
+    fn auto_apply_layout_any(&mut self, id: ContainerId, windows: &[Window]) {
+        for window in windows {
+            if self.auto_apply_layout(id, window) {
+                return;
+            }
+        }
+    }
+
+    /// A window whose `container-rule` has a `layout` opened with no container to join: it starts one that fills the usable area, and the windows that open from it join.
+    fn start_layout_container(&mut self, window: &Window) -> bool {
+        let has_layout = self
+            .with_facts(window, |facts| {
+                self.config.container_layout_for(facts).is_some()
+            })
+            .unwrap_or(false);
+        if !has_layout {
+            return false;
+        }
+        let Some((pos, size)) = self
+            .desk
+            .find_by(|w| w == window)
+            .filter(|e| e.container.is_none() && e.mode != WindowMode::Fullscreen)
+            .map(|e| (e.pos, e.window.geometry().size))
+        else {
+            return false;
+        };
+        let monitor = self.rect_for_window(pos, (size.w, size.h));
+        let area = self.snapped_area(monitor);
+        let name = self
+            .with_facts(window, |facts| {
+                self.config.container_name_for(facts).map(str::to_owned)
+            })
+            .flatten();
+        let Ok(id) = self.desk.create_container(|w| w == window, name) else {
+            return false;
+        };
+        self.desk.float_in_place_where(|w| w == window);
+        self.tile_and_configure(id, area);
+        tracing::info!(
+            "container {} started by a window with a container-rule layout",
+            id.get()
+        );
+        true
     }
 
     /// The window snapped to one side of monitor `monitor` that leaves the half `at` is in
@@ -776,6 +841,10 @@ impl JffState {
         }
         // The snapped window keeps the focus inside the container, as it has the keyboard.
         self.desk.set_container_focus(|w| w == window);
+        let members: Vec<Window> = std::iter::once(window.clone())
+            .chain(others.iter().cloned())
+            .collect();
+        self.auto_apply_layout_any(id, &members);
         self.tile_and_configure(id, area);
         tracing::info!(
             "container {} started by a window snapped {side:?}",

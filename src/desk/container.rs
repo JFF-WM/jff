@@ -52,6 +52,17 @@ pub enum ContainerError {
     AlreadyInContainer,
 }
 
+/// What `Desk::apply_container_layout` did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayoutApplied {
+    /// Slots in the saved layout.
+    pub slots: usize,
+    /// Slots left empty and closed up.
+    pub empty: usize,
+    /// Windows with no slot, split off the last one.
+    pub extra: usize,
+}
+
 /// A group of windows tiled by a tree, on one workspace of one monitor.
 ///
 /// It always has at least one window: the desk removes it with its last one. `focused` is
