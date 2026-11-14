@@ -1592,7 +1592,7 @@ impl JffState {
             rule.output = None;
         }
         // `tiling-containers`: whatever opens while a container has the keyboard joins its
-        // layout (a dialog, a restored window, one a rule keeps floating too), and then the
+        // layout (a restored window, one a rule keeps floating too, but not a dialog), and then the
         // container decides its place and size, not a rule or `maximize-new-windows`.
         let window = self
             .desk

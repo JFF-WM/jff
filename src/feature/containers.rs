@@ -59,6 +59,10 @@ impl JffState {
         if !self.config.tiling_containers() {
             return false;
         }
+        // A dialog stays a floating window over the one it belongs to.
+        if self.is_dialog(window) {
+            return false;
+        }
         let Some(dragged) = self.desk.find_by(|w| w == window) else {
             return false;
         };
@@ -117,8 +121,8 @@ impl JffState {
     /// A drag of `window` ended with the pointer at `at`: when that is over a container that is
     /// shown, the window joins it, split off the member under the pointer (see
     /// [`Desk::join_container`]), and the container is laid out again. Returns true then, and
-    /// false, having changed nothing, when it does not: no container there. Any window joins,
-    /// a dialog and one a `window-rule` keeps `floating` too. The caller has checked that the
+    /// false, having changed nothing, when it does not: no container there. Any window joins
+    /// but a dialog, one a `window-rule` keeps `floating` too. The caller has checked that the
     /// window is floating or maximized and in no container.
     fn drop_into_existing_container(&mut self, window: &Window, at: Point<f64, Logical>) -> bool {
         let point = (at.x, at.y);
@@ -145,7 +149,7 @@ impl JffState {
     /// (see `focus_before_open`), because the new window takes the keyboard itself at once: that
     /// is what it was opened from. When the user moved the keyboard to another window since, that
     /// one decides. Needs `tiling-containers`, and not the overview or a locked session. Any
-    /// kind of window joins: a dialog, a restored one, one a rule keeps floating. The container
+    /// kind of window joins but a dialog: a restored one, one a rule keeps floating. The container
     /// has to be on the window's workspace and monitor, shown, and without a fullscreen focused
     /// member (see [`Desk::container_to_join`]).
     pub(crate) fn join_container_on_map(&mut self, window: &Window) -> bool {
@@ -159,6 +163,10 @@ impl JffState {
             return false;
         };
         let opened_from = self.focus_before_open.remove(&root);
+        // A dialog is not tiled: it is centred over its parent like anywhere else.
+        if self.is_dialog(window) {
+            return false;
+        }
         let current = self.focused_window();
         let focus = if current.as_ref() == Some(window) {
             opened_from
@@ -227,6 +235,14 @@ impl JffState {
             .cloned()
     }
 
+    /// Whether `window` is a dialog: it belongs to another window (it has a parent), or said it
+    /// is one (xdg-dialog). Dialogs are never tiled into a container.
+    fn is_dialog(&self, window: &Window) -> bool {
+        window.toplevel().is_some_and(|toplevel| {
+            toplevel.parent().is_some() || self.dialog_toplevels.contains(toplevel.wl_surface())
+        })
+    }
+
     /// Whether the first `window-rule` that fits `window` says `floating`.
     fn floats_by_rule(&self, window: &Window) -> bool {
         self.with_facts(window, |facts| {
@@ -244,7 +260,7 @@ impl JffState {
         let root = toplevel.wl_surface();
         let (app_id, title) = toplevel_names(root);
         let tag = toplevel_tag::tag_of(root);
-        let dialog = toplevel.parent().is_some() || self.dialog_toplevels.contains(root);
+        let dialog = self.is_dialog(window);
         Some(f(&WindowFacts {
             app_id: &app_id,
             title: &title,
