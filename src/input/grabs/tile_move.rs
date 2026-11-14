@@ -1,7 +1,9 @@
 //! Interactive move of a window of a tiling container: the pointer grab that runs while one is
 //! carried to another place.
 //!
-//! Nothing is drawn while it goes, the window keeps its place in the tree until it is put down.
+//! The window keeps its place in the tree until it is put down. While it goes, a small live
+//! picture of it hangs from the pointer (`feature::containers::tile_carry_elements`), so the user can see
+//! what they carry.
 //! Where the pointer is then decides (see `JffState::finish_tile_move`): over another window of
 //! a container it goes there, at the edge of the monitor or off every container it leaves its
 //! container. Two ways to end it: letting go of the button that started the drag (a titlebar or
@@ -66,6 +68,10 @@ impl PointerGrab<JffState> for TileMoveGrab {
         handle.motion(data, None, event);
         self.last = event.location;
         self.moved |= event.location != self.start_data.location;
+        // Once it is really carried, show where it would go.
+        if self.moved {
+            data.update_tile_drop(event.location);
+        }
     }
 
     fn relative_motion(
@@ -185,6 +191,8 @@ impl PointerGrab<JffState> for TileMoveGrab {
     }
 
     fn unset(&mut self, data: &mut JffState) {
+        // Whatever ends the grab, the picture goes with it.
+        data.tile_carry = None;
         let carried = self.moved || self.end == TileMoveEnd::Click;
         if carried && !self.cancelled {
             data.finish_tile_move(&self.window, self.last);

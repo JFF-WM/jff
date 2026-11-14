@@ -576,7 +576,7 @@ fn badge_elements(
 }
 
 /// Push the render elements for one thumbnail, placed relative to `origin`.
-fn thumb_elements(
+pub(crate) fn thumb_elements(
     renderer: &mut GlesRenderer,
     window: &Window,
     thumb: &Thumb,

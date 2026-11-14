@@ -263,6 +263,19 @@ impl JffState {
                     scale,
                 ));
             }
+            // a window of a container on its way to another place: a small picture of it at
+            // the pointer, above everything else
+            if let (Some(output), Some(pointer)) = (&layer_output, self.seat.get_pointer()) {
+                let rect = output_rect(output);
+                elements.extend(crate::feature::containers::tile_carry_elements(
+                    self.tile_carry.as_ref(),
+                    pointer.current_location(),
+                    self.config.radius(),
+                    &mut *renderer,
+                    (rect.0, rect.1).into(),
+                    rect,
+                ));
+            }
             // input method candidates sit above windows and panels
             let input_popups = if locked {
                 Vec::new()

@@ -184,6 +184,9 @@ pub struct JffState {
     pub ext_data_control_state: ExtDataControlState,
     /// The picture the dragging client attached to the drag in progress (see `dnd.rs`).
     pub dnd_icon: Option<WlSurface>,
+    /// The window of a tiling container the pointer carries right now, drawn small at the
+    /// pointer until it is put down (see `feature/containers.rs`, `TileMoveGrab`).
+    pub tile_carry: Option<crate::feature::containers::TileCarry>,
     pub osd: crate::feature::osd::Osd,
     /// Installed applications, for the overview search.
     pub app_index: crate::feature::app_index::AppIndex,
@@ -596,6 +599,7 @@ impl JffState {
             data_control_state,
             ext_data_control_state,
             dnd_icon: None,
+            tile_carry: None,
             osd: crate::feature::osd::Osd::new(config.osd().font.clone()),
             app_index: crate::feature::app_index::AppIndex::new(),
             app_restore: crate::feature::app_restore::AppRestore::default(),

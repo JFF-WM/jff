@@ -1773,6 +1773,16 @@ impl JffState {
                 scale,
             ));
         }
+        // a window of a container on its way to another place: a small picture of it at the
+        // pointer, under the cursor and above everything else
+        elements.extend(crate::feature::containers::tile_carry_elements(
+            self.tile_carry.as_ref(),
+            pointer,
+            self.config.radius(),
+            &mut *renderer,
+            origin,
+            rect,
+        ));
         // input method candidates sit above windows and panels
         let locked = self.session_lock.is_locked();
         let input_popups = if locked {

@@ -10,14 +10,19 @@
 //! container joins it, and so does a new window that opens while a container has the keyboard.
 //! Everything else about a drop stays as it is, and with the setting off nothing in here runs.
 
+use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+use smithay::backend::renderer::element::{Id, Kind};
+use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::utils::CommitCounter;
 use smithay::desktop::Window;
 use smithay::input::pointer::{Focus, GrabStartData};
-use smithay::utils::{Logical, Point, Serial, SERIAL_COUNTER};
+use smithay::utils::{IsAlive, Logical, Physical, Point, Rectangle, Serial, SERIAL_COUNTER};
 
 use crate::config::{Border, Config, WindowFacts, WindowRule};
 use crate::desk::{ContainerId, Side, WindowMode};
 use crate::feature::osd::toplevel_names;
 use crate::feature::outputs::output_rect;
+use crate::feature::overview_mode::thumb_elements;
 use crate::input::grabs::r#move::shrunk_geometry;
 use crate::input::grabs::tile_move::{TileMoveEnd, TileMoveGrab};
 use crate::input::grabs::tile_resize::TileResizeGrab;
@@ -26,9 +31,12 @@ use crate::primitives::container_drop::{in_empty_half, leaf_drop, opposite, Leaf
 use crate::primitives::container_view;
 use crate::primitives::geom;
 use crate::primitives::layout::{self, Rect};
+use crate::primitives::overview_grid::Thumb;
 use crate::primitives::tile_tree::Edge;
 use crate::protocol::layer_shell::{ABOVE_WINDOWS, BELOW_WINDOWS};
 use crate::protocol::toplevel_tag;
+use crate::render::effects::rounded::{make_ring, ring_area, RingMotion};
+use crate::render::elements::JffElement;
 use crate::state::{configure_member, configure_mode, JffState};
 
 /// Width of a container's border when the config has no `border` block of its own to take it
@@ -37,6 +45,60 @@ const DEFAULT_BORDER_WIDTH: i32 = 2;
 
 /// Least room (px) either side of a divider keeps when it is dragged.
 const MIN_TILE: i32 = 80;
+
+/// Longest sides of the picture that follows the pointer while a window of a container is
+/// carried. A smaller window is shown at its real size.
+const CARRY_MAX: (i32, i32) = (360, 240);
+
+/// Width in px of each of the two rings drawn around the carried picture, and their colours
+/// (straight alpha): a light one against the picture and a dark one outside it.
+const CARRY_RING: i32 = 2;
+const CARRY_RING_LIGHT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+const CARRY_RING_DARK: [f32; 4] = [0.0, 0.0, 0.0, 0.65];
+
+/// A window of a tiling container on its way to another place: what the frame needs to draw it
+/// at the pointer. The window itself stays in the tree, and in its tile, until it is put down.
+#[derive(Clone)]
+pub struct TileCarry {
+    pub window: Window,
+    /// Where the pointer held it: its share of the window's width and height (0..=1), so the
+    /// picture hangs from the pointer at the spot the window was grabbed by.
+    pub anchor: (f64, f64),
+    /// Drawn once the pointer has moved: a click that never moves a window shows nothing.
+    pub shown: bool,
+    /// Where it would be put down if let go now, `None` where letting go changes nothing.
+    pub drop: Option<TileDrop>,
+    /// Id of the highlight's fill, kept so the damage tracking sees one element move.
+    pub fill: Id,
+}
+
+/// The place a carried window goes to when put down: what the user sees highlighted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TileDrop {
+    /// In the shared space.
+    pub rect: Rect,
+    /// The window leaves its container (an edge of the monitor, or off every container) and is
+    /// maximized, it does not take a place in a tree: drawn in another colour.
+    pub leaves: bool,
+}
+
+/// Highlight of the place a carried window goes to: ring width, and the colours of a place in
+/// a container and of leaving it (straight alpha), the fill is the colour at `FILL_ALPHA`.
+const DROP_RING: i32 = 3;
+const DROP_FILL_ALPHA: f32 = 0.22;
+const DROP_IN: [f32; 4] = [0.25, 0.55, 1.0, 1.0];
+const DROP_OUT: [f32; 4] = [1.0, 0.65, 0.2, 1.0];
+
+/// The half of `rect` on `side`: where a window dropped beside a leaf on that side lands.
+fn half_of(rect: Rect, side: Side) -> Rect {
+    let (x, y, w, h) = rect;
+    match side {
+        Side::Left => (x, y, w / 2, h),
+        Side::Right => (x + w - w / 2, y, w / 2, h),
+        Side::Top => (x, y, w, h / 2),
+        Side::Bottom => (x, y + h - h / 2, w, h / 2),
+    }
+}
 
 impl JffState {
     /// A drag of `window` ended with the pointer at `at`. When that starts a container, starts
@@ -692,9 +754,87 @@ impl JffState {
         let Some(pointer) = self.seat.get_pointer() else {
             return false;
         };
+        // Where the window was taken by: the picture is drawn hanging from the pointer there.
+        // A window picked up by key may be far from the pointer: its middle then.
+        let anchor = match self.desk.pos_of(|w| w == window) {
+            Some(pos) => {
+                let size = window.geometry().size;
+                let (w, h) = (f64::from(size.w.max(1)), f64::from(size.h.max(1)));
+                let fx = (start_data.location.x - f64::from(pos.0)) / w;
+                let fy = (start_data.location.y - f64::from(pos.1)) / h;
+                if (0.0..=1.0).contains(&fx) && (0.0..=1.0).contains(&fy) {
+                    (fx, fy)
+                } else {
+                    (0.5, 0.5)
+                }
+            }
+            None => (0.5, 0.5),
+        };
         let grab = TileMoveGrab::new(start_data, window.clone(), end);
         pointer.set_grab(self, grab, serial, Focus::Clear);
+        // After the grab is set: replacing a grab runs the old one's `unset`, which clears this.
+        self.tile_carry = Some(TileCarry {
+            window: window.clone(),
+            anchor,
+            shown: false,
+            drop: None,
+            fill: Id::new(),
+        });
+        // Picked up by key, it follows the pointer at once, there is no first motion to wait for.
+        if end == TileMoveEnd::Click {
+            let at = pointer.current_location();
+            self.update_tile_drop(at);
+        }
         true
+    }
+
+    /// The carried window is at `at` now: show its picture and work out where it would go.
+    pub fn update_tile_drop(&mut self, at: Point<f64, Logical>) {
+        let Some(window) = self.tile_carry.as_ref().map(|c| c.window.clone()) else {
+            return;
+        };
+        let drop = self.tile_drop_at(&window, at);
+        if let Some(carry) = self.tile_carry.as_mut() {
+            carry.shown = true;
+            carry.drop = drop;
+        }
+    }
+
+    /// Where `finish_tile_move` would put `window` with the pointer at `at`, the same decisions
+    /// in the same order. `None` where it changes nothing: over a gap, or over its own tile.
+    fn tile_drop_at(&self, window: &Window, at: Point<f64, Logical>) -> Option<TileDrop> {
+        let point = (at.x, at.y);
+        // Leaving the container: the window ends up maximized on the monitor under the pointer.
+        let leaves = || {
+            let rects = self.output_rects();
+            let i = layout::nearest(point, &rects)?;
+            Some(TileDrop {
+                rect: self.snapped_area(rects[i]),
+                leaves: true,
+            })
+        };
+        if self.edge_drop_mode(at).is_some() {
+            return leaves();
+        }
+        let Some(id) = self.desk.container_at(point) else {
+            return leaves();
+        };
+        let (target, rect) = self.desk.drop_target(id, point, self.config.snap_gap())?;
+        if self
+            .desk
+            .find_by(|w| w == window)
+            .is_some_and(|entry| entry.id == target)
+        {
+            return None;
+        }
+        let rect = match leaf_drop(rect, point) {
+            LeafDrop::Swap => rect,
+            LeafDrop::Beside(side) => half_of(rect, side),
+        };
+        Some(TileDrop {
+            rect,
+            leaves: false,
+        })
     }
 
     /// `container-drag`: pick up the focused window if it is in a container, to be put down by
@@ -1099,4 +1239,130 @@ pub fn container_border_style(config: &Config) -> Border {
             ..Border::default()
         }
     }
+}
+
+/// The picture of the carried window (`carry`), for the frame of the monitor at `origin`
+/// (`rect`), with the pointer at `at`. It is the live window drawn small and hung from the
+/// pointer, in front of everything but the cursor, so the user sees what they are moving.
+/// Empty when nothing is carried, the window is gone, or the picture is off this monitor.
+///
+/// Free function: the renderers borrow the backend inside `JffState`, so callers pass the
+/// fields they need.
+pub fn tile_carry_elements(
+    carry: Option<&TileCarry>,
+    at: Point<f64, Logical>,
+    radius: i32,
+    renderer: &mut GlesRenderer,
+    origin: Point<i32, Logical>,
+    rect: Rect,
+) -> Vec<JffElement> {
+    let Some(carry) = carry.filter(|c| c.shown && c.window.alive()) else {
+        return Vec::new();
+    };
+    let size = carry.window.geometry().size;
+    if size.w <= 0 || size.h <= 0 {
+        return Vec::new();
+    }
+    let scale = (f64::from(CARRY_MAX.0) / f64::from(size.w))
+        .min(f64::from(CARRY_MAX.1) / f64::from(size.h))
+        .min(1.0);
+    let shown = (
+        (f64::from(size.w) * scale).round() as i32,
+        (f64::from(size.h) * scale).round() as i32,
+    );
+    let thumb = Thumb {
+        pos: (
+            (at.x - carry.anchor.0 * f64::from(shown.0)).round() as i32,
+            (at.y - carry.anchor.1 * f64::from(shown.1)).round() as i32,
+        ),
+        size: shown,
+        scale,
+    };
+    let mut out = Vec::new();
+    if !layout::intersects(thumb.rect(), rect) {
+        drop_elements(carry, radius, renderer, origin, rect, &mut out);
+        return out;
+    }
+    thumb_elements(
+        renderer,
+        &carry.window,
+        &thumb,
+        origin,
+        None,
+        radius,
+        &mut out,
+        None,
+    );
+    // An outline around the picture, behind it (later in the list): a light ring with a dark one
+    // outside it, so the picture stands out from an app of any colour.
+    let corner = (f64::from(radius) * scale).round() as i32;
+    let inner = Rectangle::<i32, Logical>::new(
+        (thumb.pos.0 - origin.x, thumb.pos.1 - origin.y).into(),
+        (shown.0, shown.1).into(),
+    );
+    let outer = ring_area(inner, CARRY_RING);
+    for (area, radius, color) in [
+        (inner, corner, CARRY_RING_LIGHT),
+        (outer, corner + CARRY_RING, CARRY_RING_DARK),
+    ] {
+        if let Some(ring) = make_ring(
+            renderer,
+            ring_area(area, CARRY_RING),
+            CARRY_RING,
+            radius,
+            color,
+            RingMotion::default(),
+        ) {
+            out.push(JffElement::Ring(ring));
+        }
+    }
+    // The place it goes to, behind the picture.
+    drop_elements(carry, radius, renderer, origin, rect, &mut out);
+    out
+}
+
+/// The highlight of the place the carried window goes to: a ring just inside its edge and a
+/// light fill, in a colour that says whether it takes a place in a container or leaves it.
+fn drop_elements(
+    carry: &TileCarry,
+    radius: i32,
+    renderer: &mut GlesRenderer,
+    origin: Point<i32, Logical>,
+    rect: Rect,
+    out: &mut Vec<JffElement>,
+) {
+    let Some(drop) = carry.drop.filter(|d| layout::intersects(d.rect, rect)) else {
+        return;
+    };
+    let color = if drop.leaves { DROP_OUT } else { DROP_IN };
+    let (x, y, w, h) = drop.rect;
+    let area = Rectangle::<i32, Logical>::new((x - origin.x, y - origin.y).into(), (w, h).into());
+    if w > 2 * DROP_RING && h > 2 * DROP_RING {
+        // The ring is made around a rectangle: the one inside the tile, so it stays in it.
+        let inner = Rectangle::<i32, Logical>::new(
+            (area.loc.x + DROP_RING, area.loc.y + DROP_RING).into(),
+            (area.size.w - 2 * DROP_RING, area.size.h - 2 * DROP_RING).into(),
+        );
+        if let Some(ring) = make_ring(
+            renderer,
+            ring_area(inner, DROP_RING),
+            DROP_RING,
+            radius,
+            color,
+            RingMotion::default(),
+        ) {
+            out.push(JffElement::Ring(ring));
+        }
+    }
+    // Solid colours are premultiplied.
+    let [r, g, b, _] = color;
+    let a = DROP_FILL_ALPHA;
+    let geometry = Rectangle::<i32, Physical>::new((area.loc.x, area.loc.y).into(), (w, h).into());
+    out.push(JffElement::Solid(SolidColorRenderElement::new(
+        carry.fill.clone(),
+        geometry,
+        CommitCounter::default(),
+        [r * a, g * a, b * a, a],
+        Kind::Unspecified,
+    )));
 }
