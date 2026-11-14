@@ -205,7 +205,29 @@ impl<W: Copy + Eq> TileTree<W> {
         gap: i32,
         min: i32,
     ) -> Option<f64> {
-        resize_node(self.root.as_mut()?, leaf, edge, to, area, gap, min)
+        self.resize_with_mins(leaf, edge, to, area, gap, min, &|_| (0, 0))
+    }
+
+    /// [`resize`](Self::resize) that also keeps every leaf at least as big as `mins` says: the
+    /// `(width, height)` a window cannot be made smaller than, `0` for no limit. A half holding
+    /// several leaves needs room for all of them: the sum of their minimums along the axis of
+    /// the splits between them, the largest one across it. The divider stops where a half
+    /// reaches its minimum, as it does at `min`, whichever is larger.
+    ///
+    /// When the two halves cannot both have their minimum, the divider does not move: the ratio
+    /// is returned as it was.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resize_with_mins(
+        &mut self,
+        leaf: W,
+        edge: Edge,
+        to: i32,
+        area: Rect,
+        gap: i32,
+        min: i32,
+        mins: &dyn Fn(W) -> (i32, i32),
+    ) -> Option<f64> {
+        resize_node(self.root.as_mut()?, leaf, edge, to, area, gap, min, mins)
     }
 
     /// Exchange the places of the leaves `a` and `b`: each takes the rectangle the other had.
@@ -403,7 +425,36 @@ fn remove_node<W: Copy + Eq>(node: Node<W>, target: W) -> (Option<Node<W>>, Opti
     }
 }
 
-/// The work of [`TileTree::resize`] under `node`, which fills `rect`.
+/// The least length along `axis` that `node` can be laid out in without a leaf getting less than
+/// its minimum, with `gap` px between the halves of every split.
+fn min_len<W: Copy>(node: &Node<W>, axis: Axis, gap: i32, mins: &dyn Fn(W) -> (i32, i32)) -> i32 {
+    match node {
+        Node::Leaf(w) => {
+            let (min_w, min_h) = mins(*w);
+            match axis {
+                Axis::Horizontal => min_w.max(0),
+                Axis::Vertical => min_h.max(0),
+            }
+        }
+        Node::Split {
+            axis: split,
+            first,
+            second,
+            ..
+        } => {
+            let a = min_len(first, axis, gap, mins);
+            let b = min_len(second, axis, gap, mins);
+            if *split == axis {
+                a.saturating_add(gap.max(0)).saturating_add(b)
+            } else {
+                a.max(b)
+            }
+        }
+    }
+}
+
+/// The work of [`TileTree::resize_with_mins`] under `node`, which fills `rect`.
+#[allow(clippy::too_many_arguments)]
 fn resize_node<W: Copy + Eq>(
     node: &mut Node<W>,
     leaf: W,
@@ -412,6 +463,7 @@ fn resize_node<W: Copy + Eq>(
     rect: Rect,
     gap: i32,
     min: i32,
+    mins: &dyn Fn(W) -> (i32, i32),
 ) -> Option<f64> {
     let Node::Split {
         axis,
@@ -431,9 +483,9 @@ fn resize_node<W: Copy + Eq>(
 
     // The nearest split that fits wins, so look further down first.
     let deeper = if in_first {
-        resize_node(first, leaf, edge, to, a, gap, min)
+        resize_node(first, leaf, edge, to, a, gap, min, mins)
     } else {
-        resize_node(second, leaf, edge, to, b, gap, min)
+        resize_node(second, leaf, edge, to, b, gap, min, mins)
     };
     if deeper.is_some() {
         return deeper;
@@ -451,8 +503,13 @@ fn resize_node<W: Copy + Eq>(
     let gap = gap.clamp(0, len);
     let avail = len - gap;
     let min = min.max(0);
+    let min_first = min.max(min_len(first, axis, gap, mins));
+    let min_second = min.max(min_len(second, axis, gap, mins));
     let new = if avail == 0 || avail < min.saturating_mul(2) {
         DEFAULT_RATIO
+    } else if min_first.saturating_add(min_second) > avail {
+        // The windows' own minimums leave no room to move the divider.
+        return Some(*ratio);
     } else {
         // How long the first half must be for the dragged edge to land on `to`: the far edge of
         // the first half is its end, the near edge of the second half is one gap after it.
@@ -462,7 +519,7 @@ fn resize_node<W: Copy + Eq>(
         } else {
             from_start.saturating_sub(gap)
         };
-        f64::from(wanted.clamp(min, avail - min)) / f64::from(avail)
+        f64::from(wanted.clamp(min_first, avail - min_second)) / f64::from(avail)
     };
     *ratio = new;
     Some(new)

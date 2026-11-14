@@ -1166,6 +1166,21 @@ impl<W> Desk<W> {
         gap: i32,
         min: i32,
     ) -> Result<Option<f64>, ContainerError> {
+        self.resize_container_with_mins(pred, edge, to, gap, min, &|_| (0, 0))
+    }
+
+    /// [`resize_container`](Self::resize_container) that also stops the divider where a member
+    /// reaches the smallest size `mins` gives for its window, `(width, height)` with `0` for no
+    /// limit, see [`TileTree::resize_with_mins`](crate::primitives::tile_tree::TileTree::resize_with_mins).
+    pub fn resize_container_with_mins(
+        &mut self,
+        pred: impl Fn(&W) -> bool,
+        edge: Edge,
+        to: i32,
+        gap: i32,
+        min: i32,
+        mins: &dyn Fn(&W) -> (i32, i32),
+    ) -> Result<Option<f64>, ContainerError> {
         let Some(entry) = self.entries.iter().find(|e| pred(&e.window)) else {
             return Err(ContainerError::NoSuchWindow);
         };
@@ -1173,13 +1188,21 @@ impl<W> Desk<W> {
             return Err(ContainerError::NotInContainer);
         };
         let window = entry.id;
+        let entries = &self.entries;
         let Some(c) = self.containers.iter_mut().find(|c| c.id == container) else {
             return Err(ContainerError::NoSuchContainer);
         };
         let Some(area) = c.area else {
             return Ok(None);
         };
-        Ok(c.tree.resize(window, edge, to, area, gap, min))
+        let of = |id: WindowId| {
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .map_or((0, 0), |e| mins(&e.window))
+        };
+        Ok(c.tree
+            .resize_with_mins(window, edge, to, area, gap, min, &of))
     }
 
     /// The member of the container of the first window matching `pred` that follows it in

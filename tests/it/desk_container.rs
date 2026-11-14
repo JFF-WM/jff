@@ -1050,6 +1050,23 @@ fn dragging_the_shared_edge_moves_both_windows() {
 }
 
 #[test]
+fn a_dragged_edge_stops_at_the_smallest_size_of_the_other_window() {
+    let (mut d, c) = container_of(&["a", "b"], &["a", "b"], Axis::Horizontal);
+    let area = (0, 0, 1000, 500);
+    d.tile_container(c, area, 0);
+    let wants = |w: &&str| if *w == "b" { (300, 0) } else { (0, 0) };
+    d.resize_container_with_mins(|w| *w == "a", Edge::Right, 5000, 0, 80, &wants)
+        .expect("a member");
+    let tiles = d.tile_container(c, area, 0);
+    assert_eq!(width_of(&d, &tiles, "b"), 300);
+    // dragged from the window that has the minimum, the divider stops at the same place
+    d.resize_container_with_mins(|w| *w == "b", Edge::Left, 5000, 0, 80, &wants)
+        .expect("a member");
+    let tiles = d.tile_container(c, area, 0);
+    assert_eq!(width_of(&d, &tiles, "b"), 300);
+}
+
+#[test]
 fn a_dragged_edge_leaves_room_for_the_other_window() {
     let (mut d, c) = container_of(&["a", "b"], &["a", "b"], Axis::Horizontal);
     let area = (0, 0, 1000, 500);

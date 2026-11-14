@@ -777,3 +777,102 @@ fn swapping_a_leaf_that_is_not_there_or_with_itself_changes_nothing() {
     let mut single = TileTree::new(A);
     assert!(!single.swap_leaves(A, B));
 }
+
+/// The smallest sizes of the windows in these tests: `B` wants 30 wide and 20 tall, `C` 25 wide.
+fn wants(window: u32) -> (i32, i32) {
+    match window {
+        B => (30, 20),
+        C => (25, 0),
+        _ => (0, 0),
+    }
+}
+
+#[test]
+fn a_divider_stops_where_a_window_reaches_its_minimum_size() {
+    // Dragging the divider right makes `B` smaller, it stops at its 30 px.
+    let mut t = pair();
+    assert_eq!(
+        t.resize_with_mins(A, Edge::Right, 10_000, AREA, 0, 10, &wants),
+        Some(0.7)
+    );
+    assert_eq!(rect_of(&t, AREA, 0, B), (70, 0, 30, 50));
+    // The same drag from the other window's side ends in the same place.
+    let mut t = pair();
+    assert_eq!(
+        t.resize_with_mins(B, Edge::Left, 10_000, AREA, 0, 10, &wants),
+        Some(0.7)
+    );
+    // `A` has no minimum of its own, the plain limit applies to it.
+    assert_eq!(
+        t.resize_with_mins(A, Edge::Right, -500, AREA, 0, 10, &wants),
+        Some(0.1)
+    );
+}
+
+#[test]
+fn a_minimum_is_counted_after_the_gap() {
+    let mut t = pair();
+    assert!(t
+        .resize_with_mins(A, Edge::Right, 10_000, AREA, 10, 10, &wants)
+        .is_some());
+    assert_eq!(rect_of(&t, AREA, 10, B), (70, 0, 30, 50));
+    assert!(check_tiling(&t, AREA, 10));
+}
+
+#[test]
+fn a_minimum_across_the_split_is_a_minimum_on_the_other_axis() {
+    // `B` and `C` are stacked: the half they share must hold the wider of the two, and the
+    // height of `B` matters only to the divider between them.
+    let mut t = three();
+    assert_eq!(
+        t.resize_with_mins(A, Edge::Right, 10_000, AREA, 0, 10, &wants),
+        Some(0.7)
+    );
+    assert_eq!(
+        t.resize_with_mins(B, Edge::Bottom, 0, AREA, 0, 10, &wants),
+        Some(0.4)
+    );
+    assert_eq!(rect_of(&t, AREA, 0, B), (70, 0, 30, 20));
+}
+
+#[test]
+fn a_half_with_several_windows_needs_room_for_all_of_them() {
+    // `A / B` beside `C`: dragging the divider left squeezes `A / B`, which needs 30 px.
+    let mut t = tree_of(A, &[(A, Axis::Horizontal, C), (A, Axis::Vertical, B)]);
+    assert_eq!(
+        t.resize_with_mins(C, Edge::Left, -500, AREA, 0, 10, &wants),
+        Some(0.3)
+    );
+    // Side by side, `B` and `C` add up to 55 px.
+    let mut t = tree_of(A, &[(A, Axis::Horizontal, D), (D, Axis::Horizontal, B)]);
+    t.split(B, Axis::Horizontal, C).expect("splits");
+    assert_eq!(
+        t.resize_with_mins(A, Edge::Right, 10_000, AREA, 0, 10, &wants),
+        Some(0.45)
+    );
+}
+
+#[test]
+fn minimums_that_do_not_fit_leave_the_divider_alone() {
+    let mut t = pair();
+    t.resize(A, Edge::Right, 60, AREA, 0, 10);
+    let wide = |_: u32| (80, 0);
+    assert_eq!(
+        t.resize_with_mins(A, Edge::Right, 30, AREA, 0, 10, &wide),
+        Some(0.6)
+    );
+    assert_eq!(rect_of(&t, AREA, 0, A), (0, 0, 60, 50));
+}
+
+#[test]
+fn no_minimums_is_the_plain_resize() {
+    let mut a = three();
+    let mut b = three();
+    for to in [-20, 5, 33, 60, 99, 500] {
+        assert_eq!(
+            a.resize_with_mins(B, Edge::Left, to, AREA, 6, 5, &|_| (0, 0)),
+            b.resize(B, Edge::Left, to, AREA, 6, 5)
+        );
+        assert_eq!(a, b);
+    }
+}

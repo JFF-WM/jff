@@ -19,6 +19,8 @@ use smithay::backend::renderer::utils::CommitCounter;
 use smithay::desktop::Window;
 use smithay::input::pointer::{Focus, GrabStartData};
 use smithay::utils::{IsAlive, Logical, Physical, Point, Rectangle, Serial, SERIAL_COUNTER};
+use smithay::wayland::compositor::with_states;
+use smithay::wayland::shell::xdg::SurfaceCachedState;
 
 use crate::config::{Border, Config, WindowFacts, WindowRule};
 use crate::desk::{ContainerId, Side, WindowMode};
@@ -103,6 +105,19 @@ const DROP_OUT: [f32; 4] = [1.0, 0.65, 0.2, 1.0];
 const DROP_IN_2: [f32; 4] = [0.62, 0.9, 1.0, 1.0];
 const DROP_OUT_2: [f32; 4] = [1.0, 0.9, 0.45, 1.0];
 const DROP_PERIOD_MS: u64 = 3200;
+
+/// The smallest `(width, height)` the client of `window` accepts (`xdg_toplevel.set_min_size`),
+/// `0` along a side it sets no limit for.
+fn window_min_size(window: &Window) -> (i32, i32) {
+    let Some(toplevel) = window.toplevel() else {
+        return (0, 0);
+    };
+    with_states(toplevel.wl_surface(), |states| {
+        let mut cached = states.cached_state.get::<SurfaceCachedState>();
+        let size = cached.current().min_size;
+        (size.w.max(0), size.h.max(0))
+    })
+}
 
 /// The half of `rect` on `side`: where a window dropped beside a leaf on that side lands.
 fn half_of(rect: Rect, side: Side) -> Rect {
@@ -741,9 +756,35 @@ impl JffState {
             if !on {
                 continue;
             }
-            let ratio = self
-                .desk
-                .resize_container(|w| w == window, edge, to, gap, MIN_TILE);
+            let ratio = self.desk.resize_container_with_mins(
+                |w| w == window,
+                edge,
+                to,
+                gap,
+                MIN_TILE,
+                &window_min_size,
+            );
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let members: Vec<String> = self
+                    .desk
+                    .container_of(|w| w == window)
+                    .map(|id| self.desk.members(id))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|entry| {
+                        let size = entry.window.geometry().size;
+                        format!(
+                            "{}x{} (min {:?})",
+                            size.w,
+                            size.h,
+                            window_min_size(&entry.window)
+                        )
+                    })
+                    .collect();
+                tracing::debug!(
+                    "container resize {edge:?} to {to}: ratio {ratio:?}, members {members:?}"
+                );
+            }
             moved |= matches!(ratio, Ok(Some(_)));
         }
         moved
