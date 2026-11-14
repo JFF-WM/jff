@@ -1881,6 +1881,11 @@ impl JffState {
                 );
                 self.relayout_outputs();
             }
+            // Let go over a container of the other monitor: the window joins it, the same as
+            // after dragging it there on the desktop, and does not just float on top. Does
+            // nothing (and returns false) when there is no container under the pointer, the
+            // window is in a container already or is snapped/fullscreen, or the setting is off.
+            self.drop_into_container(&window, at);
         }
     }
 
