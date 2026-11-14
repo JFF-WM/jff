@@ -15,7 +15,7 @@ use smithay::desktop::Window;
 use smithay::input::pointer::{Focus, GrabStartData};
 use smithay::utils::{Logical, Point, Rectangle, Serial, SERIAL_COUNTER};
 
-use crate::config::{Border, Config, WindowFacts};
+use crate::config::{Border, Config, WindowFacts, WindowRule};
 use crate::desk::{ContainerId, Desk, Entry, Side, WindowMode};
 use crate::feature::osd::toplevel_names;
 use crate::feature::outputs::output_rect;
@@ -193,11 +193,99 @@ impl JffState {
         true
     }
 
+    /// A window that first shows (`fit_to_output_once`) and whose `window-rule` says
+    /// `open-in-container "NAME"`: it joins the container with that name on its workspace and
+    /// monitor, and starts one that fills the monitor's usable area when there is none. The
+    /// window has been moved to the rule's monitor and workspace first. Returns true when it is
+    /// in a container now, laid out and configured, and has the keyboard. Returns false, having
+    /// changed nothing, when `tiling-containers` is off, the overview is open or the session is
+    /// locked, and the caller places the window as usual.
+    pub(crate) fn open_in_named_container(
+        &mut self,
+        window: &Window,
+        rule: &WindowRule,
+        name: &str,
+    ) -> bool {
+        if !self.config.tiling_containers() || self.overview_active() || self.session_locked() {
+            tracing::info!(
+                "open-in-container {name:?} skipped: tiling-containers={} overview={} locked={}",
+                self.config.tiling_containers(),
+                self.overview_active(),
+                self.session_locked()
+            );
+            return false;
+        }
+        let Some(root) = window
+            .toplevel()
+            .map(|toplevel| toplevel.wl_surface().clone())
+        else {
+            return false;
+        };
+        self.apply_rule_monitor_and_workspace(&root, rule);
+        let Some((pos, size, workspace, output)) = self
+            .desk
+            .find_by(|w| w == window)
+            .filter(|e| e.container.is_none() && e.mode != WindowMode::Fullscreen)
+            .map(|e| {
+                (
+                    e.pos,
+                    e.window.geometry().size,
+                    e.workspace,
+                    e.output.clone(),
+                )
+            })
+        else {
+            tracing::info!(
+                "open-in-container {name:?} skipped: window is in a container or fullscreen"
+            );
+            return false;
+        };
+        let gap = self.config.snap_gap();
+        if let Some(id) = self.desk.container_named_on(workspace, &output, name) {
+            if let Err(err) = self.desk.join_container(id, None, |w| w == window, gap) {
+                tracing::warn!("could not join container {name:?}: {err:?}");
+                return false;
+            }
+            // A container that was never laid out (it has no area yet) gets the usable area.
+            if self
+                .desk
+                .container(id)
+                .is_some_and(|container| container.area().is_none())
+            {
+                let monitor = self.rect_for_window(pos, (size.w, size.h));
+                let area = self.snapped_area(monitor);
+                self.tile_and_configure(id, area);
+            }
+            self.finish_join(id, window);
+            tracing::info!(
+                "window rule: window joined container {name:?} ({})",
+                id.get()
+            );
+            return true;
+        }
+        tracing::info!(
+            "open-in-container {name:?}: no container on workspace {workspace} of {output:?}, starting one"
+        );
+        let Ok(id) = self
+            .desk
+            .create_container(|w| w == window, Some(name.to_owned()))
+        else {
+            return false;
+        };
+        self.desk.float_in_place_where(|w| w == window);
+        let monitor = self.rect_for_window(pos, (size.w, size.h));
+        let area = self.snapped_area(monitor);
+        self.tile_and_configure(id, area);
+        tracing::info!("window rule: container {name:?} ({}) started", id.get());
+        true
+    }
+
     /// `window` has just joined container `id`: lay the container out again, configuring every
     /// member, and give the keyboard to the window.
     fn finish_join(&mut self, id: ContainerId, window: &Window) {
         self.auto_apply_layout(id, window);
         self.retile_container(id);
+        self.autosave_container_layout(id);
         self.focus_window(window);
     }
 
@@ -212,7 +300,10 @@ impl JffState {
             return false;
         };
         match self.apply_layout_to(id, &layout) {
-            Ok(_) => true,
+            Ok(_) => {
+                self.layout_autosave.insert(id, layout);
+                true
+            }
             Err(why) => {
                 tracing::warn!("container-rule layout {layout:?} not applied: {why}");
                 false
@@ -231,14 +322,14 @@ impl JffState {
 
     /// A window whose `container-rule` has a `layout` opened with no container to join: it starts one that fills the usable area, and the windows that open from it join.
     fn start_layout_container(&mut self, window: &Window) -> bool {
-        let has_layout = self
+        let layout = self
             .with_facts(window, |facts| {
-                self.config.container_layout_for(facts).is_some()
+                self.config.container_layout_for(facts).map(str::to_owned)
             })
-            .unwrap_or(false);
-        if !has_layout {
+            .flatten();
+        let Some(layout) = layout else {
             return false;
-        }
+        };
         let Some((pos, size)) = self
             .desk
             .find_by(|w| w == window)
@@ -259,6 +350,7 @@ impl JffState {
         };
         self.desk.float_in_place_where(|w| w == window);
         self.tile_and_configure(id, area);
+        self.layout_autosave.insert(id, layout);
         tracing::info!(
             "container {} started by a window with a container-rule layout",
             id.get()
@@ -466,6 +558,7 @@ impl JffState {
             return false;
         }
         self.retile_container(target);
+        self.autosave_container_layout(target);
         // Windows that could not move are still in `id`, if it is still there.
         if self.desk.container(id).is_some() {
             self.retile_container(id);
@@ -683,6 +776,7 @@ impl JffState {
             return;
         }
         self.retile_container(id);
+        self.autosave_container_layout(id);
         if from != id {
             self.retile_container(from);
         }

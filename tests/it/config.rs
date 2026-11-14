@@ -1200,6 +1200,65 @@ window-rule { open-maximized #false; }
 }
 
 #[test]
+fn window_rule_reads_open_in_container() {
+    let config = Config::parse(
+        r#"
+window-rule { match app-id="com.obsproject.Studio"; open-in-container "OBS"; }
+window-rule { match app-id="foot"; open-workspace 2; }
+"#,
+    )
+    .unwrap();
+    let rules = config.window_rules();
+    assert_eq!(rules[0].container.as_deref(), Some("OBS"));
+    assert_eq!(rules[1].container, None);
+    assert!(rules[0].has_actions());
+    // it names a place, but does not say how the window starts, a container decides that
+    assert!(!rules[0].places_window());
+    assert!(!rules[0].only_tags());
+    let obs = facts("com.obsproject.Studio", None);
+    assert_eq!(config.window_rule_for(&obs), Some(&rules[0]));
+}
+
+#[test]
+fn window_rule_open_in_container_combines_with_monitor_and_workspace() {
+    let config = Config::parse(
+        r#"window-rule { match app-id="x"; open-on-output "DP-1"; open-workspace 3; open-in-container "Media"; }"#,
+    )
+    .unwrap();
+    let rule = &config.window_rules()[0];
+    assert_eq!(rule.output, Some(RuleOutput::Named("DP-1".into())));
+    assert_eq!(rule.workspace, Some(2));
+    assert_eq!(rule.container.as_deref(), Some("Media"));
+}
+
+#[test]
+fn window_rule_open_in_container_rejects_bad_input() {
+    for bad in [
+        r#"window-rule { open-in-container; }"#,
+        r#"window-rule { open-in-container ""; }"#,
+        r#"window-rule { open-in-container "  "; }"#,
+        r#"window-rule { open-in-container 3; }"#,
+        r#"window-rule { floating; open-in-container "OBS"; }"#,
+    ] {
+        assert!(Config::parse(bad).is_err(), "{bad} should not parse");
+    }
+    // `floating #false` does not ask for anything
+    assert!(Config::parse(r#"window-rule { floating #false; open-in-container "OBS"; }"#).is_ok());
+}
+
+#[test]
+fn check_config_warns_when_open_in_container_has_no_tiling_containers() {
+    let rule = r#"window-rule { match app-id="x"; open-in-container "OBS"; }"#;
+    let warnings = Config::check_text(rule).unwrap();
+    assert!(
+        warnings.iter().any(|w| w.contains("tiling-containers")),
+        "{warnings:?}"
+    );
+    let warnings = Config::check_text(&format!("tiling-containers\n{rule}")).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
 fn window_rule_rejects_bad_input() {
     for bad in [
         r#"window-rule { match; }"#,

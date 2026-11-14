@@ -1212,6 +1212,22 @@ impl<W> Desk<W> {
             .map(|c| c.id)
     }
 
+    /// The oldest container on `workspace` (0-based) of monitor `output` with this name. With a
+    /// workspace of its own per monitor, the same number is a different workspace on each.
+    pub fn container_named_on(
+        &self,
+        workspace: usize,
+        output: &str,
+        name: &str,
+    ) -> Option<ContainerId> {
+        self.containers
+            .iter()
+            .find(|c| {
+                c.workspace == workspace && c.output == output && c.name.as_deref() == Some(name)
+            })
+            .map(|c| c.id)
+    }
+
     /// Send a container, with all its windows, to `workspace`, on top of it. Returns false when
     /// there is no such container.
     pub fn move_container_to_workspace(&mut self, id: ContainerId, workspace: usize) -> bool {

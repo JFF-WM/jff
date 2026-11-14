@@ -185,5 +185,6 @@ impl PointerGrab<JffState> for TileResizeGrab {
     fn unset(&mut self, data: &mut JffState) {
         // However the drag ends, the windows get the size the tree gave them.
         data.retile_container(self.container);
+        data.autosave_container_layout(self.container);
     }
 }

@@ -783,6 +783,30 @@ fn stepping_in_a_container_of_one_stays_and_outside_one_is_nothing() {
 }
 
 #[test]
+fn a_container_is_found_by_name_on_a_workspace_and_monitor() {
+    let mut d = desk_of(&["a", "b", "c"]);
+    let one = d
+        .create_container(|w| *w == "a", Some("obs".into()))
+        .expect("starts");
+    let two = d
+        .create_container(|w| *w == "b", Some("obs".into()))
+        .expect("starts");
+    let three = d
+        .create_container(|w| *w == "c", Some("web".into()))
+        .expect("starts");
+    // the windows were added with no monitor: that is the monitor of every container here
+    assert_eq!(d.container_named_on(0, "", "obs"), Some(one));
+    assert_eq!(d.container_named_on(0, "", "web"), Some(three));
+    assert_eq!(d.container_named_on(0, "", "nope"), None);
+    assert_eq!(d.container_named_on(0, "DP-1", "obs"), None);
+    assert_eq!(d.container_named_on(1, "", "obs"), None);
+    // the oldest of that name, and a container that moves is no longer found on the old workspace
+    assert!(d.move_container_to_workspace(one, 1));
+    assert_eq!(d.container_named_on(0, "", "obs"), Some(two));
+    assert_eq!(d.container_named_on(1, "", "obs"), Some(one));
+}
+
+#[test]
 fn a_container_is_found_by_name_on_a_workspace() {
     let mut d = desk_of(&["a", "b", "c", "d"]);
     let one = d

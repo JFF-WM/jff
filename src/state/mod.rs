@@ -96,7 +96,7 @@ use smithay::wayland::xdg_foreign::{XdgForeignHandler, XdgForeignState};
 
 use crate::app::Backend;
 use crate::config::{Config, KeyboardConfig, WindowFacts, WindowRule};
-use crate::desk::{Desk, Side, WindowMode};
+use crate::desk::{ContainerId, Desk, Side, WindowMode};
 use crate::focus::{seat_grab_is_foreign, KeyboardFocus, PopupGrabState};
 use crate::input::grabs::resize::ResizeGrab;
 use crate::primitives::geom;
@@ -163,6 +163,10 @@ pub struct JffState {
     /// `join_container_on_map`). Only there when a window had it, and not when the overview was
     /// open or the session locked.
     pub focus_before_open: HashMap<WlSurface, Window>,
+    /// With `tiling-containers`: the saved layout a container was laid out as by a
+    /// `container-rule` `layout`. The container is saved under that name again when the user
+    /// changes it, see `autosave_container_layout`.
+    pub layout_autosave: HashMap<ContainerId, String>,
     /// xdg-decoration: lets `no-client-decorations` ask apps to leave out their titlebar.
     #[allow(dead_code)]
     pub xdg_decoration_state: XdgDecorationState,
@@ -581,6 +585,7 @@ impl JffState {
             dialog_toplevels: HashSet::new(),
             settling_dialogs: HashMap::new(),
             focus_before_open: HashMap::new(),
+            layout_autosave: HashMap::new(),
             xdg_decoration_state,
             shm_state,
             output_manager_state,
@@ -1598,6 +1603,29 @@ impl JffState {
             .desk
             .find_by(|w| is_window_for(w, root))
             .map(|entry| entry.window.clone());
+        // `open-in-container`: the rule names the container, which comes before the one that has
+        // the keyboard. A dialog joins too (the docks of OBS are dialogs of its main window): a
+        // rule that should not catch one says so with `match dialog=#false` or a `tag`. A
+        // restored window and one a client placed in a zone are left out, and so is a window
+        // when `tiling-containers` is off (it opens as usual).
+        let named = match (rule.as_ref(), restored.is_none() && !zoned) {
+            (Some(rule), true) => rule.container.clone().map(|name| (rule.clone(), name)),
+            _ => None,
+        };
+        if let Some(name) = rule.as_ref().and_then(|rule| rule.container.as_deref()) {
+            if named.is_none() {
+                tracing::info!(
+                    "open-in-container {name:?} skipped: restored={} dialog={dialog} zoned={zoned}",
+                    restored.is_some()
+                );
+            }
+        }
+        if let (Some((rule, name)), Some(window)) = (named.as_ref(), window.as_ref()) {
+            self.focus_before_open.remove(root);
+            if self.open_in_named_container(window, rule, name) {
+                return;
+            }
+        }
         if window.is_some_and(|window| self.join_container_on_map(&window)) {
             return;
         }
@@ -1713,17 +1741,15 @@ impl JffState {
         }
     }
 
-    /// Do what `rule` says about a window that shows for the first time and isn't restored:
-    /// the monitor, then the workspace on it, then maximized or its size. What the rule leaves
-    /// out stays as it is. Says what is left to do for the caller, see [`RulePlacement`].
-    fn apply_window_rule(
+    /// Move the window of `root` to the monitor and the workspace `rule` names, the window
+    /// keeping the offset it had on the monitor it opened on. Returns the rectangle of the
+    /// monitor it was moved to, `None` when the rule names none (or one that is not connected).
+    /// Doing it again changes nothing.
+    pub(crate) fn apply_rule_monitor_and_workspace(
         &mut self,
         root: &WlSurface,
-        toplevel: &ToplevelSurface,
         rule: &WindowRule,
-        parent: Option<&WlSurface>,
-        dialog: bool,
-    ) -> RulePlacement {
+    ) -> Option<layout::Rect> {
         let is_this = |w: &Window| is_window_for(w, root);
         let size = self
             .desk
@@ -1757,6 +1783,28 @@ impl JffState {
         if let Some(workspace) = rule.workspace {
             self.send_window_to_workspace(root, workspace);
         }
+        monitor
+    }
+
+    /// Do what `rule` says about a window that shows for the first time and isn't restored:
+    /// the monitor, then the workspace on it, then maximized or its size. What the rule leaves
+    /// out stays as it is. Says what is left to do for the caller, see [`RulePlacement`].
+    fn apply_window_rule(
+        &mut self,
+        root: &WlSurface,
+        toplevel: &ToplevelSurface,
+        rule: &WindowRule,
+        parent: Option<&WlSurface>,
+        dialog: bool,
+    ) -> RulePlacement {
+        let is_this = |w: &Window| is_window_for(w, root);
+        let size = self
+            .desk
+            .find_by(is_this)
+            .map(|entry| entry.window.geometry().size)
+            .map_or((0, 0), |size| (size.w, size.h));
+
+        let monitor = self.apply_rule_monitor_and_workspace(root, rule);
 
         // Maximized wins over a size.
         if rule.maximized == Some(true) {

@@ -7,7 +7,7 @@
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
 //! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
-//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), the first rule that fits a window applies), and
+//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -952,6 +952,9 @@ pub struct WindowRule {
     pub size: Option<(i32, i32)>,
     /// `floating #true`: the window stays floating, whatever `maximize-new-windows` says.
     pub floating: bool,
+    /// `open-in-container "name"`: the window joins the container with this name on its
+    /// workspace and monitor, or starts it when there is none. Needs `tiling-containers`.
+    pub container: Option<String>,
     /// `tag "name"`: the window gets this tag of the user's, which `match tag` and the other
     /// rules see from then on. It is its own step, see [`Config::user_tag_for`].
     pub tag: Option<String>,
@@ -974,6 +977,7 @@ impl WindowRule {
         self.output.is_some()
             || self.workspace.is_some()
             || self.places_window()
+            || self.container.is_some()
             || self.tag.is_some()
     }
 
@@ -983,6 +987,7 @@ impl WindowRule {
         self.tag.is_some()
             && self.output.is_none()
             && self.workspace.is_none()
+            && self.container.is_none()
             && !self.places_window()
     }
 }
@@ -1215,13 +1220,21 @@ impl Config {
             if !rule.has_actions() {
                 warnings.push(format!("window-rule {n} has no actions, it does nothing"));
             }
+            if rule.container.is_some() && !config.tiling_containers() {
+                warnings.push(format!(
+                    "window-rule {n} has open-in-container, which does nothing without \
+                     `tiling-containers`"
+                ));
+            }
             // A restored window keeps the monitor, size and mode its session saved, only
             // `open-workspace` applies to it.
             let restored = rule.matches.contains(&WindowMatch::Restored(true));
-            if restored && (rule.output.is_some() || rule.places_window()) {
+            if restored
+                && (rule.output.is_some() || rule.places_window() || rule.container.is_some())
+            {
                 warnings.push(format!(
                     "window-rule {n} matches restored windows, which keep their saved monitor, \
-                     size and mode: only open-workspace applies"
+                     size, mode and container: only open-workspace applies"
                 ));
             }
         }
@@ -2085,6 +2098,13 @@ fn parse_window_rule(node: &KdlNode) -> anyhow::Result<WindowRule> {
                 }
             }
             "floating" => rule.floating = flag_value(child)?,
+            "open-in-container" => {
+                let name = string_arg(child)?;
+                if name.trim().is_empty() {
+                    bail!("open-in-container takes the name of a container, not an empty string");
+                }
+                rule.container = Some(name);
+            }
             "tag" => {
                 let tag = string_arg(child)?;
                 if tag.trim().is_empty() {
@@ -2097,6 +2117,9 @@ fn parse_window_rule(node: &KdlNode) -> anyhow::Result<WindowRule> {
     }
     if rule.floating && rule.maximized == Some(true) {
         bail!("floating and open-maximized #true ask for opposite things");
+    }
+    if rule.floating && rule.container.is_some() {
+        bail!("floating and open-in-container ask for opposite things");
     }
     Ok(rule)
 }
