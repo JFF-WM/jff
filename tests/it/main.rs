@@ -2,6 +2,7 @@
 
 mod alpha;
 mod app_index;
+mod app_restore;
 mod app_search;
 mod border;
 mod color_management;

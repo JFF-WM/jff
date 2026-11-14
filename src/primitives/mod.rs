@@ -1,6 +1,7 @@
 //! Pure code: no dependency on anything else in the crate.
 
 pub mod alpha;
+pub mod app_restore;
 pub mod app_search;
 pub mod color;
 pub mod color_names;

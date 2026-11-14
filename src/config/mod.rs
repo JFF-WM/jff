@@ -12,6 +12,7 @@
 //! unknown key *inside* a known block is an error.
 //!
 //! `tiling-containers` turns on tiling containers (groups of windows that tile among themselves, see `desk::container`), and is off by default. It accepts a bare name or `#true` / `#false`.
+//! `restore-apps` starts the applications that were open when the last session ended (one launch per app, found by the app id of its windows in the installed `.desktop` files, see `feature::app_restore`), puts each of their windows on the monitor and the workspace it was on, and keeps that list up to date while you work. It is off by default, and while it is off jff neither reads nor writes the list. It accepts a bare name or `#true` / `#false`, and is read at startup: turning it on in a running session starts saving, and the next session restores. Its monitor and workspace win over those of a `window-rule`, a monitor that is not connected any more leaves the window where it opens by default.
 //! `container-rule { match app-id="…", title="…", tag="…", name "…" }` (any number, the `match` lines all have to hold, the first rule that fits a window gives the container its name): a rule does not create a container, it names the one the user creates, from the first window that fits. `name` and `layout "NAME"` are its actions (`layout` applies the saved container layout NAME, see `save-container-layout`, every time a window that fits the rule joins a container, so tagged windows find their slot as they open), `jff check-config` warns about a rule with neither, and any other key inside it is an error.
 //! `binds` has five actions for containers: `focus-container "NAME"` focuses the first container with that name on the current workspace (an error toast when there is none), `container-next` and `container-prev` move the focus to the next or previous window of the focused window's container in tree order, wrapping, and do nothing for a window that is in no container. `maximize` on a window of a container makes it fill the container's rectangle, the others stay under it, and `maximize` again (or the window closing) shows the tree again. A window that closes leaves the tree, and the others take its room. `container-drag` picks up the focused window of a container with the pointer: the next left click puts it down (a right click cancels), over another window of a container the middle swaps the two places and an edge puts it beside that window, at the edge of the monitor or off every container it leaves the container and snaps, maximizes or floats as any dropped window does. Dragging a window of a container by its titlebar or with `drag-modifier` does the same. `container-eject` takes the focused window out of its container and floats it. Both do nothing for a window that is in no container. `save-container-layout "NAME"` saves the shape of the focused window's container (its splits and ratios, one slot per window, the slot of a tagged window keeps the tag, see `window-rule` `tag`) and `apply-container-layout "NAME"` puts the container in that shape again: each window goes to the slot with its tag, the others fill the free slots in their current order, a slot with no window closes up and a window with no slot is split off the last one. Both show an error toast when they cannot. The layouts are kept in `$XDG_STATE_HOME/jff-wm/container-layouts` (see `jff msg layout-list`).
 //!
@@ -137,6 +138,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "maximize-new-windows",
     "allow-tearing",
     "global-hotkeys",
+    "restore-apps",
     "window-animations",
     "no-client-decorations",
     "drag-modifier",
@@ -1042,6 +1044,9 @@ pub struct Config {
     allow_tearing: bool,
     /// `global-hotkeys`: clients may bind their own global hotkeys (xx-hotkey-v1). Off by default.
     global_hotkeys: bool,
+    /// `restore-apps`: start the apps that were open in the last session, and remember the ones
+    /// open now. Off by default.
+    restore_apps: bool,
     window_animations: WindowAnimations,
     no_client_decorations: bool,
     drag_modifier: DragModifier,
@@ -1104,6 +1109,7 @@ impl Default for Config {
                 maximize_new_windows: true,
                 allow_tearing: false,
                 global_hotkeys: false,
+                restore_apps: false,
                 window_animations: WindowAnimations::default(),
                 no_client_decorations: false,
                 drag_modifier: DragModifier::Alt,
@@ -1296,6 +1302,7 @@ impl Config {
         let maximize_new_windows = parse_flag(&doc, "maximize-new-windows", true)?;
         let allow_tearing = parse_flag(&doc, "allow-tearing", false)?;
         let global_hotkeys = parse_flag(&doc, "global-hotkeys", false)?;
+        let restore_apps = parse_flag(&doc, "restore-apps", false)?;
         let window_animations = match doc.get("window-animations") {
             None => WindowAnimations::default(),
             Some(node) => parse_window_animations(node).context("in window-animations")?,
@@ -1440,6 +1447,7 @@ impl Config {
             maximize_new_windows,
             allow_tearing,
             global_hotkeys,
+            restore_apps,
             window_animations,
             no_client_decorations,
             drag_modifier,
@@ -1634,6 +1642,12 @@ impl Config {
     /// Whether clients may bind their own global hotkeys (xx-hotkey-v1).
     pub fn global_hotkeys(&self) -> bool {
         self.global_hotkeys
+    }
+
+    /// Whether the apps of the last session are started again, and the open ones remembered
+    /// (`restore-apps`, off by default).
+    pub fn restore_apps(&self) -> bool {
+        self.restore_apps
     }
 
     /// Whether new windows start maximized.

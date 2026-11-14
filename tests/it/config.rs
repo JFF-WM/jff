@@ -1570,6 +1570,18 @@ fn global_hotkeys_are_off_unless_asked_for() {
 }
 
 #[test]
+fn restore_apps_is_off_unless_asked_for() {
+    assert!(!Config::default().restore_apps());
+    assert!(!Config::parse("").unwrap().restore_apps());
+    assert!(TOP_LEVEL_NODES.contains(&"restore-apps"));
+    assert!(Config::parse("restore-apps").unwrap().restore_apps());
+    assert!(Config::parse("restore-apps #true").unwrap().restore_apps());
+    assert!(!Config::parse("restore-apps #false").unwrap().restore_apps());
+    assert!(Config::parse("restore-apps \"on\"").unwrap().restore_apps());
+    assert!(Config::parse("restore-apps 3").is_err());
+}
+
+#[test]
 fn blur_window_filter() {
     let all = Config::parse("blur { all-windows; }").unwrap();
     assert!(all.blur_windows().allows("firefox"));

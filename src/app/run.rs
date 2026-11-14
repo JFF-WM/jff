@@ -95,6 +95,8 @@ pub fn run() -> anyhow::Result<()> {
             let mut buf = [0u8; 16];
             while matches!((&**stream).read(&mut buf), Ok(n) if n > 0) {}
             tracing::info!("signal received, shutting down");
+            // Before the clients, which may be going too, take their windows with them.
+            state.app_restore_finish();
             state.loop_signal.stop();
             Ok(PostAction::Continue)
         },
@@ -224,6 +226,26 @@ pub fn run() -> anyhow::Result<()> {
         }
     }
 
+    // `restore-apps`: the apps of the last session. After autostart, so what autostart starts is
+    // not started twice. The list of installed apps is read on another thread, so this waits
+    // for it on a timer instead of holding up the start.
+    state.app_restore_begin();
+    if state.app_restore_pending() {
+        event_loop
+            .handle()
+            .insert_source(
+                Timer::from_duration(crate::feature::app_restore::POLL),
+                |_, _, state| {
+                    if state.app_restore_poll() {
+                        TimeoutAction::Drop
+                    } else {
+                        TimeoutAction::ToDuration(crate::feature::app_restore::POLL)
+                    }
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("failed to insert the app restore timer: {}", e.error))?;
+    }
+
     // `jff <cmd>` launches a client right away.
     if let Some(cmd) = std::env::args().nth(1) {
         if let Err(err) = std::process::Command::new(&cmd).spawn() {
@@ -251,6 +273,9 @@ pub fn run() -> anyhow::Result<()> {
         state.redraw_queued_outputs();
         let _ = state.display_handle.flush_clients();
     })?;
+
+    // Before the satellite and the display go: their windows are still there to be counted.
+    state.app_restore_finish();
 
     if let Some(path) = ipc_socket {
         let _ = std::fs::remove_file(path);

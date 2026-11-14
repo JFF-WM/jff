@@ -187,6 +187,8 @@ pub struct JffState {
     pub osd: crate::feature::osd::Osd,
     /// Installed applications, for the overview search.
     pub app_index: crate::feature::app_index::AppIndex,
+    /// `restore-apps`: the apps of the last session and the ones open now.
+    pub app_restore: crate::feature::app_restore::AppRestore,
     /// xdg-foreign: lets a portal dialog say which window it belongs to.
     #[allow(dead_code)]
     pub xdg_foreign_state: XdgForeignState,
@@ -596,6 +598,7 @@ impl JffState {
             dnd_icon: None,
             osd: crate::feature::osd::Osd::new(config.osd().font.clone()),
             app_index: crate::feature::app_index::AppIndex::new(),
+            app_restore: crate::feature::app_restore::AppRestore::default(),
             xdg_foreign_state,
             xdg_activation_state,
             xdg_system_bell_state,
@@ -1595,6 +1598,32 @@ impl JffState {
         // The zone has a monitor already.
         if let (true, Some(rule)) = (zoned, rule.as_mut()) {
             rule.output = None;
+        }
+        // `restore-apps`: a window of an app from the last session goes where that session had
+        // it, the monitor and the workspace, before the rest is decided (a container only takes
+        // in a window on its own workspace). A window the app put back itself, a dialog and one
+        // a client placed in a zone are left to what places them. What the window's rule says
+        // about the monitor and workspace gives way, the rest of it stays.
+        if restored.is_none() && !dialog && !zoned {
+            if let Some(place) = self.app_restore_place(root) {
+                let target = WindowRule {
+                    output: (!place.output.is_empty())
+                        .then(|| crate::config::RuleOutput::Named(place.output.clone())),
+                    workspace: place.workspace,
+                    ..WindowRule::default()
+                };
+                tracing::info!(
+                    "restore-apps: {:?} goes to workspace {:?} on {:?}",
+                    place.app_id,
+                    place.workspace,
+                    place.output
+                );
+                self.apply_rule_monitor_and_workspace(root, &target);
+                if let Some(rule) = rule.as_mut() {
+                    rule.output = None;
+                    rule.workspace = None;
+                }
+            }
         }
         // `tiling-containers`: whatever opens while a container has the keyboard joins its
         // layout (a restored window, one a rule keeps floating too, but not a dialog), and then the

@@ -697,7 +697,7 @@ impl JffState {
 
     /// The state of `surface` as it should be saved. `None` until the window has shown
     /// something: before that its place and size are just a guess.
-    fn session_snapshot(&self, surface: &WlSurface) -> Option<SavedWindow> {
+    pub(crate) fn session_snapshot(&self, surface: &WlSurface) -> Option<SavedWindow> {
         let entry = self.desk.all_top_down().find(|e| {
             e.window
                 .toplevel()

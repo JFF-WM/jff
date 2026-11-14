@@ -153,14 +153,25 @@ impl AppIndex {
 
     /// Start `entry` and count it. `Err` says why it didn't start, ready to show.
     pub fn launch(&mut self, entry: &DesktopEntry) -> Result<(), String> {
-        let plan = launch_plan(entry, &terminal_program())
-            .ok_or_else(|| format!("{} has no command to run", entry.name))?;
-        spawn_detached(&plan.argv, plan.cwd.as_deref())
-            .map_err(|err| format!("{}: {err}", plan.argv[0]))?;
+        Self::launch_uncounted(entry)?;
         let count = self.launches.entry(entry.id.clone()).or_insert(0);
         *count = count.saturating_add(1);
         write_launches(&self.launches);
         Ok(())
+    }
+
+    /// Start `entry` without counting it: the apps `restore-apps` brings back were not picked
+    /// from the overview, so they say nothing about which apps come first in it.
+    pub fn launch_uncounted(entry: &DesktopEntry) -> Result<(), String> {
+        let plan = launch_plan(entry, &terminal_program())
+            .ok_or_else(|| format!("{} has no command to run", entry.name))?;
+        spawn_detached(&plan.argv, plan.cwd.as_deref())
+            .map_err(|err| format!("{}: {err}", plan.argv[0]))
+    }
+
+    /// The program and arguments [`AppIndex::launch`] would run for `entry`.
+    pub fn command_of(entry: &DesktopEntry) -> Option<Vec<String>> {
+        launch_plan(entry, &terminal_program()).map(|plan| plan.argv)
     }
 }
 
