@@ -72,7 +72,8 @@ use crate::primitives::overview_grid::{self as overview, Dir, Held, Thumb};
 use crate::protocol::layer_shell::{ABOVE_WINDOWS, BELOW_WINDOWS};
 use crate::protocol::toplevel_icon;
 use crate::render::effects::background_effect::render_for_surface_zoomed;
-use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
+use crate::render::effects::blur::BlurOptions;
+use crate::render::effects::framebuffer_effect::{FramebufferEffectElement, WallpaperSnapshot};
 use crate::render::effects::gamut;
 use crate::render::effects::rounded::{is_fullscreen, ring_element, Rounding};
 use crate::render::elements::JffElement;
@@ -315,6 +316,8 @@ struct CellPlan {
     label: Option<(MemoryRenderBuffer, Point<i32, Logical>)>,
     /// Stable id of the cell's fill.
     id: Id,
+    /// Stable id of the blur behind the cell's fill.
+    blur_id: Id,
 }
 
 /// Fill of a container's cell (premultiplied) and the colour of its outline (straight alpha).
@@ -359,6 +362,8 @@ pub struct Overview {
     wall_ids: Vec<Id>,
     /// Stable ids of the fills of the containers' cells, one per cell.
     cell_ids: Vec<Id>,
+    /// Stable ids of the blur behind each cell's fill, one per cell.
+    cell_blur_ids: Vec<Id>,
     /// The painted names of the containers' cells by text and text size, with their size.
     cell_labels: HashMap<(String, i32), (MemoryRenderBuffer, (i32, i32))>,
     /// The painted number of each square of the wall: the text size it was painted at, the
@@ -721,7 +726,7 @@ pub fn overview_elements(
         wall_elements(renderer, plan, origin, &mut out);
     }
 
-    cell_elements(renderer, plan, origin, &mut out);
+    cell_elements(renderer, plan, origin, blur, snapshot, &mut out);
 
     // The highlight is pushed last so it's drawn behind: only its rim shows. It is a rounded
     // outline following the thumbnail's corners (`radius` shrunk with the thumbnail, fullscreen
@@ -778,6 +783,8 @@ fn cell_elements(
     renderer: &mut GlesRenderer,
     plan: &OverviewPlan,
     origin: Point<i32, Logical>,
+    blur: Option<config::Blur>,
+    snapshot: Option<&WallpaperSnapshot>,
     out: &mut Vec<JffElement>,
 ) {
     if plan.cells.is_empty() || plan.cell_alpha <= 0.01 {
@@ -829,6 +836,20 @@ fn cell_elements(
             [r * a, g * a, b * a, a],
             Kind::Unspecified,
         )));
+        // The blur goes right behind the fill: after it in the list, so it is drawn first and
+        // the tinted fill sits on top, like frosted glass. It follows the cell's rounded
+        // corners and fades with it. The windows in the cell are in front of it.
+        if let Some(blur) = blur {
+            let mask = Rounding::new(renderer, local, radius);
+            let element = FramebufferEffectElement::for_rect(
+                cell.blur_id.clone(),
+                local,
+                BlurOptions::from(blur),
+                mask,
+                alpha,
+            );
+            out.push(JffElement::from(element.with_wallpaper_source(snapshot)));
+        }
     }
 }
 
@@ -1227,6 +1248,9 @@ impl JffState {
         while ov.cell_ids.len() < cells.len() {
             ov.cell_ids.push(Id::new());
         }
+        while ov.cell_blur_ids.len() < cells.len() {
+            ov.cell_blur_ids.push(Id::new());
+        }
         if ov.cell_labels.len() > MAX_CELL_LABELS {
             ov.cell_labels.clear();
         }
@@ -1261,6 +1285,7 @@ impl JffState {
                 rect: moved.rect(),
                 label,
                 id: ov.cell_ids[n].clone(),
+                blur_id: ov.cell_blur_ids[n].clone(),
             });
         }
         plans
@@ -1464,6 +1489,7 @@ impl JffState {
             highlight: Id::new(),
             wall_ids: Vec::new(),
             cell_ids: Vec::new(),
+            cell_blur_ids: Vec::new(),
             cell_labels: HashMap::new(),
             wall_labels: Vec::new(),
             switcher: None,

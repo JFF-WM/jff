@@ -177,6 +177,33 @@ impl Default for FramebufferEffect {
 }
 
 impl FramebufferEffectElement {
+    /// A blur of the plain rectangle `rect` (frame coordinates), for something that is not a
+    /// surface, like a container's cell in the overview. `id` has to be the same from frame to
+    /// frame, so Smithay can tell it is the same element. `mask` rounds its corners.
+    pub fn for_rect(
+        id: Id,
+        rect: Rectangle<i32, Logical>,
+        blur_options: BlurOptions,
+        mask: Option<Rounding>,
+        alpha: f32,
+    ) -> Self {
+        Self {
+            id,
+            commit: CommitCounter::default(),
+            geometry: rect.to_f64(),
+            subregion: TransformedRegion {
+                rects: Arc::new(vec![Rectangle::from_size(rect.size)]),
+                scale: Scale::from(1.),
+                offset: rect.loc.to_f64(),
+            },
+            blur_options,
+            captures: None,
+            source: None,
+            mask,
+            alpha,
+        }
+    }
+
     /// Blur the wallpaper copy in `snapshot` instead of the live frame.
     pub fn with_wallpaper_source(mut self, snapshot: Option<&WallpaperSnapshot>) -> Self {
         self.source = snapshot.cloned();
