@@ -572,6 +572,20 @@ fn border_animation_is_read() {
         .border();
     assert_eq!(smoke.animate, BorderAnimation::Smoke);
     assert!(smoke.animated());
+    let neon = Config::parse(
+        "border { animate \"neon\"; focus-color \"#38dbff\"; focus-color-2 \"#a86bff\"; }",
+    )
+    .unwrap()
+    .border();
+    assert_eq!(neon.animate, BorderAnimation::Neon);
+    assert!(neon.animated());
+    let aurora = Config::parse(
+        "border { animate \"aurora\"; focus-color \"#38dbff\"; focus-color-2 \"#a86bff\"; }",
+    )
+    .unwrap()
+    .border();
+    assert_eq!(aurora.animate, BorderAnimation::Aurora);
+    assert!(aurora.animated());
 }
 
 #[test]

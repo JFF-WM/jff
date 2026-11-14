@@ -68,6 +68,10 @@ impl JffState {
         if self.cursor.is_animated() {
             return true;
         }
+        // the borders of a window being carried run on their own clock
+        if self.tile_carry.as_ref().is_some_and(|carry| carry.shown) {
+            return true;
+        }
         let now = Instant::now();
         if crate::render::effects::border::animating(now) {
             return true;

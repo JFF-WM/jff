@@ -10,6 +10,8 @@
 //! container joins it, and so does a new window that opens while a container has the keyboard.
 //! Everything else about a drop stays as it is, and with the setting off nothing in here runs.
 
+use std::time::Instant;
+
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::{Id, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -35,7 +37,8 @@ use crate::primitives::overview_grid::Thumb;
 use crate::primitives::tile_tree::Edge;
 use crate::protocol::layer_shell::{ABOVE_WINDOWS, BELOW_WINDOWS};
 use crate::protocol::toplevel_tag;
-use crate::render::effects::rounded::{make_ring, ring_area, RingMotion};
+use crate::render::effects::border::phase as border_phase_ms;
+use crate::render::effects::rounded::{make_ring, ring_area, RingMotion, RingStyle};
 use crate::render::elements::JffElement;
 use crate::state::{configure_member, configure_mode, JffState};
 
@@ -50,11 +53,17 @@ const MIN_TILE: i32 = 80;
 /// carried. A smaller window is shown at its real size.
 const CARRY_MAX: (i32, i32) = (360, 240);
 
-/// Width in px of each of the two rings drawn around the carried picture, and their colours
-/// (straight alpha): a light one against the picture and a dark one outside it.
-const CARRY_RING: i32 = 2;
-const CARRY_RING_LIGHT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-const CARRY_RING_DARK: [f32; 4] = [0.0, 0.0, 0.0, 0.65];
+/// The border of the carried picture: a dark hairline against the picture, so it stands out
+/// from an app of any colour, and a neon ring of `CARRY_RING` px outside it whose bloom
+/// spreads `CARRY_BLOOM` px. Its two colours flow round it, a turn of the comets takes
+/// `CARRY_PERIOD_MS`.
+const CARRY_HAIRLINE: i32 = 1;
+const CARRY_HAIRLINE_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 0.7];
+const CARRY_RING: i32 = 3;
+const CARRY_BLOOM: i32 = 18;
+const CARRY_PERIOD_MS: u64 = 2600;
+const CARRY_COLOR: [f32; 4] = [0.22, 0.86, 1.0, 1.0];
+const CARRY_COLOR_2: [f32; 4] = [0.66, 0.42, 1.0, 1.0];
 
 /// A window of a tiling container on its way to another place: what the frame needs to draw it
 /// at the pointer. The window itself stays in the tree, and in its tile, until it is put down.
@@ -70,6 +79,8 @@ pub struct TileCarry {
     pub drop: Option<TileDrop>,
     /// Id of the highlight's fill, kept so the damage tracking sees one element move.
     pub fill: Id,
+    /// When the carry began: the animation of the borders is measured from it.
+    pub since: Instant,
 }
 
 /// The place a carried window goes to when put down: what the user sees highlighted.
@@ -88,6 +99,10 @@ const DROP_RING: i32 = 3;
 const DROP_FILL_ALPHA: f32 = 0.22;
 const DROP_IN: [f32; 4] = [0.25, 0.55, 1.0, 1.0];
 const DROP_OUT: [f32; 4] = [1.0, 0.65, 0.2, 1.0];
+/// The second colour of the moving ring of each (`DROP_IN`, `DROP_OUT`), and its turn.
+const DROP_IN_2: [f32; 4] = [0.62, 0.9, 1.0, 1.0];
+const DROP_OUT_2: [f32; 4] = [1.0, 0.9, 0.45, 1.0];
+const DROP_PERIOD_MS: u64 = 3200;
 
 /// The half of `rect` on `side`: where a window dropped beside a leaf on that side lands.
 fn half_of(rect: Rect, side: Side) -> Rect {
@@ -779,6 +794,7 @@ impl JffState {
             shown: false,
             drop: None,
             fill: Id::new(),
+            since: Instant::now(),
         });
         // Picked up by key, it follows the pointer at once, there is no first motion to wait for.
         if end == TileMoveEnd::Click {
@@ -1293,29 +1309,42 @@ pub fn tile_carry_elements(
         &mut out,
         None,
     );
-    // An outline around the picture, behind it (later in the list): a light ring with a dark one
-    // outside it, so the picture stands out from an app of any colour.
+    // The border, behind the picture (later in the list): a dark hairline against the picture,
+    // then the neon ring round it with its bloom, in step with the clock of this carry.
     let corner = (f64::from(radius) * scale).round() as i32;
-    let inner = Rectangle::<i32, Logical>::new(
+    let picture = Rectangle::<i32, Logical>::new(
         (thumb.pos.0 - origin.x, thumb.pos.1 - origin.y).into(),
         (shown.0, shown.1).into(),
     );
-    let outer = ring_area(inner, CARRY_RING);
-    for (area, radius, color) in [
-        (inner, corner, CARRY_RING_LIGHT),
-        (outer, corner + CARRY_RING, CARRY_RING_DARK),
-    ] {
-        if let Some(ring) = make_ring(
-            renderer,
-            ring_area(area, CARRY_RING),
-            CARRY_RING,
-            radius,
-            color,
-            RingMotion::default(),
-        ) {
-            out.push(JffElement::Ring(ring));
-        }
-    }
+    let hairline = ring_area(picture, CARRY_HAIRLINE);
+    let phase = border_phase(carry.since, CARRY_PERIOD_MS);
+    let motion = RingMotion {
+        color2: CARRY_COLOR_2,
+        phase,
+        amount: 1.0,
+        style: RingStyle::Neon,
+        margin: CARRY_BLOOM,
+        paper: false,
+    };
+    // Front to back: the hairline against the picture, then the neon ring round it.
+    let hairline_ring = make_ring(
+        renderer,
+        hairline,
+        CARRY_HAIRLINE,
+        corner,
+        CARRY_HAIRLINE_COLOR,
+        RingMotion::default(),
+    );
+    let neon_ring = make_ring(
+        renderer,
+        ring_area(hairline, CARRY_RING + CARRY_BLOOM),
+        CARRY_RING,
+        corner + CARRY_HAIRLINE,
+        CARRY_COLOR,
+        motion,
+    );
+    out.extend(hairline_ring.into_iter().map(JffElement::Ring));
+    out.extend(neon_ring.into_iter().map(JffElement::Ring));
     // The place it goes to, behind the picture.
     drop_elements(carry, radius, renderer, origin, rect, &mut out);
     out
@@ -1343,13 +1372,22 @@ fn drop_elements(
             (area.loc.x + DROP_RING, area.loc.y + DROP_RING).into(),
             (area.size.w - 2 * DROP_RING, area.size.h - 2 * DROP_RING).into(),
         );
+        // A comet runs round the place, in the colour of what dropping there does.
+        let motion = RingMotion {
+            color2: if drop.leaves { DROP_OUT_2 } else { DROP_IN_2 },
+            phase: border_phase(carry.since, DROP_PERIOD_MS),
+            amount: 1.0,
+            style: RingStyle::Neon,
+            margin: 0,
+            paper: false,
+        };
         if let Some(ring) = make_ring(
             renderer,
             ring_area(inner, DROP_RING),
             DROP_RING,
             radius,
             color,
-            RingMotion::default(),
+            motion,
         ) {
             out.push(JffElement::Ring(ring));
         }
@@ -1365,4 +1403,9 @@ fn drop_elements(
         [r * a, g * a, b * a, a],
         Kind::Unspecified,
     )));
+}
+
+/// Where the animation of a carry's borders is in its turn of `period_ms`, `since` its start.
+fn border_phase(since: Instant, period_ms: u64) -> f32 {
+    border_phase_ms(since.elapsed(), period_ms)
 }

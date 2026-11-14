@@ -512,6 +512,12 @@ pub enum RingStyle {
     Sweep,
     /// Smoke rising off the ring's outer edge.
     Smoke,
+    /// A lit ring: comets with long tails run round it, it flows between the two colours,
+    /// and a bloom spills off its outer edge (give it a `margin` for that).
+    Neon,
+    /// Soft ribbons of light: three colours drift round the ring, and curtains of light rise off
+    /// its outer edge, tall where a ribbon is (give it a `margin` for them).
+    Aurora,
 }
 
 impl RingStyle {
@@ -521,6 +527,8 @@ impl RingStyle {
             Self::Spin => 0.0,
             Self::Sweep => 1.0,
             Self::Smoke => 2.0,
+            Self::Neon => 3.0,
+            Self::Aurora => 4.0,
         }
     }
 }

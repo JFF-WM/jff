@@ -133,6 +133,12 @@ const PAPER_SHADOW: i32 = 16;
 /// How far smoke rises off a window's border, in pixels.
 const SMOKE_REACH: i32 = 56;
 
+/// How far the bloom of a neon border spreads, in pixels.
+const NEON_REACH: i32 = 18;
+
+/// How high the curtains of an aurora border rise, in pixels.
+const AURORA_REACH: i32 = 34;
+
 /// What a ring was made from: when this is the same, the same element does.
 #[derive(PartialEq)]
 struct RingKey {
@@ -282,12 +288,15 @@ pub fn border_element(
                 style: match style.animate {
                     BorderAnimation::Sweep => RingStyle::Sweep,
                     BorderAnimation::Smoke => RingStyle::Smoke,
+                    BorderAnimation::Neon => RingStyle::Neon,
+                    BorderAnimation::Aurora => RingStyle::Aurora,
                     _ => RingStyle::Spin,
                 },
-                margin: if style.animate == BorderAnimation::Smoke {
-                    SMOKE_REACH
-                } else {
-                    0
+                margin: match style.animate {
+                    BorderAnimation::Smoke => SMOKE_REACH,
+                    BorderAnimation::Neon => NEON_REACH,
+                    BorderAnimation::Aurora => AURORA_REACH,
+                    _ => 0,
                 },
                 paper: false,
             }

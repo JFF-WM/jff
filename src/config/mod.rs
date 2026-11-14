@@ -800,6 +800,14 @@ pub enum BorderAnimation {
     /// Smoke that rises off the border, in `focus-color` close to it and `focus-color-2` as it
     /// thins out. A turn is one loop of the smoke.
     Smoke,
+    /// A lit border: bright comets with long tails run round it, it flows from `focus-color`
+    /// into `focus-color-2`, and a soft bloom spills off its outer edge. A turn is one lap of
+    /// the main comet.
+    Neon,
+    /// Soft ribbons of light: the border runs through `focus-color`, `focus-color-2` and a third
+    /// colour made from them, and curtains of light with fine rays rise off its outer edge.
+    /// A turn is one drift of the ribbons.
+    Aurora,
 }
 
 /// How a border is drawn.
@@ -1938,8 +1946,10 @@ fn parse_border(node: &KdlNode) -> anyhow::Result<Border> {
                     "spin" => BorderAnimation::Spin,
                     "sweep" => BorderAnimation::Sweep,
                     "smoke" => BorderAnimation::Smoke,
+                    "neon" => BorderAnimation::Neon,
+                    "aurora" => BorderAnimation::Aurora,
                     other => bail!(
-                        "animate takes \"none\", \"spin\", \"sweep\" or \"smoke\", not {other:?}"
+                        "animate takes \"none\", \"spin\", \"sweep\", \"smoke\", \"neon\" or \"aurora\", not {other:?}"
                     ),
                 }
             }

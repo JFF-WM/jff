@@ -15,6 +15,22 @@
 //               `margin` pixels bigger than the ring on every side, which is the room the smoke
 //               has. The smoke rises, drifts and curls, and `phase` is one loop of it: the
 //               picture at 1.0 is the picture at 0.0.
+//   3.0  neon:  a lit ring. `color` flows into `color2` round the ring with a faint
+//               holographic sheen, a bright comet with a long tail runs once round per `phase`
+//               and a dimmer one runs the other way, a thin glass highlight follows the inner
+//               edge, and a bloom spills off the outer edge, brighter where a comet passes. The
+//               element is `margin` pixels bigger than the ring on every side for the bloom
+//               (0 for none). The comets go at the same speed on every side: they are placed
+//               by the way along the rectangle, not by the angle. Every part of it repeats
+//               with `phase`, so the last frame of a turn is the first of the next.
+//   4.0  aurora: soft ribbons of light. The ring runs through three colours (`color`,
+//               `color2` and a third made from the two) that drift round it, bright where
+//               slow noise says a ribbon is, and curtains of light stand off its outer edge,
+//               tall over the ribbons and low between them, streaked with fine rays that
+//               shimmer, shading from the ring's colour into the next one as they rise. It
+//               needs `margin` pixels around the ring for the curtains (0 for the ring alone).
+//               The noise is read round a circle, so it has no seam where the ring closes, and
+//               it moves round another circle with `phase`, so the turn repeats.
 // With `animated` at 0.0 (the default the overview passes) the output is just `color`.
 //
 // A window border can also be a sheet of torn paper (`paper` at 1.0): the ring is then a piece
@@ -48,9 +64,10 @@ uniform vec4 color2;
 uniform float phase;
 // How much of the animation shows: 0.0 none, 1.0 all. Scaled by the focus fade.
 uniform float animated;
-// Which animation: 0.0 spin, 1.0 sweep, 2.0 smoke.
+// Which animation: 0.0 spin, 1.0 sweep, 2.0 smoke, 3.0 neon, 4.0 aurora.
 uniform float style;
-// Room around the ring the element reaches out by, in pixels. 0.0 for everything but smoke.
+// Room around the ring the element reaches out by, in pixels. 0.0 for everything but smoke
+// and the neon bloom and aurora curtains.
 uniform float margin;
 // 1.0: draw the ring as a sheet of torn paper, 0.0: as a plain ring.
 uniform float paper;
@@ -160,6 +177,143 @@ vec4 smoke(vec2 p, vec2 half_size, float r) {
     return vec4(rgb * a, a);
 }
 
+// How far round the rectangle with half-size `h` the point `p` (from its centre) is, clockwise
+// from the top-left corner: 0.0 up to, not including, 1.0. The way along the edge, not the
+// angle, so something that moves by it goes at one speed on a long side and a short one.
+float perimeter_t(vec2 p, vec2 h) {
+    h = max(h, vec2(1.0));
+    vec2 a = abs(p) / h;
+    // The point where the ray from the centre through `p` leaves the rectangle.
+    vec2 b = p / max(max(a.x, a.y), 0.0001);
+    float s;
+    if (a.x > a.y) {
+        s = p.x > 0.0 ? 2.0 * h.x + (b.y + h.y)
+                      : 4.0 * h.x + 2.0 * h.y + (h.y - b.y);
+    } else {
+        s = p.y < 0.0 ? h.x + b.x
+                      : 2.0 * h.x + 2.0 * h.y + (h.x - b.x);
+    }
+    return fract(s / (4.0 * (h.x + h.y)));
+}
+
+// A comet at distance `d` (0.0 to 1.0, round the ring) behind its head: the tail dies away
+// with `tail`, and the head is cut off sharply ahead, with `lead`. 1.0 at the head.
+float comet(float d, float tail, float lead) {
+    return max(exp(-d * tail), exp(-(1.0 - d) * lead));
+}
+
+// The neon ring at `p`, premultiplied: the ring itself with its bloom behind it.
+vec4 neon(vec2 p, vec2 outer_half, float outer_r, vec2 inner_half, float inner_r, float coverage) {
+    float t = perimeter_t(p, outer_half);
+    // A slow swell of the whole thing, once per turn.
+    float breath = 0.5 + 0.5 * sin(phase * TAU);
+
+    // One comet runs clockwise, a dimmer one goes the other way round.
+    float lead = comet(fract(phase - t), 4.5, 36.0);
+    float chase = comet(fract(t - fract(0.5 - phase)), 7.0, 36.0) * 0.55;
+    float glint = clamp(lead + chase, 0.0, 1.0);
+
+    // The two colours flow round the ring, two lobes of each, with a hint of rainbow on top.
+    float flow = 0.5 + 0.5 * cos(TAU * (2.0 * t - phase));
+    vec3 base = mix(color.rgb, color2.rgb, flow);
+    vec3 sheen = 0.5 + 0.5 * cos(TAU * (vec3(0.0, 0.33, 0.67) + t + phase));
+    base = mix(base, sheen, 0.10);
+
+    // The head burns white-hot, and the tail fades back into the colours.
+    vec3 hot = mix(color2.rgb, vec3(1.0), 0.6 * lead * lead);
+    vec3 rgb = base * (0.72 + 0.12 * breath);
+    rgb = mix(rgb, hot, glint * 0.85);
+
+    // A glass highlight along the inner edge, stronger under a comet.
+    float di = rounded_box(p, inner_half, inner_r);
+    rgb += vec3(0.45) * (1.0 - smoothstep(0.0, 1.6, di)) * (0.35 + 0.65 * glint);
+    rgb = mix(color.rgb, clamp(rgb, 0.0, 1.0), animated);
+
+    vec4 ring = vec4(rgb, 1.0) * (color.a * coverage);
+
+    // The bloom: outside the ring only, so a translucent window shows no glow behind it.
+    if (margin > 0.0) {
+        float dout = max(rounded_box(p, outer_half, outer_r), 0.0);
+        float x = clamp(dout / margin, 0.0, 1.0);
+        float fall = exp(-dout / (0.30 * margin)) * (1.0 - x) * (1.0 - x);
+        float level = (0.30 + 0.60 * glint + 0.12 * breath) * animated;
+        float outside = clamp(rounded_box(p, outer_half, outer_r) + 0.5, 0.0, 1.0);
+        float ga = fall * level * outside * color.a * 0.9;
+        ring += vec4(mix(base, hot, glint) * ga, ga) * (1.0 - ring.a);
+    }
+    return ring;
+}
+
+// Noise at the point `t` (0.0 to 1.0) round the ring: value noise read along a circle, so it has
+// no seam where the ring closes, and carried round another circle by `phase`, so a turn of the
+// animation ends where it began. `cells` is about how many features go round the ring.
+float ring_noise(float t, float cells, float drift, float seed, int octaves) {
+    float radius = cells / TAU;
+    vec2 q = vec2(cos(TAU * t), sin(TAU * t)) * radius;
+    vec2 off = vec2(cos(TAU * phase + seed), sin(TAU * phase + seed)) * drift;
+    return fbm(q + off + vec2(seed * 3.1, seed * 1.7), octaves);
+}
+
+// The aurora colour at `c` (any number, one turn per 1.0): the three colours in a row, blended
+// by raised cosines a third of a turn apart, which add up to 1.5 everywhere.
+vec3 aurora_hue(float c, vec3 a, vec3 b, vec3 third) {
+    float wa = 0.5 + 0.5 * cos(TAU * c);
+    float wb = 0.5 + 0.5 * cos(TAU * (c - 1.0 / 3.0));
+    float wc = 0.5 + 0.5 * cos(TAU * (c - 2.0 / 3.0));
+    return (a * wa + b * wb + third * wc) / 1.5;
+}
+
+// The aurora ring at `p`, premultiplied: the ring with its curtains of light behind it.
+vec4 aurora(vec2 p, vec2 outer_half, float outer_r, float coverage) {
+    float dist = rounded_box(p, outer_half, outer_r);
+    // Inside the window there is nothing to draw: leave before the noise.
+    if (dist < -(border + 2.0))
+        return vec4(0.0);
+
+    float t = perimeter_t(p, outer_half);
+    float breath = 0.5 + 0.5 * sin(phase * TAU);
+
+    // A third colour between the two, shifted towards its neighbour channel, so the ribbons
+    // run through a small spectrum of the theme.
+    vec3 mid = 0.5 * (color.rgb + color2.rgb);
+    vec3 third = mix(mid, mid.gbr, 0.55);
+    // Where in the colour cycle this is: two cycles round the ring, flowing with the phase.
+    float cycle = 2.0 * t - phase;
+    vec3 hue = aurora_hue(cycle, color.rgb, color2.rgb, third);
+
+    // Where the ribbons are: bright above 0.5, dim between them.
+    float body = ring_noise(t, 7.0, 0.9, 1.0, 3);
+    float ribbon = smoothstep(0.30, 0.82, body);
+
+    // The ring: always lit, a ribbon lifts it and bleaches its brightest parts a little.
+    vec3 rgb = hue * (0.60 + 0.55 * ribbon + 0.10 * breath) + vec3(0.30) * ribbon * ribbon;
+    rgb = mix(color.rgb, clamp(rgb, 0.0, 1.0), animated);
+    vec4 ring = vec4(rgb, 1.0) * (color.a * coverage);
+
+    // The curtains: outside the ring, as tall as the ribbon is strong there.
+    if (margin > 0.0) {
+        float d = max(dist, 0.0);
+        float reach = ring_noise(t, 5.0, 0.7, 2.0, 2);
+        float height = margin * (0.28 + 0.72 * smoothstep(0.25, 0.85, reach));
+        float x = d / max(height, 1.0);
+        if (x < 1.0) {
+            // Fine rays, straight out from the ring, that shimmer as they move.
+            float rays = 0.45 + 0.55 * ring_noise(t, 46.0, 0.8, 3.0, 1);
+            float fade = pow(1.0 - x, 1.6);
+            float base = exp(-d / (0.16 * margin));
+            float density = (0.50 * rays + 0.65 * base) * fade;
+            // Rising, the light shades into the next colour of the cycle.
+            vec3 up = aurora_hue(cycle + 0.34 * x + 0.10, color.rgb, color2.rgb, third);
+            vec3 light = mix(hue, up, smoothstep(0.0, 0.9, x));
+            float outside = clamp(dist + 0.5, 0.0, 1.0);
+            float level = (0.40 + 0.60 * ribbon + 0.10 * breath) * animated;
+            float a = clamp(density * level * outside * color.a, 0.0, 1.0);
+            ring += vec4(light * a, a) * (1.0 - ring.a);
+        }
+    }
+    return ring;
+}
+
 // How far the torn edge of a sheet is out of true at `p`, -1.0 to 1.0: a coarse wobble and a
 // fine ragged part. The sheet's size seeds it, so two windows do not tear the same way.
 float tear_at(vec2 p) {
@@ -225,8 +379,10 @@ void main() {
     float coverage = outer * (1.0 - inner);
 
     vec4 paint = color;
-    bool smoking = animated > 0.0 && style > 1.5;
-    if (animated > 0.0 && !smoking) {
+    bool smoking = animated > 0.0 && style > 1.5 && style < 2.5;
+    bool glowing = animated > 0.0 && style > 2.5 && style < 3.5;
+    bool northern = animated > 0.0 && style > 3.5;
+    if (animated > 0.0 && style < 1.5) {
         // Angle around the centre, -pi to pi. Only its cosine is used, which is the same on
         // both sides of the seam, so the colour has no jump where the angle wraps.
         float angle = atan(p.y, p.x);
@@ -245,6 +401,12 @@ void main() {
         vec4 puff = smoke(p, outer_half, outer_r) * (animated * alpha);
         result += puff * (1.0 - result.a);
     }
+
+    if (glowing)
+        result = neon(p, outer_half, outer_r, inner_half, inner_r, coverage) * alpha;
+
+    if (northern)
+        result = aurora(p, outer_half, outer_r, coverage) * alpha;
 
     if (paper > 0.5)
         result = paper_sheet(p, outer_half, inner, inner_half, inner_r) * alpha;
