@@ -774,7 +774,13 @@ impl JffState {
         };
         let zoom = match target {
             WindowMode::Fullscreen => return false,
-            WindowMode::Maximized => true,
+            // A member is never maximized, whoever asks (`maximize-new-windows`, the client, the
+            // keybind): it keeps its tile. Still answered with a configure, as the protocol
+            // requires.
+            WindowMode::Maximized => {
+                self.retile_container(id);
+                return true;
+            }
             WindowMode::Floating => {
                 // Also what leaving fullscreen comes to.
                 self.desk.float_in_place_where(|w| w == window);
