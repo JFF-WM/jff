@@ -1252,7 +1252,12 @@ impl XdgShellHandler for JffState {
         // Where the keyboard was before the new window takes it: a container that has it may
         // take the window in when it shows.
         if self.config.tiling_containers() && !self.overview_active() && !self.session_locked() {
-            if let Some(before) = self.focused_window() {
+            // The window the user was working in, also while a panel or launcher menu has the
+            // keyboard: that is where a window started from it comes from.
+            if let Some(before) = self
+                .focused_window()
+                .or_else(|| self.focused_window.clone())
+            {
                 let root = window.toplevel().map(|t| t.wl_surface().clone());
                 if let Some(root) = root {
                     self.focus_before_open.insert(root, before);
@@ -1580,6 +1585,20 @@ impl JffState {
             return;
         }
         if !self.desk.is_floating(|w| is_window_for(w, root)) {
+            // An app that asks to be maximized before its first buffer (GTK apps that remember
+            // their last state, Nautilus among them) is not floating here, but a container with
+            // the keyboard still takes it in.
+            let maximized = self.desk.mode_of(|w| is_window_for(w, root)) == WindowMode::Maximized;
+            tracing::debug!("first buffer of a window that is not floating: maximized={maximized}");
+            if maximized && !self.zones_is_member(root) {
+                let window = self
+                    .desk
+                    .find_by(|w| is_window_for(w, root))
+                    .map(|entry| entry.window.clone());
+                if let Some(window) = window {
+                    self.join_container_on_map(&window);
+                }
+            }
             return;
         }
         // A window in a zone was placed by its client: it is not maximized or centred, and the

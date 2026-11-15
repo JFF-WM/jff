@@ -139,8 +139,9 @@ impl JffState {
     /// It starts one when `tiling-containers` is on, the window is floating or maximized and in
     /// no container, `at` is in the empty half of the monitor under it (see
     /// [`in_empty_half`]), a window is snapped to the other half, and no `window-rule` with
-    /// `floating` applies to either window. The container is named by the `container-rule` that
-    /// fits the snapped window, if there is one.
+    /// `floating` applies to the snapped window. The dragged window may be a dialog or float by
+    /// rule: the user chose to put it there. The container is named by the `container-rule`
+    /// that fits the snapped window, if there is one.
     ///
     /// Before that, a window let go over a container that is shown joins it instead, see
     /// [`JffState::drop_into_existing_container`].
@@ -148,10 +149,8 @@ impl JffState {
         if !self.config.tiling_containers() {
             return false;
         }
-        // A dialog stays a floating window over the one it belongs to.
-        if self.is_dialog(window) {
-            return false;
-        }
+        // A window the user drags onto a container wants to be in it: not even a dialog, or a
+        // window a `window-rule` keeps `floating`, is left out.
         let Some(dragged) = self.desk.find_by(|w| w == window) else {
             return false;
         };
@@ -173,8 +172,9 @@ impl JffState {
         let Some((snapped, side)) = self.snapped_beside(window, &rects, monitor, free, at) else {
             return false;
         };
-        // A window the user keeps floating by rule is never tiled, and does not tile another.
-        if self.floats_by_rule(window) || self.floats_by_rule(&snapped) {
+        // The window beside which the dragged one lands is not tiled when a rule keeps it
+        // floating.
+        if self.floats_by_rule(&snapped) {
             return false;
         }
         let name = self
@@ -212,9 +212,9 @@ impl JffState {
     /// shown, the window joins it, split off the member under the pointer (see
     /// [`crate::desk::Desk::join_container`]), and the container is laid out again. Returns true then, and
     /// false, having changed nothing, when it does not: no container there. Any window joins
-    /// but a dialog (a window the user drops on a container wants to be in it, whatever a rule
-    /// says). The caller has checked that the
-    /// window is floating or maximized and in no container.
+    /// (a window the user drops on a container wants to be in it, whatever a rule says or
+    /// whether it is a dialog). The caller has checked that the window is floating or maximized
+    /// and in no container.
     fn drop_into_existing_container(&mut self, window: &Window, at: Point<f64, Logical>) -> bool {
         let point = (at.x, at.y);
         let gap = self.config.snap_gap();
@@ -245,6 +245,12 @@ impl JffState {
     /// member (see [`crate::desk::Desk::container_to_join`]).
     pub(crate) fn join_container_on_map(&mut self, window: &Window) -> bool {
         if !self.config.tiling_containers() || self.overview_active() || self.session_locked() {
+            tracing::debug!(
+                "new window not joined: tiling-containers={} overview={} locked={}",
+                self.config.tiling_containers(),
+                self.overview_active(),
+                self.session_locked()
+            );
             return false;
         }
         let Some(root) = window
@@ -256,20 +262,36 @@ impl JffState {
         let opened_from = self.focus_before_open.remove(&root);
         // A dialog is not tiled: it is centred over its parent like anywhere else. Nor is a
         // window a `window-rule` keeps `floating` (the docks of OBS, say), it opens where it is.
-        if self.is_dialog(window) || self.floats_by_rule(window) {
+        let dialog = self.is_dialog(window);
+        let floats = self.floats_by_rule(window);
+        if dialog || floats {
+            let (app_id, title) = toplevel_names(&root);
+            let has_parent = window.toplevel().is_some_and(|t| t.parent().is_some());
+            tracing::debug!(
+                "new window not joined: app-id={app_id:?} title={title:?} dialog={dialog} \
+                 (has a parent: {has_parent}) floating-by-rule={floats}"
+            );
             return false;
         }
-        let current = self.focused_window();
+        // With a panel or launcher menu holding the keyboard no window has it, the window the
+        // user was working in is still the one the new window comes from.
+        let current = self
+            .focused_window()
+            .or_else(|| self.focused_window.clone());
         let focus = if current.as_ref() == Some(window) {
             opened_from
         } else {
             current
         };
-        let joinable = focus.and_then(|focus| {
-            self.desk
-                .container_to_join(|w| *w == focus, |w| w == window)
-        });
+        let joinable = focus
+            .as_ref()
+            .and_then(|focus| self.desk.container_to_join(|w| w == focus, |w| w == window));
         let Some(id) = joinable else {
+            tracing::debug!(
+                "new window not joined: the keyboard was on a window that is in a container \
+                 that takes it: no (keyboard on a window: {})",
+                focus.is_some()
+            );
             return self.start_layout_container(window);
         };
         let gap = self.config.snap_gap();
