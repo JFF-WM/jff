@@ -28,6 +28,18 @@ pub const CONTRAST_RANGE: std::ops::RangeInclusive<f32> = 0.5..=2.0;
 /// Contrast of an output that does not set `hdr-contrast`.
 pub const DEFAULT_CONTRAST: f32 = 1.0;
 
+/// Smallest and largest `hdr-saturation` accepted, 1.0 leaves the colors as they are.
+pub const SATURATION_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
+
+/// Saturation of an output that does not set `hdr-saturation`.
+pub const DEFAULT_SATURATION: f32 = 1.0;
+
+/// Smallest and largest gain of one channel of `hdr-white-balance` accepted, 1.0 leaves it as it is.
+pub const WHITE_BALANCE_RANGE: std::ops::RangeInclusive<f32> = 0.5..=1.5;
+
+/// White balance of an output that does not set `hdr-white-balance`.
+pub const DEFAULT_WHITE_BALANCE: [f32; 3] = [1.0; 3];
+
 /// Below this ratio of peak to SDR white the panel has little room for highlights.
 pub const LOW_HEADROOM: f32 = 2.0;
 
@@ -151,6 +163,11 @@ pub fn contrast_curve(nits: f32, pivot: f32, contrast: f32) -> f32 {
     pivot * (nits / pivot).powf(contrast)
 }
 
+/// The color `rgb` with its saturation scaled around its luminance `y`: 0 is gray, 1 is as it was, and `y` does not change.
+pub fn saturate(rgb: [f32; 3], y: f32, saturation: f32) -> [f32; 3] {
+    rgb.map(|v| y + (v - y) * saturation)
+}
+
 /// The curve that rolls highlights off under the panel's peak.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ToneMap {
@@ -262,6 +279,10 @@ pub struct FinalPass {
     pub luma_panel: [f32; 3],
     /// The panel's gamut is known: colors outside it are desaturated into it.
     pub map_gamut: bool,
+    /// Gain of the red, green and blue of BT.2020 light, 1.0 for none.
+    pub white_balance: [f32; 3],
+    /// Saturation of the colors, 1.0 for none, 0 for gray.
+    pub saturation: f32,
     /// Contrast around SDR white, 1.0 for none.
     pub contrast: f32,
     /// How luminance above the knee is rolled off.
@@ -309,6 +330,8 @@ impl FinalPass {
             luma_2020,
             luma_panel,
             map_gamut,
+            white_balance: DEFAULT_WHITE_BALANCE,
+            saturation: DEFAULT_SATURATION,
             contrast: DEFAULT_CONTRAST,
             tone: ToneMap::default(),
             eotf: OutputEotf::default(),
@@ -327,6 +350,19 @@ impl FinalPass {
             dither_levels,
             ..self
         }
+    }
+
+    /// The same pass with `gain` applied to the red, green and blue of the light, `[1.0, 3]` for none.
+    pub fn with_white_balance(self, white_balance: [f32; 3]) -> Self {
+        Self {
+            white_balance,
+            ..self
+        }
+    }
+
+    /// The same pass with the saturation set to `saturation`, 1.0 for none.
+    pub fn with_saturation(self, saturation: f32) -> Self {
+        Self { saturation, ..self }
     }
 
     /// The same pass with the contrast set to `contrast`, 1.0 for none.
@@ -355,7 +391,12 @@ impl FinalPass {
     /// The shader on one pixel: linear BT.2020 (1.0 is SDR white) in, signal code values out.
     pub fn apply(&self, working: [f32; 3]) -> [f32; 3] {
         let mut nits = working.map(|v| v.max(0.0) * self.sdr_white);
+        for (v, gain) in nits.iter_mut().zip(self.white_balance) {
+            *v *= gain;
+        }
+        // Saturating keeps the luminance, so `y` is the one of the color before and after.
         let y = dot(self.luma_2020, nits);
+        nits = saturate(nits, y, self.saturation);
         if y > 1e-6 {
             let contrasted = contrast_curve(y, self.sdr_white, self.contrast);
             let mapped = match (self.content_peak, self.tone) {

@@ -2444,3 +2444,52 @@ fn check_warns_about_a_contrast_without_hdr() {
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains("hdr-contrast") && warnings[0].contains("no `hdr`"));
 }
+
+#[test]
+fn hdr_saturation_and_white_balance_parse() {
+    let config = Config::parse(
+        r#"outputs {
+            output "DP-1" { hdr; hdr-saturation 1.1; hdr-white-balance 1.0 0.95 0.9; }
+            output "DP-2" { hdr; hdr-white-balance 1 1 1; }
+            output "DP-3" { hdr; }
+        }"#,
+    )
+    .unwrap();
+    let first = config.output("DP-1").unwrap();
+    assert_eq!(first.hdr_saturation, Some(1100));
+    assert_eq!(first.hdr_white_balance, Some([1000, 950, 900]));
+    assert_eq!(
+        config.output("DP-2").unwrap().hdr_white_balance,
+        Some([1000; 3])
+    );
+    assert_eq!(config.output("DP-3").unwrap().hdr_saturation, None);
+    assert_eq!(config.output("DP-3").unwrap().hdr_white_balance, None);
+}
+
+#[test]
+fn hdr_saturation_and_white_balance_fail_when_wrong() {
+    for (key, bad) in [
+        ("hdr-saturation", "3"),
+        ("hdr-saturation", "-0.5"),
+        ("hdr-saturation", "\"high\""),
+        ("hdr-white-balance", "1.0"),
+        ("hdr-white-balance", "1.0 1.0"),
+        ("hdr-white-balance", "1.0 1.0 1.0 1.0"),
+        ("hdr-white-balance", "0.1 1.0 1.0"),
+        ("hdr-white-balance", "1.0 \"x\" 1.0"),
+    ] {
+        let text = format!(r#"outputs {{ output "DP-1" {{ {key} {bad}; }} }}"#);
+        let message = format!("{:#}", Config::parse(&text).unwrap_err());
+        assert!(message.contains(key), "{key} {bad}: {message}");
+    }
+}
+
+#[test]
+fn check_warns_about_saturation_and_white_balance_without_hdr() {
+    let warnings = Config::check_text(
+        r#"outputs { output "DP-1" { hdr-saturation 1.1; hdr-white-balance 1 1 1; } }"#,
+    )
+    .unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("hdr-saturation and hdr-white-balance"));
+}

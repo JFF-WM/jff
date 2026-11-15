@@ -39,10 +39,12 @@
 //! `sdr-white` sets the luminance in cd/m² that SDR white is shown at on an HDR monitor (203 by default, 10 to 1000).
 //! `hdr-peak` replaces the peak luminance the EDID states (100 to 10000 cd/m²): the frame is mapped to it and it is what the monitor is told and what clients are told.
 //! `hdr-contrast` sets the contrast of an HDR monitor around SDR white (0.5 to 2.0, 1.0 by default): above 1.0 darks go down and highlights go up, under 1.0 the picture is flatter. SDR white stays where `sdr-white` puts it, and the roll-off under the peak still applies after it.
+//! `hdr-saturation` scales the color intensity of an HDR monitor without changing brightness (0.0 to 2.0, 1.0 by default, 0 is gray). Colors it pushes out of the monitor's gamut are brought back in.
+//! `hdr-white-balance` takes the gain of red, green and blue light (0.5 to 1.5 each, `hdr-white-balance 1.0 0.95 0.9` makes the picture warmer, 1.0 1.0 1.0 is none) and is applied before the contrast and the roll-off.
 //! `hdr-tone-map "knee"|"bt2390"` picks how the frame is rolled off under that peak (`"knee"` by default).
 //! `hdr-content-metadata` (on by default, `hdr-content-metadata false` turns it off) fits that roll-off to the content: when a visible PQ surface states how bright it gets (`max_cll`, else the mastering luminance a client sent through wp-color-management), content that fits under the peak is shown as it is, and brighter content is BT.2390-mapped with its own peak as the source, whatever `hdr-tone-map` is. Frames with no such surface keep using `hdr-tone-map`.
-//! `sdr-white`, `hdr-peak`, `hdr-contrast`, `hdr-tone-map` and `hdr-content-metadata` only apply to a monitor with `hdr`, `jff check-config` warns when they stand alone.
-//! `hdr` in `output "jff-winit"` simulates HDR when jff runs nested: the frame goes through the same working space and final pass (with `sdr-white`, `hdr-peak` (1000 by default), `hdr-contrast`, `hdr-tone-map` and `hdr-content-metadata`), clients are told the output is PQ, and `screenshot-fullscreen` saves the 16-bit PNG. The host window is SDR, so it shows the PQ code values themselves, dithered to 8 bits.
+//! `sdr-white`, `hdr-peak`, `hdr-contrast`, `hdr-saturation`, `hdr-white-balance`, `hdr-tone-map` and `hdr-content-metadata` only apply to a monitor with `hdr`, `jff check-config` warns when they stand alone.
+//! `hdr` in `output "jff-winit"` simulates HDR when jff runs nested: the frame goes through the same working space and final pass (with `sdr-white`, `hdr-peak` (1000 by default), `hdr-contrast`, `hdr-saturation`, `hdr-white-balance`, `hdr-tone-map` and `hdr-content-metadata`), clients are told the output is PQ, and `screenshot-fullscreen` saves the 16-bit PNG. The host window is SDR, so it shows the PQ code values themselves, dithered to 8 bits.
 //! `screenshot-fullscreen` on a monitor in HDR mode saves a 16-bit PNG in PQ and BT.2020 (a `cICP` chunk says so) with the monitor's tone curve, and leaves the clipboard alone. The area and window screenshots are still sRGB.
 //!
 //! Two things that bite when editing the file by hand:
@@ -66,7 +68,8 @@ use smithay::utils::Transform;
 
 use crate::desk::{Goto, Side};
 use crate::primitives::hdr_output::{
-    self, ToneMap, CONTRAST_RANGE, HDR_PEAK_RANGE, SDR_WHITE_RANGE,
+    self, ToneMap, CONTRAST_RANGE, HDR_PEAK_RANGE, SATURATION_RANGE, SDR_WHITE_RANGE,
+    WHITE_BALANCE_RANGE,
 };
 use crate::primitives::input_settings::{button_code, ACCEL_SPEED_RANGE};
 pub use crate::primitives::input_settings::{
@@ -486,6 +489,10 @@ pub struct OutputConfig {
     pub hdr_peak: Option<u32>,
     /// Contrast of an HDR monitor around SDR white, in thousandths (1000 is none), as set by `hdr-contrast`.
     pub hdr_contrast: Option<u32>,
+    /// Saturation of an HDR monitor in thousandths (1000 is none), as set by `hdr-saturation`.
+    pub hdr_saturation: Option<u32>,
+    /// Gain of red, green and blue of an HDR monitor in thousandths (1000 is none), as set by `hdr-white-balance`.
+    pub hdr_white_balance: Option<[u32; 3]>,
     /// How an HDR monitor's frame is rolled off under its peak, the knee when not set.
     pub hdr_tone_map: Option<ToneMap>,
     /// Fit the tone mapping of an HDR monitor to the peak the visible content states (`max_cll` or the mastering luminance). On when not set.
@@ -502,6 +509,8 @@ impl OutputConfig {
                 ("sdr-white", self.sdr_white.is_some()),
                 ("hdr-peak", self.hdr_peak.is_some()),
                 ("hdr-contrast", self.hdr_contrast.is_some()),
+                ("hdr-saturation", self.hdr_saturation.is_some()),
+                ("hdr-white-balance", self.hdr_white_balance.is_some()),
                 ("hdr-tone-map", self.hdr_tone_map.is_some()),
                 ("hdr-content-metadata", self.hdr_content_metadata.is_some()),
             ]
@@ -2906,6 +2915,40 @@ fn parse_output(node: &KdlNode) -> anyhow::Result<OutputConfig> {
                     );
                 }
                 config.hdr_contrast = Some((value * 1000.0).round() as u32);
+            }
+            "hdr-saturation" => {
+                let value = float_arg(child)? as f32;
+                if !SATURATION_RANGE.contains(&value) {
+                    bail!(
+                        "hdr-saturation takes a number from {} to {}: hdr-saturation 1.1",
+                        SATURATION_RANGE.start(),
+                        SATURATION_RANGE.end()
+                    );
+                }
+                config.hdr_saturation = Some((value * 1000.0).round() as u32);
+            }
+            "hdr-white-balance" => {
+                let hint = format!(
+                    "hdr-white-balance takes the gain of red, green and blue, each from {} to {}: hdr-white-balance 1.0 0.95 0.9",
+                    WHITE_BALANCE_RANGE.start(),
+                    WHITE_BALANCE_RANGE.end()
+                );
+                let gains: Vec<f32> = positional(child)
+                    .into_iter()
+                    .map(|value| {
+                        value
+                            .as_float()
+                            .or_else(|| value.as_integer().map(|n| n as f64))
+                            .map(|n| n as f32)
+                            .filter(|n| WHITE_BALANCE_RANGE.contains(n))
+                    })
+                    .collect::<Option<_>>()
+                    .context(hint.clone())?;
+                let [r, g, b] = gains.as_slice() else {
+                    bail!(hint);
+                };
+                config.hdr_white_balance =
+                    Some([r, g, b].map(|gain| (gain * 1000.0).round() as u32));
             }
             "hdr-content-metadata" => config.hdr_content_metadata = Some(flag_value(child)?),
             "hdr-tone-map" => {

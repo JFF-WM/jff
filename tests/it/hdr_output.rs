@@ -7,7 +7,7 @@ use jff_wm::primitives::gamut::{Conversion, Curve};
 use jff_wm::primitives::hdr_output::{
     bt2390_source_peak, bt2390_tone_map, contrast_curve, dither_noise, fitted_tone_map,
     frame_content_peak, hlg_display_nits, hlg_inverse_oetf, low_headroom, pq_decode, pq_encode,
-    tone_map, FinalPass, ToneMap, BT2020_LUMA, BT2390_SOURCE_PEAK, DEFAULT_SDR_WHITE,
+    saturate, tone_map, FinalPass, ToneMap, BT2020_LUMA, BT2390_SOURCE_PEAK, DEFAULT_SDR_WHITE,
     HDR_PEAK_RANGE, PQ_PEAK, SDR_WHITE_RANGE,
 };
 
@@ -986,4 +986,44 @@ fn contrast_keeps_the_hue_of_a_color() {
     let pass = FinalPass::new(203.0, 4000.0, None).with_contrast(1.4);
     let [r, g, b] = pass.apply([0.4, 0.2, 0.1]);
     assert!(r > g && g > b);
+}
+
+#[test]
+fn saturation_one_and_white_balance_one_change_nothing() {
+    let plain = FinalPass::new(203.0, 1000.0, Some(&panel()));
+    let same = plain.with_saturation(1.0).with_white_balance([1.0; 3]);
+    for v in [[0.05, 0.1, 0.2], [0.8, 0.3, 0.1], [1.0; 3]] {
+        close(same.apply(v), plain.apply(v), 1e-6);
+    }
+}
+
+#[test]
+fn saturation_zero_is_gray_and_keeps_luminance() {
+    let y = dot_luma([0.6, 0.3, 0.1]);
+    let gray = saturate([0.6, 0.3, 0.1], y, 0.0);
+    close(gray, [y; 3], 1e-6);
+    let boosted = saturate([0.6, 0.3, 0.1], y, 1.5);
+    assert!((dot_luma(boosted) - y).abs() < 1e-6);
+    assert!(boosted[0] - boosted[2] > 0.6 - 0.1);
+}
+
+#[test]
+fn saturation_zero_makes_a_gray_signal() {
+    let pass = FinalPass::new(203.0, 1000.0, None).with_saturation(0.0);
+    let [r, g, b] = pass.apply([0.6, 0.3, 0.1]);
+    assert!((r - g).abs() < 1e-5 && (g - b).abs() < 1e-5);
+}
+
+#[test]
+fn white_balance_warms_and_cools_white() {
+    let plain = FinalPass::new(203.0, 1000.0, None);
+    let warm = plain.with_white_balance([1.0, 0.95, 0.9]);
+    let [r, g, b] = warm.apply([1.0; 3]);
+    assert!(r > g && g > b);
+    let [pr, _, _] = plain.apply([1.0; 3]);
+    assert!((r - pr).abs() < 1e-5);
+}
+
+fn dot_luma(rgb: [f32; 3]) -> f32 {
+    BT2020_LUMA[0] * rgb[0] + BT2020_LUMA[1] * rgb[1] + BT2020_LUMA[2] * rgb[2]
 }

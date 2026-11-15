@@ -23,7 +23,7 @@ uniform float tint;
 #endif
 
 // Final pass of an HDR output. The frame is linear BT.2020 light, 1.0 being SDR white (`sdr_white`
-// cd/m²). It is placed in cd/m², its contrast is set around `sdr_white`, its luminance is rolled off under the panel's `peak`, the colors
+// cd/m²). It is placed in cd/m², it gets the `white_balance` gains and `saturation` (luminance is kept), its contrast is set around `sdr_white`, its luminance is rolled off under the panel's `peak`, the colors
 // the panel cannot show are desaturated into its gamut (when `map_on`), and the result is PQ coded
 // in BT.2020 (`out_hlg` 0), or HLG coded for a 1000 cd/m² display (`out_hlg` 1), which is what the
 // connector announces. `tone_kind` 0 rolls the luminance off with the
@@ -44,6 +44,8 @@ uniform vec3 from_b;
 uniform vec3 luma_2020;
 uniform vec3 luma_panel;
 uniform float map_on;
+uniform vec3 white_balance;
+uniform float saturation;
 uniform float contrast;
 uniform float tone_kind;
 uniform float content_peak;
@@ -148,7 +150,9 @@ vec3 dither(vec3 code, vec2 p) {
 void main() {
     vec3 nits = max(texture2D(tex, v_coords).rgb, vec3(0.0)) * sdr_white;
 
+    nits *= white_balance;
     float y = dot(luma_2020, nits);
+    nits = vec3(y) + (nits - vec3(y)) * saturation;
     if (y > 1e-6) {
         float contrasted = sdr_white * pow(y / sdr_white, contrast);
         float mapped;

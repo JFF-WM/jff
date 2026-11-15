@@ -1228,6 +1228,14 @@ impl Tty {
             let tone = output_config
                 .and_then(|c| c.hdr_tone_map)
                 .unwrap_or_default();
+            let saturation = output_config
+                .and_then(|c| c.hdr_saturation)
+                .map_or(hdr_output::DEFAULT_SATURATION, |m| m as f32 / 1000.0);
+            let white_balance = output_config
+                .and_then(|c| c.hdr_white_balance)
+                .map_or(hdr_output::DEFAULT_WHITE_BALANCE, |m| {
+                    m.map(|g| g as f32 / 1000.0)
+                });
             let contrast = output_config
                 .and_then(|c| c.hdr_contrast)
                 .map_or(hdr_output::DEFAULT_CONTRAST, |m| m as f32 / 1000.0);
@@ -1260,6 +1268,8 @@ impl Tty {
                             f32::from(plan.max_luminance),
                             panel.as_ref(),
                         )
+                        .with_white_balance(white_balance)
+                        .with_saturation(saturation)
                         .with_contrast(contrast)
                         .with_tone_map(tone)
                         .with_eotf(plan.eotf)
