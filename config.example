@@ -220,6 +220,7 @@ keyboard {
 //         //off                              // turn this monitor off
 //         position 0 0                       // top-left corner in the shared desktop
 //         mode "1920x1080@60"                // WIDTHxHEIGHT or WIDTHxHEIGHT@REFRESH
+//         transform "90"                     // turn the picture onto the panel: "normal" (default), "90", "180", "270", "flipped", "flipped-90", "flipped-180" or "flipped-270". Named as wl_output names them, 90 is a quarter turn counter-clockwise
 //         adaptive-sync "fullscreen"         // "off", "fullscreen" (default) or "always" (quoted)
 //         content-type-hint                  // tell the monitor what is on screen (game, video...)
 //         icc-profile "~/.local/share/icc/panel.icc" // the monitor's colors, see color-management
