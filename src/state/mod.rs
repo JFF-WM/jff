@@ -212,6 +212,9 @@ pub struct JffState {
     pub cursor_shape_manager_state: CursorShapeManagerState,
     /// zwp_tablet_manager_v2: pens and tablets (pressure, tilt, eraser) for clients that ask.
     pub tablet_manager_state: TabletManagerState,
+    /// The pointer devices libinput reports, to set them up again when the config reloads. Empty
+    /// on the winit backend.
+    pub input_devices: Vec<smithay::reexports::input::Device>,
     /// wp_security_context_v1: sockets for sandboxed apps.
     pub security_context_state: SecurityContextState,
     pub relative_pointer_manager_state: RelativePointerManagerState,
@@ -626,6 +629,7 @@ impl JffState {
             pointer_constraints_state,
             cursor_shape_manager_state,
             tablet_manager_state,
+            input_devices: Vec::new(),
             security_context_state,
             relative_pointer_manager_state,
             pointer_gestures_state,

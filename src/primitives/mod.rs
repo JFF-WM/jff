@@ -16,6 +16,7 @@ pub mod hdr_capture;
 pub mod hdr_output;
 pub mod hdr_png;
 pub mod hdr_scanout;
+pub mod input_settings;
 pub mod json;
 pub mod layout;
 pub mod layout_template;

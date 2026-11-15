@@ -13,6 +13,8 @@
 //!
 //! `warp-mouse-to-focus` moves the pointer to the center of a window when it gets the keyboard by something other than the pointer (a binding, the switcher, a new window, a closed one, a taskbar, a workspace switch), also when the pointer is over it already, unless the focus came from a click, a game has locked the pointer, or a window is being dragged. Off by default.
 //!
+//! `input { … }` sets up pointer devices: `touchpad { … }` and `mouse { … }` for every device of that kind, and `device "NAME" { … }` for the one with that libinput name (jff logs the name of every device it sees, at info level), which wins over the two. Inside: `tap`, `tap-button-map "left-right-middle"|"left-middle-right"`, `drag`, `natural-scroll`, `accel-speed N` (-1 to 1), `accel-profile "flat"|"adaptive"`, `scroll-method "none"|"two-finger"|"edge"|"on-button-down"`, `scroll-button "middle"|CODE`, `disable-while-typing`, `click-method "button-areas"|"clickfinger"`, `middle-emulation`, `left-handed`, `off` and `disable-on-external-mouse`. A setting that is not there stays at the device's own default, except `tap` on a touchpad, which is on. Applied when a device is plugged in and on reload, only on the TTY backend. A setting a device doesn't support is skipped.
+//!
 //! `focus-follows-mouse` gives the keyboard to the window under the pointer as soon as the pointer moves onto it, without a click and without raising it. The keyboard stays where it is while the overview, the screenshot selection or the lock screen is up, a panel or launcher has the keyboard, a menu is open, or a button is held. Off by default.
 //!
 //! `tiling-containers` turns on tiling containers (groups of windows that tile among themselves, see `desk::container`), and is off by default. It accepts a bare name or `#true` / `#false`.
@@ -57,6 +59,10 @@ use smithay::utils::Transform;
 
 use crate::desk::{Goto, Side};
 use crate::primitives::hdr_output::{self, ToneMap, HDR_PEAK_RANGE, SDR_WHITE_RANGE};
+use crate::primitives::input_settings::{button_code, ACCEL_SPEED_RANGE};
+pub use crate::primitives::input_settings::{
+    AccelProfile, ClickMethod, DeviceKind, DeviceSettings, ScrollMethod, TapButtonMap,
+};
 
 /// Default number of workspaces.
 pub const DEFAULT_WORKSPACES: usize = 9;
@@ -159,6 +165,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "screenshot",
     "log",
     "keyboard",
+    "input",
     "blur",
     "osd",
     "switcher",
@@ -1150,10 +1157,38 @@ impl ContainerRule {
     }
 }
 
+/// The `input { … }` block.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InputConfig {
+    /// For every touchpad.
+    pub touchpad: DeviceSettings,
+    /// For every other pointer device.
+    pub mouse: DeviceSettings,
+    /// For the devices with this libinput name, in file order.
+    pub devices: Vec<(String, DeviceSettings)>,
+}
+
+impl InputConfig {
+    /// What to set on the device called `name` of this kind: jff's built-in behavior, then its
+    /// kind's block, then every `device` block for its name.
+    pub fn settings_for(&self, name: &str, kind: DeviceKind) -> DeviceSettings {
+        let class = match kind {
+            DeviceKind::Touchpad => &self.touchpad,
+            DeviceKind::Mouse => &self.mouse,
+        };
+        let mut settings = DeviceSettings::builtin(kind).overridden_by(class);
+        for (_, device) in self.devices.iter().filter(|(n, _)| n == name) {
+            settings = settings.overridden_by(device);
+        }
+        settings
+    }
+}
+
 /// The parsed configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
     keyboard: KeyboardConfig,
+    input: InputConfig,
     binds: Vec<Binding>,
     outputs: Vec<OutputConfig>,
     workspaces: usize,
@@ -1227,6 +1262,7 @@ impl Default for Config {
             tracing::error!("built-in config is invalid: {err:#}");
             Self {
                 keyboard: KeyboardConfig::default(),
+                input: InputConfig::default(),
                 binds: Vec::new(),
                 outputs: Vec::new(),
                 workspaces: DEFAULT_WORKSPACES,
@@ -1476,6 +1512,11 @@ impl Config {
             Some(node) => parse_keyboard(node).context("in keyboard")?,
         };
 
+        let input = match doc.get("input") {
+            None => InputConfig::default(),
+            Some(node) => parse_input(node).context("in input")?,
+        };
+
         let screenshot = match doc.get("screenshot") {
             None => ScreenshotConfig::default(),
             Some(node) => parse_screenshot(node).context("in screenshot")?,
@@ -1571,6 +1612,7 @@ impl Config {
 
         Ok(Self {
             keyboard,
+            input,
             binds,
             outputs,
             workspaces,
@@ -1765,6 +1807,11 @@ impl Config {
     /// Keyboard layout and key repeat.
     pub fn keyboard(&self) -> &KeyboardConfig {
         &self.keyboard
+    }
+
+    /// Pointer device settings.
+    pub fn input(&self) -> &InputConfig {
+        &self.input
     }
 
     /// Whether a fullscreen window may be shown with tearing when it asks for it.
@@ -2102,6 +2149,112 @@ fn parse_keyboard(node: &KdlNode) -> anyhow::Result<KeyboardConfig> {
     }
     config.validate()?;
     Ok(config)
+}
+
+/// The `input { … }` block.
+fn parse_input(node: &KdlNode) -> anyhow::Result<InputConfig> {
+    let mut config = InputConfig::default();
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "touchpad" => {
+                config.touchpad = parse_device_settings(child).context("in touchpad")?;
+            }
+            "mouse" => config.mouse = parse_device_settings(child).context("in mouse")?,
+            "device" => {
+                let name = string_arg(child)?;
+                let settings =
+                    parse_device_settings(child).with_context(|| format!("in device {name:?}"))?;
+                config.devices.push((name, settings));
+            }
+            other => bail!("unknown input setting {other:?}"),
+        }
+    }
+    Ok(config)
+}
+
+/// The settings inside `touchpad`, `mouse` or `device`.
+fn parse_device_settings(node: &KdlNode) -> anyhow::Result<DeviceSettings> {
+    let mut settings = DeviceSettings::default();
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "off" => settings.off = Some(flag_value(child)?),
+            "disable-on-external-mouse" => {
+                settings.disable_on_external_mouse = Some(flag_value(child)?);
+            }
+            "tap" => settings.tap = Some(flag_value(child)?),
+            "tap-button-map" => {
+                settings.tap_button_map = Some(match string_arg(child)?.as_str() {
+                    "left-right-middle" => TapButtonMap::LeftRightMiddle,
+                    "left-middle-right" => TapButtonMap::LeftMiddleRight,
+                    other => bail!(
+                        "tap-button-map takes \"left-right-middle\" or \"left-middle-right\", not {other:?}"
+                    ),
+                });
+            }
+            "drag" => settings.drag = Some(flag_value(child)?),
+            "natural-scroll" => settings.natural_scroll = Some(flag_value(child)?),
+            "accel-speed" => {
+                let speed = float_arg(child)?;
+                if !ACCEL_SPEED_RANGE.contains(&speed) {
+                    bail!("accel-speed takes a number from -1 to 1");
+                }
+                settings.accel_speed = Some(speed);
+            }
+            "accel-profile" => {
+                settings.accel_profile = Some(match string_arg(child)?.as_str() {
+                    "flat" => AccelProfile::Flat,
+                    "adaptive" => AccelProfile::Adaptive,
+                    other => bail!("accel-profile takes \"flat\" or \"adaptive\", not {other:?}"),
+                });
+            }
+            "scroll-method" => {
+                settings.scroll_method = Some(match string_arg(child)?.as_str() {
+                    "none" => ScrollMethod::None,
+                    "two-finger" => ScrollMethod::TwoFinger,
+                    "edge" => ScrollMethod::Edge,
+                    "on-button-down" => ScrollMethod::OnButtonDown,
+                    other => bail!(
+                        "scroll-method takes \"none\", \"two-finger\", \"edge\" or \"on-button-down\", not {other:?}"
+                    ),
+                });
+            }
+            "scroll-button" => settings.scroll_button = Some(scroll_button_arg(child)?),
+            "disable-while-typing" => settings.disable_while_typing = Some(flag_value(child)?),
+            "click-method" => {
+                settings.click_method = Some(match string_arg(child)?.as_str() {
+                    "button-areas" => ClickMethod::ButtonAreas,
+                    "clickfinger" => ClickMethod::Clickfinger,
+                    other => {
+                        bail!(
+                            "click-method takes \"button-areas\" or \"clickfinger\", not {other:?}"
+                        )
+                    }
+                });
+            }
+            "middle-emulation" => settings.middle_emulation = Some(flag_value(child)?),
+            "left-handed" => settings.left_handed = Some(flag_value(child)?),
+            other => bail!("unknown input setting {other:?}"),
+        }
+    }
+    Ok(settings)
+}
+
+/// `scroll-button "middle"` or an evdev code like `scroll-button 274`.
+fn scroll_button_arg(node: &KdlNode) -> anyhow::Result<u32> {
+    let hint = "scroll-button takes a button name (\"left\", \"right\", \"middle\", \"side\", \"extra\", \"forward\", \"back\") or an evdev code";
+    match positional(node).as_slice() {
+        [value] => value
+            .as_string()
+            .and_then(button_code)
+            .or_else(|| {
+                value
+                    .as_integer()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n != 0)
+            })
+            .context(hint),
+        _ => bail!(hint),
+    }
 }
 
 /// One number argument, as a float. Whole numbers are fine (`offset 3`).

@@ -26,6 +26,7 @@ mod hdr_png;
 mod hdr_scanout;
 mod icc;
 mod icc_lut;
+mod input_settings;
 mod input_timestamps;
 mod ipc;
 mod ipc_events;

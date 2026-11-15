@@ -213,6 +213,46 @@ keyboard {
     //numlock #true     // Num Lock state at startup and after a keymap change, on by default
 }
 
+// Pointer devices (TTY session only, a nested jff has no libinput devices). `touchpad` applies to
+// every touchpad, `mouse` to every other pointer device (mice, trackballs, pointing sticks),
+// `device "NAME"` to the one device with that libinput name and wins over the other two. jff logs
+// the name of every pointer device at info level when it appears (see `log` above).
+// A setting you leave out keeps the device's own default, except `tap` on a touchpad, which is on.
+// Settings apply when a device is plugged in and on reload: taking a line out puts it back.
+// A setting a device does not support is skipped (a warning in the log).
+// Every setting below is allowed in all three blocks.
+input {
+    touchpad {
+        //tap #false                    // tap to click, on by default
+        //tap-button-map "left-middle-right" // "left-right-middle" (libinput's default) or "left-middle-right": one, two, three fingers
+        //drag #false                   // tap, then touch and move to drag
+        natural-scroll                  // content follows the fingers
+        accel-speed 0.2                 // -1 (slowest) to 1 (fastest), 0 by default
+        //accel-profile "flat"          // "adaptive" (default) or "flat"
+        //scroll-method "edge"          // "two-finger" (default), "edge", "on-button-down" or "none"
+        //scroll-button "middle"        // button held for "on-button-down": left, right, middle, side, extra, forward, back or an evdev code
+        //disable-while-typing #false   // ignore touches while typing, on by default
+        //click-method "clickfinger"    // "button-areas" or "clickfinger": one, two, three fingers pressing
+        //middle-emulation              // both buttons together are a middle click
+        //left-handed                   // swap left and right buttons
+        //disable-on-external-mouse     // send nothing while an external mouse is plugged in
+        //off                           // send nothing at all
+    }
+    mouse {
+        accel-profile "flat"
+        //accel-speed 0
+        //natural-scroll
+        //scroll-method "on-button-down"
+        //scroll-button "side"
+        //middle-emulation
+        //left-handed
+    }
+    // One device by name, over the blocks above. Repeat for more devices.
+    // device "Logitech G502" {
+    //     accel-speed -0.3
+    // }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Programs started with the session (they see WAYLAND_DISPLAY, DISPLAY and the portal vars)
 // ---------------------------------------------------------------------------------------------

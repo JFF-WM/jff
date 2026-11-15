@@ -1447,12 +1447,12 @@ pub fn init(
     }
     let input_backend = LibinputInputBackend::new(libinput.clone());
     handle
-        .insert_source(input_backend, |mut event, _, state| {
-            // Tap-to-click on touchpads.
-            if let InputEvent::DeviceAdded { device } = &mut event {
-                if device.config_tap_finger_count() > 0 {
-                    let _ = device.config_tap_set_enabled(true);
-                }
+        .insert_source(input_backend, |event, _, state| {
+            // Pointer devices get their `input` settings when they appear.
+            match &event {
+                InputEvent::DeviceAdded { device } => state.input_device_added(device.clone()),
+                InputEvent::DeviceRemoved { device } => state.input_device_removed(device),
+                _ => {}
             }
             state.process_input_event(event);
             // the pointer moved, a key changed something...

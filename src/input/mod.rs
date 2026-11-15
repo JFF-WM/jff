@@ -1,5 +1,6 @@
 //! Input: forwards keyboard, pointer, pen and touch events to the seat, and does click-to-focus.
 
+mod devices;
 pub mod grabs;
 pub mod serials;
 mod tablet;
@@ -1061,9 +1062,13 @@ impl JffState {
         match Config::load() {
             Ok(config) => {
                 let old_keyboard = self.config.keyboard().clone();
+                let old_input = self.config.input().clone();
                 self.config = config;
                 crate::logging::apply(self.config.log());
                 self.apply_keyboard_config(&old_keyboard);
+                if *self.config.input() != old_input {
+                    self.apply_input_config();
+                }
                 self.apply_workspace_count();
                 self.reconcile_outputs();
                 crate::protocol::color_management::sync_output_color(self);
