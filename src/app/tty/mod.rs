@@ -2329,6 +2329,7 @@ impl JffState {
             // A new cycle starts: each surface gets one callback per cycle, which keeps a client
             // that commits without damage from spinning.
             advance_frame_sequence(&output);
+            self.image_copy.output_drawn(&output);
             self.send_frame_callbacks(&output);
         } else {
             self.release_fifo_barriers(&output);

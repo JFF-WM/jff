@@ -26,10 +26,11 @@
 //!
 //! Damage: the protocol wants a frame only when something changed, or a client asking for the
 //! next frame right away would spin. The first frame of a session goes out at once. A later
-//! frame that would look the same as the last one stays pending and is looked at again after
-//! every event-loop iteration (`JffState::service_image_copy`), so a still screen costs nothing
-//! and a change arrives with the next event (a commit, a vblank, input). The whole picture is
-//! reported as damaged.
+//! frame stays pending, without drawing anything, until the source may have changed: a monitor
+//! when a frame was sent to it (`ImageCopy::output_drawn`), a window when any of its surfaces
+//! (or its menus) committed. Only then is the picture drawn and compared with the last one: the
+//! same picture keeps the frame pending, a different one goes out with the box around the
+//! pixels that changed as its damage.
 //!
 //! Cursor: `paint_cursors` is honored for monitors on the TTY backend (where jff draws the
 //! cursor), a window picture never has one. Cursor
@@ -39,12 +40,14 @@
 //! Sessions end when the monitor goes away or is switched off. A mode change (or a window
 //! resize) sends new buffer constraints and fails the frame in flight with `buffer_constraints`.
 
-use smithay::desktop::Window;
+use smithay::backend::renderer::utils::{with_renderer_surface_state, CommitCounter};
+use smithay::desktop::{PopupManager, Window};
 use smithay::output::{Output, WeakOutput};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::utils::{Buffer as BufferCoords, IsAlive, Rectangle, Size, Transform};
+use smithay::wayland::compositor::{with_surface_tree_downward, TraversalAction};
 use smithay::wayland::foreign_toplevel_list::ForeignToplevelHandle;
 use smithay::wayland::image_capture_source::{
     ImageCaptureSource, ImageCaptureSourceHandler, ImageCaptureSourceState,
@@ -72,6 +75,88 @@ pub struct CaptureSession {
     last: Option<Last>,
     /// The frame the client is waiting for.
     pending: Option<Frame>,
+    /// What the source was at when `last` was made: while it is the same, nothing is drawn.
+    seen: Option<Seen>,
+}
+
+/// A cheap stand-in for "the source may look different now", compared for equality.
+#[derive(PartialEq)]
+enum Seen {
+    /// How many frames were sent to the monitor.
+    Output(u64),
+    /// The commit counters of the window's surfaces and those of its menus.
+    Window(Vec<CommitCounter>),
+}
+
+/// The pixels of a picture that differ from the last one, as a box.
+enum Damage {
+    Same,
+    Part(Rectangle<i32, BufferCoords>),
+}
+
+/// The box around the pixels (four values each, `width` pixels a row) where `now` and `last`
+/// differ. A `last` of another size counts as all of it.
+fn damage_between<T: PartialEq>(now: &[T], last: &[T], width: usize) -> Damage {
+    let row = width * 4;
+    if row == 0 || now.len() != last.len() || now.len() % row != 0 {
+        let size: Size<i32, BufferCoords> =
+            ((width as i32).max(1), (now.len() / row.max(4)) as i32).into();
+        return Damage::Part(Rectangle::from_size(size));
+    }
+    let (mut top, mut bottom, mut left, mut right) = (None, 0, width, 0);
+    for (y, (a, b)) in now
+        .chunks_exact(row)
+        .zip(last.chunks_exact(row))
+        .enumerate()
+    {
+        if a == b {
+            continue;
+        }
+        top.get_or_insert(y);
+        bottom = y;
+        let pairs = || a.chunks_exact(4).zip(b.chunks_exact(4));
+        if let Some(first) = pairs().position(|(p, q)| p != q) {
+            left = left.min(first);
+        }
+        if let Some(end) = pairs().rposition(|(p, q)| p != q) {
+            right = right.max(end);
+        }
+    }
+    match top {
+        None => Damage::Same,
+        Some(top) => Damage::Part(Rectangle::new(
+            (left as i32, top as i32).into(),
+            ((right - left + 1) as i32, (bottom - top + 1) as i32).into(),
+        )),
+    }
+}
+
+/// The commit counters of `window`'s surfaces and those of its menus.
+fn window_signature(window: &Window) -> Vec<CommitCounter> {
+    let mut out = Vec::new();
+    let Some(toplevel) = window.toplevel() else {
+        return out;
+    };
+    let mut roots = vec![toplevel.wl_surface().clone()];
+    roots.extend(
+        PopupManager::popups_for_surface(toplevel.wl_surface())
+            .map(|(popup, _)| popup.wl_surface().clone()),
+    );
+    for root in &roots {
+        with_surface_tree_downward(
+            root,
+            (),
+            |_, _, _| TraversalAction::DoChildren(()),
+            |surface, _, _| {
+                out.push(
+                    with_renderer_surface_state(surface, |state| state.current_commit())
+                        .unwrap_or_default(),
+                );
+            },
+            |_, _, _| true,
+        );
+    }
+    out
 }
 
 /// What the last frame of a session looked like.
@@ -124,6 +209,8 @@ pub struct ImageCopy {
     toplevel_capture_source: ToplevelCaptureSourceState,
     image_copy_capture: ImageCopyCaptureState,
     sessions: Vec<CaptureSession>,
+    /// How many frames were sent to each monitor (by name).
+    drawn: Vec<(String, u64)>,
     /// The `HDR_FORMATS` that `wl_shm` offers: a client can't make a buffer in any other.
     hdr_formats: Vec<wl_shm::Format>,
 }
@@ -147,8 +234,29 @@ impl ImageCopy {
                 |client| !is_sandboxed(client),
             ),
             sessions: Vec::new(),
+            drawn: Vec::new(),
             hdr_formats: Vec::new(),
         }
+    }
+
+    /// A frame was sent to `output`: what a capture of it shows may have changed.
+    pub fn output_drawn(&mut self, output: &Output) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        let name = output.name();
+        match self.drawn.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, count)) => *count += 1,
+            None => self.drawn.push((name, 1)),
+        }
+    }
+
+    /// Frames sent to the monitor called `name` so far.
+    fn drawn_count(&self, name: &str) -> u64 {
+        self.drawn
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or(0, |(_, count)| *count)
     }
 
     /// Tell which formats `wl_shm` offers, to pick what a monitor in HDR mode can be captured
@@ -330,6 +438,21 @@ impl JffState {
         let format = buffer_format(&buffer);
         let ten_bit = format.and_then(hdr_layout);
         let cursor = entry.session.draw_cursor();
+        // Nothing is drawn while the source can't have changed since the last picture.
+        let seen = match &target {
+            Target::Output(output) => Seen::Output(self.image_copy.drawn_count(&output.name())),
+            Target::Window(window) => Seen::Window(window_signature(window)),
+        };
+        let bad_format = match (&target, ten_bit) {
+            (Target::Output(output), Some(_)) => self.hdr_capture(output).is_none(),
+            (_, Some(_)) => true,
+            (_, None) => format
+                .is_some_and(|f| !matches!(f, wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888)),
+        };
+        if !bad_format && entry.last.is_some() && entry.seen.as_ref() == Some(&seen) {
+            entry.pending = Some(frame);
+            return true;
+        }
         let drawn = match (&target, ten_bit) {
             // The client asked for a 10-bit format: only a monitor in HDR mode has such a picture.
             (Target::Output(output), Some(red_high)) if self.hdr_capture(output).is_some() => self
@@ -361,16 +484,29 @@ impl JffState {
             }
         };
 
-        // Nothing changed since the last frame: the client keeps waiting.
-        let unchanged = match (&picture, &entry.last) {
-            (Picture::Sdr(now), Some(Last::Sdr(last))) => now.rgba == *last,
-            (Picture::Hdr { picture: now, .. }, Some(Last::Hdr(last))) => now.half_rgba == *last,
-            _ => false,
+        // Looked at: until the source changes again there is nothing to draw.
+        entry.seen = Some(seen);
+        // The pixels that changed since the last frame, all of it for the first one.
+        let damage = match (&picture, &entry.last) {
+            (Picture::Sdr(now), Some(Last::Sdr(last))) => {
+                damage_between(&now.rgba, last, now.width as usize)
+            }
+            (Picture::Hdr { picture: now, .. }, Some(Last::Hdr(last))) => {
+                damage_between(&now.half_rgba, last, now.width as usize)
+            }
+            _ => {
+                let (w, h) = match &picture {
+                    Picture::Sdr(now) => (now.width, now.height),
+                    Picture::Hdr { picture: now, .. } => (now.width, now.height),
+                };
+                Damage::Part(Rectangle::from_size((w as i32, h as i32).into()))
+            }
         };
-        if unchanged {
+        // Nothing changed since the last frame: the client keeps waiting.
+        let Damage::Part(damage) = damage else {
             entry.pending = Some(frame);
             return true;
-        }
+        };
 
         let written = match &picture {
             Picture::Sdr(now) => write_shm(&buffer, now).map(|()| (now.width, now.height)),
@@ -380,13 +516,8 @@ impl JffState {
             } => write_hdr_shm(&buffer, now, *red_high).map(|()| (now.width, now.height)),
         };
         match written {
-            Ok((width, height)) => {
-                let size: Size<i32, BufferCoords> = (width as i32, height as i32).into();
-                frame.success(
-                    Transform::Normal,
-                    vec![Rectangle::from_size(size)],
-                    monotonic_now(),
-                );
+            Ok(_) => {
+                frame.success(Transform::Normal, vec![damage], monotonic_now());
                 entry.last = Some(match picture {
                     Picture::Sdr(now) => Last::Sdr(now.rgba),
                     Picture::Hdr { picture: now, .. } => Last::Hdr(now.half_rgba),
@@ -450,6 +581,7 @@ impl ImageCopyCaptureHandler for JffState {
             session,
             last: None,
             pending: None,
+            seen: None,
         });
     }
 
@@ -484,5 +616,44 @@ impl ImageCopyCaptureHandler for JffState {
         self.image_copy
             .sessions
             .retain(|entry| entry.session != session);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn picture(width: usize, height: usize) -> Vec<u8> {
+        vec![0; width * height * 4]
+    }
+
+    #[test]
+    fn same_picture_has_no_damage() {
+        let a = picture(5, 4);
+        assert!(matches!(damage_between(&a, &a.clone(), 5), Damage::Same));
+    }
+
+    #[test]
+    fn damage_is_the_box_around_the_changed_pixels() {
+        let last = picture(5, 4);
+        let mut now = last.clone();
+        // pixel (1, 1) and pixel (3, 2)
+        now[(5 + 1) * 4] = 9;
+        now[(2 * 5 + 3) * 4 + 2] = 9;
+        let Damage::Part(rect) = damage_between(&now, &last, 5) else {
+            panic!("expected damage");
+        };
+        assert_eq!(
+            (rect.loc.x, rect.loc.y, rect.size.w, rect.size.h),
+            (1, 1, 3, 2)
+        );
+    }
+
+    #[test]
+    fn a_picture_of_another_size_is_all_damage() {
+        let Damage::Part(rect) = damage_between(&picture(5, 4), &picture(5, 3), 5) else {
+            panic!("expected damage");
+        };
+        assert_eq!((rect.size.w, rect.size.h), (5, 4));
     }
 }

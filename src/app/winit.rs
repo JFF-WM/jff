@@ -494,6 +494,7 @@ impl JffState {
                     }
                     // Host gives no presentation timestamps, so report the submit time.
                     if let Some(output) = self.outputs.first() {
+                        self.image_copy.output_drawn(output);
                         let mut feedback = crate::protocol::presentation::take_feedback(
                             &self.desk,
                             output,
