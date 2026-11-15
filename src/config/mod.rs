@@ -7,7 +7,7 @@
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
 //! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
-//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), the first rule that fits a window applies), and
+//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -73,7 +73,7 @@ use smithay::utils::Transform;
 use crate::desk::{Goto, Side};
 use crate::primitives::gamut::GamutMap;
 use crate::primitives::hdr_output::{
-    self, SdrTransfer, ToneMap, BLACK_LEVEL_RANGE, CONTRAST_RANGE, HDR_PEAK_RANGE,
+    self, SdrTransfer, ToneMap, WindowSdr, BLACK_LEVEL_RANGE, CONTRAST_RANGE, HDR_PEAK_RANGE,
     MIN_LUMINANCE_RANGE, SATURATION_RANGE, SDR_WHITE_RANGE, WHITE_BALANCE_RANGE,
 };
 use crate::primitives::input_settings::{button_code, ACCEL_SPEED_RANGE};
@@ -1159,6 +1159,12 @@ pub struct WindowRule {
     /// `opacity 0.9`: how opaque the window is drawn, in thousandths (1000 is opaque). Like
     /// `tag` it is its own step, see [`Config::opacity_for`].
     pub opacity: Option<u16>,
+    /// `sdr-white N`: the window's own SDR white in cd/m² on an HDR monitor. Like `opacity` it
+    /// is its own step, see [`Config::sdr_for`].
+    pub sdr_white: Option<u32>,
+    /// `sdr`: the window is read as plain sRGB, whatever its client tagged it with. Its own
+    /// step too.
+    pub sdr: bool,
 }
 
 impl WindowRule {
@@ -1181,12 +1187,27 @@ impl WindowRule {
             || self.container.is_some()
             || self.tag.is_some()
             || self.opacity.is_some()
+            || self.sets_sdr()
     }
 
-    /// Whether `tag` and `opacity` are all the rule does. Such a rule only names or dresses
-    /// windows, so it does not use up the one rule a window gets for its placement.
+    /// Whether the rule says how the window's colors are read: `sdr` or `sdr-white`.
+    pub fn sets_sdr(&self) -> bool {
+        self.sdr || self.sdr_white.is_some()
+    }
+
+    /// What the rule says about how the window's colors are read.
+    pub fn window_sdr(&self) -> WindowSdr {
+        WindowSdr {
+            white: self.sdr_white,
+            srgb: self.sdr,
+        }
+    }
+
+    /// Whether `tag`, `opacity`, `sdr` and `sdr-white` are all the rule does. Such a rule only
+    /// names or dresses windows, so it does not use up the one rule a window gets for its
+    /// placement.
     pub fn only_tags(&self) -> bool {
-        (self.tag.is_some() || self.opacity.is_some())
+        (self.tag.is_some() || self.opacity.is_some() || self.sets_sdr())
             && self.output.is_none()
             && self.workspace.is_none()
             && self.container.is_none()
@@ -1501,6 +1522,11 @@ impl Config {
             let n = i + 1;
             if !rule.has_actions() {
                 warnings.push(format!("window-rule {n} has no actions, it does nothing"));
+            }
+            if rule.sdr_white.is_some() && !config.outputs.iter().any(|output| output.hdr) {
+                warnings.push(format!(
+                    "window-rule {n} has sdr-white, which does nothing without an output with `hdr`"
+                ));
             }
             if rule.container.is_some() && !config.tiling_containers() {
                 warnings.push(format!(
@@ -1893,6 +1919,17 @@ impl Config {
             .filter(|rule| rule.matches(window))
             .find_map(|rule| rule.opacity)
             .map(|thousandths| f32::from(thousandths) / 1000.0)
+    }
+
+    /// How the user's rules say a window's colors are read: that of the first rule with `sdr` or
+    /// `sdr-white` whose `match` lines all hold, which does not depend on which rule the window
+    /// gets for its placement. `None` when no rule says anything.
+    pub fn sdr_for(&self, window: &WindowFacts<'_>) -> Option<WindowSdr> {
+        self.window_rules
+            .iter()
+            .filter(|rule| rule.matches(window))
+            .find(|rule| rule.sets_sdr())
+            .map(WindowRule::window_sdr)
     }
 
     /// Whether windows can be grouped in tiling containers (`tiling-containers`, off by default).
@@ -2611,6 +2648,8 @@ fn parse_window_rule(node: &KdlNode) -> anyhow::Result<WindowRule> {
                 }
                 rule.opacity = Some((opacity * 1000.0).round() as u16);
             }
+            "sdr-white" => rule.sdr_white = Some(nits_arg(child, &SDR_WHITE_RANGE, 300)?),
+            "sdr" => rule.sdr = flag_value(child)?,
             other => bail!("unknown window-rule setting {other:?}"),
         }
     }

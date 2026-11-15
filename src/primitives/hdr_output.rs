@@ -212,6 +212,22 @@ pub fn lift_black(nits: f32, min_luminance: f32, pivot: f32, peak: f32) -> f32 {
     (pq_decode(lifted) * PQ_PEAK).min(peak)
 }
 
+/// What a `window-rule` says about how the colors of one window are read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowSdr {
+    /// The window's own SDR white in cd/m² (`sdr-white`, see [`SDR_WHITE_RANGE`]) on an HDR output, `None` for the output's.
+    pub white: Option<u32>,
+    /// `sdr`: the window is read as plain sRGB, whatever color description its client set.
+    pub srgb: bool,
+}
+
+impl WindowSdr {
+    /// Whether the window is drawn as it would be without any rule.
+    pub fn is_default(self) -> bool {
+        self == Self::default()
+    }
+}
+
 /// How SDR content is decoded into the working space of an HDR output.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SdrTransfer {

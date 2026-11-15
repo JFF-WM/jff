@@ -435,6 +435,15 @@ window-rule {
 // opacity for kitty terminal
 window-rule { match app-id="kitty"; opacity 0.9; }
 
+// Per-window SDR on a monitor with `hdr`. `sdr-white` (10 to 1000 cd/m2) is the window's own
+// SDR white instead of the monitor's: a video player brighter than the desktop, a game dimmer.
+// An HDR window moves along (its reference white, 203 cd/m2, is shown at that level and the
+// light above it follows). `sdr` reads the window as plain sRGB whatever its client tagged it
+// with. Both are set when the window opens, and a rule with only these does not use up the one
+// rule a window gets for its placement.
+// window-rule { match app-id="mpv"; sdr-white 350; }
+// window-rule { match app-id="steam_app_1091500"; sdr; sdr-white 160; }
+
 // ---------------------------------------------------------------------------------------------
 // Container rules (need `tiling-containers`). Any number of blocks.
 //

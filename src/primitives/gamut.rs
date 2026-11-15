@@ -597,6 +597,15 @@ impl Conversion {
 
     /// Into the linear working space of an HDR output: BT.2020 primaries, 1.0 is the output's SDR white of `sdr_white` cd/m². Every surface needs it, plain sRGB too.
     pub fn to_working(source: &ImageDescription, sdr_white: f32) -> Self {
+        Self::to_working_at(source, sdr_white, None)
+    }
+
+    /// [`Conversion::to_working`] for a window with its own SDR white, `window_white` cd/m² (`None` for the output's): the white of the surface's own system is shown at that level instead of at `sdr_white`. That is 1.0 for sRGB and the other relative curves, the description's reference white for PQ and HLG (203 cd/m² unless it says otherwise), and 1.0 (80 cd/m²) for scRGB. Light above it goes up and down with it, so the window is brighter or dimmer as a whole.
+    pub fn to_working_at(
+        source: &ImageDescription,
+        sdr_white: f32,
+        window_white: Option<f32>,
+    ) -> Self {
         let bt2020 = NamedPrimaries::Bt2020.chromaticities();
         let matrix = if source.primaries == bt2020 {
             IDENTITY
@@ -604,6 +613,11 @@ impl Conversion {
             conversion_matrix(&source.primaries, &bt2020).unwrap_or(SRGB_TO_BT2020)
         };
         let decode = Curve::of_description(source);
+        // How far the window's own white moves the white of an absolute or scRGB surface: its
+        // reference white is shown at `window_white`, so 1.0 when there is none.
+        let own_gain = window_white.map_or(1.0, |white| {
+            white.max(1.0) / source.luminance.reference.max(1) as f32
+        });
         let mut rows = [[0.0f32; 3]; 3];
         for (out, values) in rows.iter_mut().zip(matrix) {
             for (slot, value) in out.iter_mut().zip(values) {
@@ -619,15 +633,16 @@ impl Conversion {
             luma: [0.2627, 0.6780, 0.0593],
             reach: 0.0,
             scale: if decode.is_absolute() {
-                PQ_PEAK / sdr_white.max(1.0)
+                PQ_PEAK / sdr_white.max(1.0) * own_gain
             } else if decode == Curve::Linear {
                 // scRGB's 1.0 is its reference white (80 cd/m²), the working space's 1.0 is
                 // the monitor's SDR white: 1.0 in scRGB is 80 / sdr_white there, so with the
                 // usual 203 cd/m² SDR white a game's HDR highlights keep their real brightness
                 // and its SDR white is not pushed up to the desktop's.
-                source.luminance.reference as f32 / sdr_white.max(1.0)
+                source.luminance.reference as f32 / sdr_white.max(1.0) * own_gain
             } else {
-                1.0
+                // The relative curves: 1.0 is the surface's white, which is the output's.
+                window_white.map_or(1.0, |white| white.max(1.0) / sdr_white.max(1.0))
             },
             working: true,
         }

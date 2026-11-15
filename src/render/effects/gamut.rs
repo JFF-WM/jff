@@ -42,6 +42,7 @@ use crate::protocol::color_representation::AlphaMode;
 
 use super::pixel_alpha;
 use crate::protocol::color_management::{surface_color_in, OutputColor, WorkingSpace};
+use crate::protocol::window_sdr;
 use crate::render::effects::rounded::Rounding;
 use crate::render::elements::JffElement;
 
@@ -131,14 +132,30 @@ pub fn note_content_light(root: &WlSurface) {
     if working().is_none() || LIGHTS.with(|lights| lights.borrow().is_none()) {
         return;
     }
+    // A window the rules read as sRGB says nothing about how bright it gets.
+    let own = window_sdr::of(root);
+    if own.srgb {
+        return;
+    }
     let mut found = Vec::new();
     with_surface_tree_downward(
         root,
         (),
         |_, _, _| TraversalAction::DoChildren(()),
         |surface, states, _| {
-            let light = surface_color_in(states)
-                .map_or(ContentLight::Sdr, |color| color.description.content_light());
+            // A window with its own SDR white shows its content that much brighter or dimmer, so
+            // the peak it states moves along (its reference white is what the window's white sets).
+            let light = surface_color_in(states).map_or(ContentLight::Sdr, |color| {
+                match color.description.content_light() {
+                    ContentLight::Peak(level) => {
+                        ContentLight::Peak(own.white.map_or(level, |white| {
+                            level * white as f32
+                                / color.description.luminance.reference.max(1) as f32
+                        }))
+                    }
+                    other => other,
+                }
+            });
             if light != ContentLight::Sdr {
                 found.push((Id::from_wayland_resource(surface), light));
             }
@@ -205,6 +222,8 @@ pub fn srgb_to_working(space: WorkingSpace, rgb: [f32; 3]) -> [f32; 3] {
 /// The conversion each surface of the tree of `root` needs, by its element id: every surface for an HDR frame, else those not shown as they are (plain sRGB ones only with `convert_srgb`).
 pub fn conversions(root: &WlSurface, color: &OutputColor) -> Vec<(Id, Conversion)> {
     let mut found = Vec::new();
+    // What the `window-rule`s say about this window (`sdr`, `sdr-white`), for all of its surfaces.
+    let own = window_sdr::of(root);
     // An HDR frame has no surface that is drawn as it is: all of them are brought into the working space.
     if let Some(space) = color.hdr {
         with_surface_tree_downward(
@@ -213,10 +232,15 @@ pub fn conversions(root: &WlSurface, color: &OutputColor) -> Vec<(Id, Conversion
             |_, _, _| TraversalAction::DoChildren(()),
             |surface, states, _| {
                 let description = surface_color_in(states)
+                    .filter(|_| !own.srgb)
                     .map_or_else(ImageDescription::srgb, |color| color.description);
                 found.push((
                     Id::from_wayland_resource(surface),
-                    Conversion::to_working(&space.source(description), space.sdr_white as f32),
+                    Conversion::to_working_at(
+                        &space.source(description),
+                        space.sdr_white as f32,
+                        own.white.map(|white| white as f32),
+                    ),
                 ));
             },
             |_, _, _| true,
@@ -228,7 +252,7 @@ pub fn conversions(root: &WlSurface, color: &OutputColor) -> Vec<(Id, Conversion
         (),
         |_, _, _| TraversalAction::DoChildren(()),
         |surface, states, _| {
-            let (description, intent) = match surface_color_in(states) {
+            let (description, intent) = match surface_color_in(states).filter(|_| !own.srgb) {
                 Some(color) => (color.description, color.intent),
                 None => (ImageDescription::srgb(), RenderIntent::Perceptual),
             };

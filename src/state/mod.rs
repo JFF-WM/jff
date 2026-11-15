@@ -1654,7 +1654,7 @@ impl JffState {
         if !self.desk.is_floating(|w| is_window_for(w, root)) {
             // The rule's opacity is not about placement: a window that opens maximized has it too.
             let dialog = toplevel.parent().is_some() || self.dialog_toplevels.contains(root);
-            self.apply_rule_opacity(root, dialog, false);
+            self.apply_rule_look(root, dialog, false);
             // An app that asks to be maximized before its first buffer (GTK apps that remember
             // their last state, Nautilus among them) is not floating here, but a container with
             // the keyboard still takes it in.
@@ -1688,7 +1688,7 @@ impl JffState {
         // id, the title, the tag and the dialog hint arrive after the toplevel is created, and
         // are all there by the first commit that has a buffer.
         let mut rule = self.matching_window_rule(root, dialog, restored.is_some());
-        self.apply_rule_opacity(root, dialog, restored.is_some());
+        self.apply_rule_look(root, dialog, restored.is_some());
         // The zone has a monitor already.
         if let (true, Some(rule)) = (zoned, rule.as_mut()) {
             rule.output = None;
@@ -1808,9 +1808,10 @@ impl JffState {
         }
     }
 
-    /// Draw the window of `root` with the opacity the `window-rule`s give it, if any. Done once,
-    /// when the window first shows: a reload does not change windows that are open.
-    fn apply_rule_opacity(&mut self, root: &WlSurface, dialog: bool, restored: bool) {
+    /// Draw the window of `root` the way the `window-rule`s say, if they do: the opacity, and how
+    /// its colors are read (`sdr`, `sdr-white`). Done once, when the window first shows: a
+    /// reload does not change windows that are open.
+    fn apply_rule_look(&mut self, root: &WlSurface, dialog: bool, restored: bool) {
         if self.config.window_rules().is_empty() {
             return;
         }
@@ -1830,17 +1831,21 @@ impl JffState {
                 .map(str::to_owned)
         });
         let tag = named.or(app_tag);
-        let opacity = self.config.opacity_for(&WindowFacts {
+        let facts = WindowFacts {
             app_id: &app_id,
             title: &title,
             tag: tag.as_deref(),
             dialog,
             restored,
-        });
-        if let Some(opacity) = opacity {
+        };
+        if let Some(opacity) = self.config.opacity_for(&facts) {
             tracing::info!("window rule opacity {opacity} for app-id={app_id:?}");
             self.desk
                 .set_opacity_where(|w| is_window_for(w, root), opacity);
+        }
+        if let Some(sdr) = self.config.sdr_for(&facts) {
+            tracing::info!("window rule sdr {sdr:?} for app-id={app_id:?}");
+            crate::protocol::window_sdr::set(root, sdr);
         }
     }
 

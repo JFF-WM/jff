@@ -7,9 +7,9 @@ use jff_wm::primitives::gamut::{Conversion, Curve, GamutMap};
 use jff_wm::primitives::hdr_output::{
     bt2390_source_peak, bt2390_tone_map, contrast_curve, dither_noise, fitted_tone_map,
     frame_content_peak, hlg_display_nits, hlg_inverse_oetf, lift_black, low_headroom, pq_decode,
-    pq_encode, saturate, set_black_level, tone_map, FinalPass, SdrTransfer, ToneMap, BT2020_LUMA,
-    BT2390_SOURCE_PEAK, DEFAULT_GAMUT_MAP, DEFAULT_SDR_WHITE, HDR_PEAK_RANGE, MIN_LUMINANCE_RANGE,
-    PQ_PEAK, SDR_WHITE_RANGE,
+    pq_encode, saturate, set_black_level, tone_map, FinalPass, SdrTransfer, ToneMap, WindowSdr,
+    BT2020_LUMA, BT2390_SOURCE_PEAK, DEFAULT_GAMUT_MAP, DEFAULT_SDR_WHITE, HDR_PEAK_RANGE,
+    MIN_LUMINANCE_RANGE, PQ_PEAK, SDR_WHITE_RANGE,
 };
 
 const PEAK: f32 = 301.8;
@@ -1272,4 +1272,132 @@ fn the_gamut_map_does_nothing_without_a_known_panel_gamut() {
     for v in [OUTSIDE, [0.3, 0.2, 0.1], [2.0, 0.0, 0.0]] {
         assert_eq!(clip.apply(v), compress.apply(v));
     }
+}
+
+fn pq_description() -> ImageDescription {
+    let mut description = ImageDescription::srgb();
+    description.primaries = NamedPrimaries::Bt2020.chromaticities();
+    description.tf = TransferFunction::Named(NamedTf::St2084Pq);
+    description.luminance = Luminance::PQ;
+    description
+}
+
+#[test]
+fn no_window_white_is_the_outputs_conversion() {
+    let mut scrgb = ImageDescription::srgb();
+    scrgb.tf = TransferFunction::Named(NamedTf::ExtLinear);
+    scrgb.luminance = Luminance::SCRGB;
+    for description in [ImageDescription::srgb(), pq_description(), scrgb] {
+        assert_eq!(
+            Conversion::to_working_at(&description, 203.0, None),
+            Conversion::to_working(&description, 203.0)
+        );
+    }
+}
+
+#[test]
+fn a_window_white_places_the_white_of_an_srgb_window() {
+    let srgb = ImageDescription::srgb();
+    // SDR white of the output is 203, this window's is 406: twice the light.
+    let bright = Conversion::to_working_at(&srgb, 203.0, Some(406.0));
+    close(bright.apply([1.0; 3]), [2.0; 3], 1e-3);
+    let dim = Conversion::to_working_at(&srgb, 203.0, Some(101.5));
+    close(dim.apply([1.0; 3]), [0.5; 3], 1e-3);
+    // Its own white where the output's is: no change at all.
+    let same = Conversion::to_working_at(&srgb, 203.0, Some(203.0));
+    close(
+        same.apply([0.5; 3]),
+        Conversion::to_working(&srgb, 203.0).apply([0.5; 3]),
+        1e-6,
+    );
+    assert!(bright.working);
+}
+
+#[test]
+fn a_window_white_places_the_reference_white_of_a_pq_window() {
+    let pq_conversion = |white| Conversion::to_working_at(&pq_description(), 203.0, white);
+    // The reference white of the description (203 cd/m²) is shown at the window's white, and
+    // the light above it moves along.
+    close(
+        pq_conversion(Some(406.0)).apply([pq(203.0); 3]),
+        [2.0; 3],
+        0.02,
+    );
+    close(
+        pq_conversion(Some(406.0)).apply([pq(1000.0); 3]),
+        [2.0 * 1000.0 / 203.0; 3],
+        0.1,
+    );
+    close(
+        pq_conversion(Some(101.5)).apply([pq(203.0); 3]),
+        [0.5; 3],
+        0.01,
+    );
+    // The output's SDR white is what the window's white replaces, not what it adds to.
+    let other_output = Conversion::to_working_at(&pq_description(), 100.0, Some(406.0));
+    close(other_output.apply([pq(203.0); 3]), [4.06; 3], 0.05);
+}
+
+#[test]
+fn a_window_white_places_the_white_of_a_scrgb_window() {
+    let mut scrgb = ImageDescription::srgb();
+    scrgb.tf = TransferFunction::Named(NamedTf::ExtLinear);
+    scrgb.luminance = Luminance::SCRGB;
+    // scRGB's 1.0 is 80 cd/m², its reference white: with 203 cd/m² SDR white it is 80/203, and
+    // with a window white of 203 it is the white of the output.
+    close(
+        Conversion::to_working_at(&scrgb, 203.0, None).apply([1.0; 3]),
+        [80.0 / 203.0; 3],
+        1e-3,
+    );
+    close(
+        Conversion::to_working_at(&scrgb, 203.0, Some(203.0)).apply([1.0; 3]),
+        [1.0; 3],
+        1e-3,
+    );
+    close(
+        Conversion::to_working_at(&scrgb, 203.0, Some(406.0)).apply([1.0; 3]),
+        [2.0; 3],
+        1e-3,
+    );
+}
+
+#[test]
+fn a_window_white_changes_the_conversion_tag() {
+    let srgb = ImageDescription::srgb();
+    let plain = Conversion::to_working_at(&srgb, 203.0, None);
+    let own = Conversion::to_working_at(&srgb, 203.0, Some(300.0));
+    assert_ne!(plain.tag(), own.tag());
+    assert_eq!(
+        own.tag(),
+        Conversion::to_working_at(&srgb, 203.0, Some(300.0)).tag()
+    );
+}
+
+#[test]
+fn a_window_that_is_read_as_srgb_ignores_its_pq_tag() {
+    // What `sdr` does in `conversions`: the description is plain sRGB, whatever was tagged.
+    let tagged = pq_description();
+    let read = ImageDescription::srgb();
+    let as_tagged = Conversion::to_working_at(&tagged, 203.0, None);
+    let as_srgb = Conversion::to_working_at(&read, 203.0, None);
+    assert_ne!(as_tagged.tag(), as_srgb.tag());
+    close(as_srgb.apply([1.0; 3]), [1.0; 3], 1e-3);
+    // and a PQ white of 1000 cd/m² stays at 1000/203 for the one that is not.
+    close(as_tagged.apply([pq(1000.0); 3]), [1000.0 / 203.0; 3], 0.05);
+}
+
+#[test]
+fn window_sdr_is_the_default_when_a_rule_says_nothing() {
+    assert!(WindowSdr::default().is_default());
+    assert!(!WindowSdr {
+        white: Some(300),
+        srgb: false
+    }
+    .is_default());
+    assert!(!WindowSdr {
+        white: None,
+        srgb: true
+    }
+    .is_default());
 }
