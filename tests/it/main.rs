@@ -12,6 +12,8 @@ mod color_representation;
 mod config;
 mod container_drop;
 mod container_view;
+mod cursor_config;
+mod cursor_hide;
 mod desk;
 mod desk_container;
 mod edid;

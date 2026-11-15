@@ -253,6 +253,16 @@ input {
     // }
 }
 
+// The pointer image. `theme` and `size` fall back to $XCURSOR_THEME and $XCURSOR_SIZE, then to
+// "default" and 24. Both are exported to the apps jff starts, and a change applies on reload to
+// the cursor jff draws (an app that is already open keeps the size it read at its start).
+cursor {
+    theme "Adwaita"          // an XCursor theme folder name, see ~/.icons and /usr/share/icons
+    size 32                  // px, 1 to 512
+    //hide-when-typing       // hide on a key press, back when the pointer moves, off by default
+    //hide-after-ms 3000     // hide after the pointer rests this long, 0 = never (default)
+}
+
 // ---------------------------------------------------------------------------------------------
 // Programs started with the session (they see WAYLAND_DISPLAY, DISPLAY and the portal vars)
 // ---------------------------------------------------------------------------------------------

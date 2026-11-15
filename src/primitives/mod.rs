@@ -7,6 +7,7 @@ pub mod color;
 pub mod color_names;
 pub mod container_drop;
 pub mod container_view;
+pub mod cursor_hide;
 pub mod edid;
 pub mod frame_clock;
 pub mod gamut;

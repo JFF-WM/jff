@@ -15,6 +15,8 @@
 //!
 //! `input { … }` sets up pointer devices: `touchpad { … }` and `mouse { … }` for every device of that kind, and `device "NAME" { … }` for the one with that libinput name (jff logs the name of every device it sees, at info level), which wins over the two. Inside: `tap`, `tap-button-map "left-right-middle"|"left-middle-right"`, `drag`, `natural-scroll`, `accel-speed N` (-1 to 1), `accel-profile "flat"|"adaptive"`, `scroll-method "none"|"two-finger"|"edge"|"on-button-down"`, `scroll-button "middle"|CODE`, `disable-while-typing`, `click-method "button-areas"|"clickfinger"`, `middle-emulation`, `left-handed`, `off` and `disable-on-external-mouse`. A setting that is not there stays at the device's own default, except `tap` on a touchpad, which is on. Applied when a device is plugged in and on reload, only on the TTY backend. A setting a device doesn't support is skipped.
 //!
+//! `cursor { … }` sets the pointer image: `theme "NAME"` (an XCursor theme, else `$XCURSOR_THEME`, else `default`), `size N` (1 to 512, else `$XCURSOR_SIZE`, else 24), `hide-when-typing` (the cursor hides on a key press and comes back when the pointer moves, off by default) and `hide-after-ms N` (it hides after the pointer rests that long, 0 is off, off by default). The theme and size are exported to the apps jff starts, and apply to a running session on reload.
+//!
 //! `focus-follows-mouse` gives the keyboard to the window under the pointer as soon as the pointer moves onto it, without a click and without raising it. The keyboard stays where it is while the overview, the screenshot selection or the lock screen is up, a panel or launcher has the keyboard, a menu is open, or a button is held. Off by default.
 //!
 //! `tiling-containers` turns on tiling containers (groups of windows that tile among themselves, see `desk::container`), and is off by default. It accepts a bare name or `#true` / `#false`.
@@ -166,6 +168,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "log",
     "keyboard",
     "input",
+    "cursor",
     "blur",
     "osd",
     "switcher",
@@ -1157,6 +1160,43 @@ impl ContainerRule {
     }
 }
 
+/// Biggest cursor `size`.
+pub const MAX_CURSOR_SIZE: i32 = 512;
+/// Longest `hide-after-ms`.
+pub const MAX_CURSOR_HIDE_AFTER_MS: i32 = 600_000;
+/// Cursor size when nothing says another.
+pub const DEFAULT_CURSOR_SIZE: i32 = 24;
+/// Cursor theme when nothing says another.
+pub const DEFAULT_CURSOR_THEME: &str = "default";
+
+/// The `cursor { … }` block.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CursorConfig {
+    /// XCursor theme name.
+    pub theme: Option<String>,
+    /// Nominal size in px.
+    pub size: Option<i32>,
+    /// Hide on a key press until the pointer moves.
+    pub hide_when_typing: bool,
+    /// Hide after the pointer rests this many ms, 0 = never.
+    pub hide_after_ms: u32,
+}
+
+impl CursorConfig {
+    /// The theme and size to use: this block, else the environment jff was started with, else
+    /// the defaults.
+    pub fn resolved(&self, env_theme: Option<&str>, env_size: Option<i32>) -> (String, i32) {
+        let theme = self
+            .theme
+            .as_deref()
+            .or(env_theme)
+            .unwrap_or(DEFAULT_CURSOR_THEME)
+            .to_owned();
+        let size = self.size.or(env_size).unwrap_or(DEFAULT_CURSOR_SIZE);
+        (theme, size)
+    }
+}
+
 /// The `input { … }` block.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InputConfig {
@@ -1189,6 +1229,7 @@ impl InputConfig {
 pub struct Config {
     keyboard: KeyboardConfig,
     input: InputConfig,
+    cursor: CursorConfig,
     binds: Vec<Binding>,
     outputs: Vec<OutputConfig>,
     workspaces: usize,
@@ -1263,6 +1304,7 @@ impl Default for Config {
             Self {
                 keyboard: KeyboardConfig::default(),
                 input: InputConfig::default(),
+                cursor: CursorConfig::default(),
                 binds: Vec::new(),
                 outputs: Vec::new(),
                 workspaces: DEFAULT_WORKSPACES,
@@ -1517,6 +1559,11 @@ impl Config {
             Some(node) => parse_input(node).context("in input")?,
         };
 
+        let cursor = match doc.get("cursor") {
+            None => CursorConfig::default(),
+            Some(node) => parse_cursor(node).context("in cursor")?,
+        };
+
         let screenshot = match doc.get("screenshot") {
             None => ScreenshotConfig::default(),
             Some(node) => parse_screenshot(node).context("in screenshot")?,
@@ -1613,6 +1660,7 @@ impl Config {
         Ok(Self {
             keyboard,
             input,
+            cursor,
             binds,
             outputs,
             workspaces,
@@ -1812,6 +1860,11 @@ impl Config {
     /// Pointer device settings.
     pub fn input(&self) -> &InputConfig {
         &self.input
+    }
+
+    /// Cursor theme, size and hiding.
+    pub fn cursor(&self) -> &CursorConfig {
+        &self.cursor
     }
 
     /// Whether a fullscreen window may be shown with tearing when it asks for it.
@@ -2148,6 +2201,35 @@ fn parse_keyboard(node: &KdlNode) -> anyhow::Result<KeyboardConfig> {
         }
     }
     config.validate()?;
+    Ok(config)
+}
+
+/// The `cursor { … }` block.
+fn parse_cursor(node: &KdlNode) -> anyhow::Result<CursorConfig> {
+    let mut config = CursorConfig::default();
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "theme" => {
+                let theme = string_arg(child)?;
+                if theme.is_empty() {
+                    bail!("theme takes a theme name");
+                }
+                config.theme = Some(theme);
+            }
+            "size" => {
+                let size = int_arg(child, MAX_CURSOR_SIZE)?;
+                if size == 0 {
+                    bail!("size takes a number from 1 to {MAX_CURSOR_SIZE}");
+                }
+                config.size = Some(size);
+            }
+            "hide-when-typing" => config.hide_when_typing = flag_value(child)?,
+            "hide-after-ms" => {
+                config.hide_after_ms = int_arg(child, MAX_CURSOR_HIDE_AFTER_MS)? as u32;
+            }
+            other => bail!("unknown cursor setting {other:?}"),
+        }
+    }
     Ok(config)
 }
 

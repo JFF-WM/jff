@@ -78,6 +78,34 @@ pub const BTN_RIGHT: u32 = 0x111;
 pub const BTN_MIDDLE: u32 = 0x112;
 
 impl JffState {
+    /// The pointer was used: a hidden cursor comes back, and with `hide-after-ms` a timer waits
+    /// for it to rest.
+    fn cursor_pointer_activity(&mut self) {
+        self.cursor.pointer_activity();
+        let Some(after) = self.cursor.hide_after() else {
+            return;
+        };
+        if self.cursor.idle_timer_armed {
+            return;
+        }
+        self.cursor.idle_timer_armed = true;
+        let armed = self
+            .loop_handle
+            .insert_source(Timer::from_duration(after), |_, _, state| {
+                match state.cursor.idle_remaining() {
+                    Some(left) => TimeoutAction::ToDuration(left),
+                    None => {
+                        state.cursor.idle_timer_armed = false;
+                        state.queue_redraw_all();
+                        TimeoutAction::Drop
+                    }
+                }
+            });
+        if armed.is_err() {
+            self.cursor.idle_timer_armed = false;
+        }
+    }
+
     pub fn process_input_event<B: InputBackend>(&mut self, event: InputEvent<B>) {
         // Idle tools (ext-idle-notify) measure time since the last input.
         self.idle_notifier_state.notify_activity(&self.seat);
@@ -102,7 +130,13 @@ impl JffState {
             | InputEvent::PointerButton { .. }
             | InputEvent::PointerAxis { .. }
             | InputEvent::TabletToolAxis { .. }
-            | InputEvent::TabletToolProximity { .. } => self.cursor.set_touch_hidden(false),
+            | InputEvent::TabletToolProximity { .. } => {
+                self.cursor.set_touch_hidden(false);
+                self.cursor_pointer_activity();
+            }
+            InputEvent::Keyboard { event } if event.state() == KeyState::Pressed => {
+                self.cursor.key_pressed();
+            }
             _ => {}
         }
         match event {
@@ -1063,11 +1097,15 @@ impl JffState {
             Ok(config) => {
                 let old_keyboard = self.config.keyboard().clone();
                 let old_input = self.config.input().clone();
+                let old_cursor = self.config.cursor().clone();
                 self.config = config;
                 crate::logging::apply(self.config.log());
                 self.apply_keyboard_config(&old_keyboard);
                 if *self.config.input() != old_input {
                     self.apply_input_config();
+                }
+                if *self.config.cursor() != old_cursor {
+                    self.cursor.configure(self.config.cursor());
                 }
                 self.apply_workspace_count();
                 self.reconcile_outputs();

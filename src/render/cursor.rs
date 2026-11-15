@@ -1,13 +1,14 @@
 //! The mouse cursor: icons from the XCursor theme, cursor surfaces sent by clients, and a small
 //! built-in arrow for when the theme has nothing.
 //!
-//! The theme comes from `XCURSOR_THEME` / `XCURSOR_SIZE` (defaults `default`, 24). Both are
-//! exported again so the apps jff starts pick the same cursor.
+//! The theme and size come from the `cursor` config block, else `XCURSOR_THEME` / `XCURSOR_SIZE`,
+//! else `default` and 24. Both are exported again so the apps jff starts pick the same cursor.
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use smithay::backend::allocator::Fourcc;
@@ -18,6 +19,9 @@ use smithay::utils::{IsAlive, Logical, Point, Transform};
 use smithay::wayland::compositor::with_states;
 use xcursor::parser::parse_xcursor;
 use xcursor::CursorTheme;
+
+use crate::config::CursorConfig;
+use crate::primitives::cursor_hide::CursorHide;
 
 /// One picture of a cursor, ready to be drawn.
 pub struct Frame {
@@ -68,7 +72,14 @@ pub enum RenderCursor {
 
 pub struct CursorManager {
     theme: CursorTheme,
+    theme_name: String,
     size: i32,
+    /// The theme and size jff was started with, used where the config says nothing.
+    env_theme: Option<String>,
+    env_size: Option<i32>,
+    hide: CursorHide,
+    /// The timer that hides the cursor after the pointer rests is running.
+    pub idle_timer_armed: bool,
     status: CursorImageStatus,
     /// A finger is the input device in use: there is no cursor to look at (see `input/touch.rs`).
     hidden_for_touch: bool,
@@ -77,24 +88,67 @@ pub struct CursorManager {
 }
 
 impl CursorManager {
-    pub fn new() -> Self {
-        let theme_name = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".to_string());
-        let size = std::env::var("XCURSOR_SIZE")
+    pub fn new(config: &CursorConfig) -> Self {
+        let env_theme = std::env::var("XCURSOR_THEME")
+            .ok()
+            .filter(|t| !t.is_empty());
+        let env_size = std::env::var("XCURSOR_SIZE")
             .ok()
             .and_then(|s| s.parse::<i32>().ok())
-            .filter(|s| *s > 0)
-            .unwrap_or(24);
-        std::env::set_var("XCURSOR_THEME", &theme_name);
-        std::env::set_var("XCURSOR_SIZE", size.to_string());
+            .filter(|s| *s > 0);
+        let (theme_name, size) = config.resolved(env_theme.as_deref(), env_size);
+        export_theme(&theme_name, size);
 
+        let mut hide = CursorHide::new(Instant::now());
+        hide.configure(config.hide_when_typing, hide_after(config));
         Self {
             theme: CursorTheme::load(&theme_name),
+            theme_name,
             size,
+            env_theme,
+            env_size,
+            hide,
+            idle_timer_armed: false,
             status: CursorImageStatus::default_named(),
             hidden_for_touch: false,
             cache: HashMap::new(),
             fallback: Rc::new(builtin_arrow()),
         }
+    }
+
+    /// Take the `cursor` settings after a config reload. A changed theme or size is loaded again.
+    pub fn configure(&mut self, config: &CursorConfig) {
+        let (theme_name, size) = config.resolved(self.env_theme.as_deref(), self.env_size);
+        if (theme_name.as_str(), size) != (self.theme_name.as_str(), self.size) {
+            export_theme(&theme_name, size);
+            self.theme = CursorTheme::load(&theme_name);
+            self.theme_name = theme_name;
+            self.size = size;
+            self.cache.clear();
+        }
+        self.hide
+            .configure(config.hide_when_typing, hide_after(config));
+    }
+
+    /// A key went down: with `hide-when-typing` the cursor hides.
+    pub fn key_pressed(&mut self) {
+        self.hide.key_pressed();
+    }
+
+    /// The pointer moved, clicked or scrolled: a hidden cursor comes back.
+    pub fn pointer_activity(&mut self) {
+        self.hide.pointer_activity(Instant::now());
+    }
+
+    /// How long the pointer may rest before the cursor hides, `None` when it never does.
+    pub fn hide_after(&self) -> Option<Duration> {
+        self.hide.after()
+    }
+
+    /// Time left before the cursor hides for resting, hiding it when it is up. `None` when
+    /// there is nothing more to wait for.
+    pub fn idle_remaining(&mut self) -> Option<Duration> {
+        self.hide.remaining(Instant::now())
     }
 
     /// The focused client asked for a different cursor (`wl_pointer.set_cursor`).
@@ -123,7 +177,7 @@ impl CursorManager {
     }
 
     pub fn render_cursor(&mut self) -> RenderCursor {
-        if self.hidden_for_touch {
+        if self.hidden_for_touch || self.hide.hidden() {
             return RenderCursor::Hidden;
         }
         // A client that set a cursor surface and then went away leaves a dead surface behind.
@@ -171,6 +225,17 @@ impl CursorManager {
         self.cache.insert(icon, cursor.clone());
         cursor
     }
+}
+
+/// Tell the apps jff starts which cursor to use.
+fn export_theme(theme: &str, size: i32) {
+    std::env::set_var("XCURSOR_THEME", theme);
+    std::env::set_var("XCURSOR_SIZE", size.to_string());
+}
+
+/// `hide-after-ms` as a duration, `None` for 0.
+fn hide_after(config: &CursorConfig) -> Option<Duration> {
+    (config.hide_after_ms > 0).then(|| Duration::from_millis(u64::from(config.hide_after_ms)))
 }
 
 /// Read `name` from the theme, using the image size closest to `size`.

@@ -658,7 +658,7 @@ impl JffState {
             dmabuf_global,
             seat_state,
             seat,
-            cursor: CursorManager::new(),
+            cursor: CursorManager::new(config.cursor()),
             config,
             output_management,
             output_power,
