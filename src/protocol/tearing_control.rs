@@ -2,11 +2,13 @@
 //! possible, not at the next vblank), which games use to cut input lag.
 //!
 //! The protocol is only a hint. The TTY backend flips in sync with the display, except with
-//! `allow-tearing` set and a fullscreen window covering the monitor that asked for tearing:
-//! that frame is queued as an async page flip (`PresentationMode::Async`), and falls back to
-//! a normal flip when the hardware or the frame can't do it. This module advertises the global, enforces the rules (one object per
-//! surface), and remembers the hint (see `wants_tearing`). The hint is stored the moment it's
-//! set, not on the next commit, that only matters once something uses it.
+//! `allow-tearing` set and a fullscreen window covering the monitor that asked for tearing,
+//! while its frame is scanned out (`tty/mod.rs`): that frame is queued as an async page flip
+//! (`PresentationMode::Async`), and falls back to a normal flip when the hardware or the frame
+//! can't do it. This module advertises the global, enforces the rules (one object per
+//! surface), and remembers the hint (see `wants_tearing`, read by
+//! `layer_shell::fullscreen_wants_tearing`). The hint is stored the moment it's set, not on the
+//! next commit, so a frame already being drawn sees it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

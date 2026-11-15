@@ -227,9 +227,11 @@ pub struct JffState {
     /// `JffState::release_fifo_barriers` (see `presentation.rs`).
     #[allow(dead_code)]
     pub fifo_manager_state: FifoManagerState,
-    /// wp_tearing_control_v1: games say whether a surface may be shown with tearing. jff only
-    /// records the hint (see `crate::protocol::tearing_control::wants_tearing`) and still
-    /// presents every frame in sync with the display.
+    /// wp_tearing_control_v1: games say whether a surface may be shown with tearing. The hint is
+    /// recorded (see `crate::protocol::tearing_control::wants_tearing`) and the TTY backend acts
+    /// on it, only with `allow-tearing` set and a fullscreen window that asked for it covering
+    /// the monitor and being scanned out: that frame is queued as an async page flip. Every
+    /// other frame is presented in sync with the display.
     #[allow(dead_code)]
     pub tearing_control_state: TearingControlState,
     /// ext-image-copy-capture-v1 / ext-image-capture-source-v1 (screen capture of monitors).
