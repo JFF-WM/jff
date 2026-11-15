@@ -1,8 +1,12 @@
 //! Tests for `jff_wm::feature::outputs`.
 
 use jff_wm::config::{ModeRequest, OutputTransform};
-use jff_wm::feature::outputs::{mhz_to_hz, upright_point, Monitor, MonitorMode};
+use jff_wm::feature::outputs::{
+    mhz_to_hz, upright_point, Monitor, MonitorMode, Retirement, GLOBAL_GRACE,
+};
 use smithay::utils::{Logical, Point, Size, Transform};
+use std::collections::HashSet;
+use std::time::Instant;
 
 fn monitor() -> Monitor {
     Monitor {
@@ -88,4 +92,52 @@ fn a_quarter_turn_swaps_the_sides_of_the_frame() {
         Transform::Flipped180.transform_size(Size::<i32, Logical>::from((1920, 1080))),
         Size::from((1920, 1080))
     );
+}
+
+fn clients(ids: &[u32]) -> HashSet<u32> {
+    ids.iter().copied().collect()
+}
+
+#[test]
+fn a_global_goes_once_every_client_acknowledged() {
+    let start = Instant::now();
+    let mut retirement = Retirement::new(start, clients(&[1, 2]), clients(&[]));
+    assert!(!retirement.ready(start, &clients(&[1, 2])));
+    retirement.ack(&1);
+    assert!(!retirement.ready(start, &clients(&[1, 2])));
+    retirement.ack(&2);
+    assert!(retirement.ready(start, &clients(&[1, 2])));
+}
+
+#[test]
+fn a_client_that_cannot_acknowledge_makes_it_wait_for_the_grace() {
+    let start = Instant::now();
+    let mut retirement = Retirement::new(start, clients(&[1]), clients(&[2]));
+    retirement.ack(&1);
+    assert!(!retirement.ready(start, &clients(&[1, 2])));
+    assert!(retirement.ready(start + GLOBAL_GRACE, &clients(&[1, 2])));
+}
+
+#[test]
+fn a_client_that_left_is_not_waited_for() {
+    let start = Instant::now();
+    let mut retirement = Retirement::new(start, clients(&[1]), clients(&[2]));
+    assert!(!retirement.ready(start, &clients(&[1, 2])));
+    // Both are gone: nobody can bind it any more.
+    assert!(retirement.ready(start, &clients(&[])));
+}
+
+#[test]
+fn a_missing_ack_ends_with_the_grace() {
+    let start = Instant::now();
+    let mut retirement = Retirement::new(start, clients(&[1]), clients(&[]));
+    assert!(!retirement.ready(start, &clients(&[1])));
+    assert!(retirement.ready(start + GLOBAL_GRACE, &clients(&[1])));
+}
+
+#[test]
+fn nobody_connected_means_nothing_to_wait_for() {
+    let start = Instant::now();
+    let mut retirement = Retirement::new(start, clients(&[]), clients(&[]));
+    assert!(retirement.ready(start, &clients(&[])));
 }

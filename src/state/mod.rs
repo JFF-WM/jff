@@ -142,8 +142,9 @@ pub struct JffState {
     pub outputs: Vec<Output>,
     /// The `wl_output` global of every active output, by output name.
     pub output_globals: HashMap<String, GlobalId>,
-    /// Globals of unplugged outputs, destroyed a while after they were disabled.
-    pub retiring_globals: Vec<(Instant, GlobalId)>,
+    /// Globals of unplugged outputs and who still has to acknowledge their removal: destroyed
+    /// once every client has (wl_fixes v2), or a while after they were disabled.
+    pub retiring_globals: Vec<(GlobalId, crate::feature::outputs::Retirement<ClientId>)>,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,

@@ -1,12 +1,16 @@
 //! Monitors in the shared desktop space: where each one sits, and what that means for windows
 //! and the pointer. Backend-agnostic, the TTY backend calls in when monitors come and go.
 
+use std::collections::HashSet;
+use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 use smithay::backend::input::{AbsolutePositionEvent, InputBackend, InputTime};
 use smithay::desktop::space::SpaceElement;
 use smithay::input::pointer::MotionEvent;
 use smithay::output::Output;
+use smithay::reexports::wayland_server::backend::ClientId;
+use smithay::reexports::wayland_server::Client;
 use smithay::utils::{Logical, Point, Rectangle, Size, Transform, SERIAL_COUNTER};
 use smithay::wayland::fractional_scale::with_fractional_scale;
 
@@ -22,8 +26,51 @@ const NO_OUTPUT: Rect = (0, 0, 800, 600);
 
 const EDGE_MARGIN: f64 = 2.0;
 
-/// How long an unplugged monitor's global stays around for clients to react first.
-const GLOBAL_GRACE: Duration = Duration::from_secs(10);
+/// The longest an unplugged monitor's global stays around for clients to react first. Clients
+/// that acknowledge its removal (wl_fixes v2) can end the wait sooner, see [`Retirement`].
+pub const GLOBAL_GRACE: Duration = Duration::from_secs(10);
+
+/// What a removed global waits for before it is destroyed. A client that bound a global at the
+/// moment it was removed gets an error, so it is kept until nobody can try that any more.
+///
+/// Clients that bound wl_fixes v2 say so with `ack_global_remove`, once all of them have, and
+/// no client is left that can't (an older libwayland, or one that never bound wl_fixes), the
+/// global is destroyed. Otherwise the wait runs [`GLOBAL_GRACE`]. Clients that connect after the
+/// removal never saw the global, they are not in either set. `C` is a client's id.
+#[derive(Clone, Debug)]
+pub struct Retirement<C> {
+    since: Instant,
+    /// Clients that will acknowledge, and have not yet.
+    waiting: HashSet<C>,
+    /// Clients that will not acknowledge: only time helps.
+    unaware: HashSet<C>,
+}
+
+impl<C: Eq + Hash> Retirement<C> {
+    pub fn new(since: Instant, waiting: HashSet<C>, unaware: HashSet<C>) -> Self {
+        Self {
+            since,
+            waiting,
+            unaware,
+        }
+    }
+
+    /// `client` acknowledged the removal.
+    pub fn ack(&mut self, client: &C) {
+        self.waiting.remove(client);
+    }
+
+    /// Whether the global can be destroyed now, given the clients still `connected`. A client
+    /// that left needs nothing more.
+    pub fn ready(&mut self, now: Instant, connected: &HashSet<C>) -> bool {
+        if now.duration_since(self.since) >= GLOBAL_GRACE {
+            return true;
+        }
+        self.waiting.retain(|client| connected.contains(client));
+        self.unaware.retain(|client| connected.contains(client));
+        self.waiting.is_empty() && self.unaware.is_empty()
+    }
+}
 
 /// One video mode a connected monitor offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -281,7 +328,8 @@ impl JffState {
         }
         if let Some(global) = self.output_globals.remove(&output.name()) {
             self.display_handle.disable_global::<Self>(global.clone());
-            self.retiring_globals.push((Instant::now(), global));
+            let retirement = self.retirement();
+            self.retiring_globals.push((global, retirement));
         }
         // Every window, including ones on workspaces that aren't shown.
         for entry in self.desk.all_top_down() {
@@ -290,19 +338,52 @@ impl JffState {
         self.relayout_outputs();
     }
 
-    /// Destroy globals of monitors unplugged a while ago.
+    /// Who a global removed now has to wait for: clients that bound wl_fixes v2 acknowledge it,
+    /// all the others can only be waited out.
+    fn retirement(&mut self) -> Retirement<ClientId> {
+        let mut connected = HashSet::new();
+        self.display_handle.backend_handle().with_all_clients(|id| {
+            connected.insert(id);
+        });
+        // Clients that left are forgotten here, the set would only grow otherwise.
+        self.fixes.acking.retain(|id| connected.contains(id));
+        let (waiting, unaware): (HashSet<_>, HashSet<_>) = connected
+            .into_iter()
+            .partition(|id| self.fixes.acking.contains(id));
+        Retirement::new(Instant::now(), waiting, unaware)
+    }
+
+    /// `client` sent `wl_fixes.ack_global_remove` for the global it knows as `name`. A name
+    /// matching no global that is going away (it was destroyed already) is ignored.
+    pub fn ack_global_remove(&mut self, client: &Client, name: u32) {
+        let handle = self.display_handle.backend_handle();
+        let id = client.id();
+        for (global, retirement) in &mut self.retiring_globals {
+            // A global's name is the client's own: registries number them per connection.
+            if handle.global_name(global.clone(), id.clone()) == Some(name) {
+                retirement.ack(&id);
+            }
+        }
+    }
+
+    /// Destroy globals of unplugged monitors that every client has acknowledged, or that were
+    /// disabled long enough ago.
     pub fn reap_globals(&mut self) {
         if self.retiring_globals.is_empty() {
             return;
         }
         let now = Instant::now();
-        let (expired, pending): (Vec<_>, Vec<_>) = std::mem::take(&mut self.retiring_globals)
-            .into_iter()
-            .partition(|(since, _)| now.duration_since(*since) >= GLOBAL_GRACE);
-        for (_, global) in expired {
-            self.display_handle.remove_global::<Self>(global);
+        let mut connected = HashSet::new();
+        self.display_handle.backend_handle().with_all_clients(|id| {
+            connected.insert(id);
+        });
+        for (global, mut retirement) in std::mem::take(&mut self.retiring_globals) {
+            if retirement.ready(now, &connected) {
+                self.display_handle.remove_global::<Self>(global);
+            } else {
+                self.retiring_globals.push((global, retirement));
+            }
         }
-        self.retiring_globals = pending;
     }
 
     /// Apply a changed config to the monitors that are already connected.
