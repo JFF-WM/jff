@@ -341,10 +341,7 @@ impl JffState {
     /// Who a global removed now has to wait for: clients that bound wl_fixes v2 acknowledge it,
     /// all the others can only be waited out.
     fn retirement(&mut self) -> Retirement<ClientId> {
-        let mut connected = HashSet::new();
-        self.display_handle.backend_handle().with_all_clients(|id| {
-            connected.insert(id);
-        });
+        let connected = crate::state::connected_clients();
         // Clients that left are forgotten here, the set would only grow otherwise.
         self.fixes.acking.retain(|id| connected.contains(id));
         let (waiting, unaware): (HashSet<_>, HashSet<_>) = connected
@@ -373,10 +370,7 @@ impl JffState {
             return;
         }
         let now = Instant::now();
-        let mut connected = HashSet::new();
-        self.display_handle.backend_handle().with_all_clients(|id| {
-            connected.insert(id);
-        });
+        let connected = crate::state::connected_clients();
         for (global, mut retirement) in std::mem::take(&mut self.retiring_globals) {
             if retirement.ready(now, &connected) {
                 self.display_handle.remove_global::<Self>(global);

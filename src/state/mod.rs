@@ -740,9 +740,35 @@ pub fn is_sandboxed(client: &Client) -> bool {
         .is_some_and(|state| state.security_context.is_some())
 }
 
+/// Every client that is connected right now. jff makes all the connections itself, so it keeps
+/// this list from `ClientData` instead of asking the backend to walk libwayland's client list
+/// (`Handle::with_all_clients`), which loops forever in libwayland-server's
+/// `wl_client_get_destroy_listener` when a monitor is unplugged.
+static CONNECTED_CLIENTS: std::sync::LazyLock<std::sync::Mutex<HashSet<ClientId>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The clients connected right now.
+pub fn connected_clients() -> HashSet<ClientId> {
+    CONNECTED_CLIENTS
+        .lock()
+        .map(|set| set.clone())
+        .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+}
+
 impl ClientData for ClientState {
-    fn initialized(&self, _client_id: ClientId) {}
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+    fn initialized(&self, client_id: ClientId) {
+        CONNECTED_CLIENTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(client_id);
+    }
+
+    fn disconnected(&self, client_id: ClientId, _reason: DisconnectReason) {
+        CONNECTED_CLIENTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&client_id);
+    }
 }
 
 // ---- wl_compositor / wl_shm / wl_buffer / wl_output -----------------------------------------
@@ -1620,6 +1646,9 @@ impl JffState {
             return;
         }
         if !self.desk.is_floating(|w| is_window_for(w, root)) {
+            // The rule's opacity is not about placement: a window that opens maximized has it too.
+            let dialog = toplevel.parent().is_some() || self.dialog_toplevels.contains(root);
+            self.apply_rule_opacity(root, dialog, false);
             // An app that asks to be maximized before its first buffer (GTK apps that remember
             // their last state, Nautilus among them) is not floating here, but a container with
             // the keyboard still takes it in.
@@ -1653,6 +1682,7 @@ impl JffState {
         // id, the title, the tag and the dialog hint arrive after the toplevel is created, and
         // are all there by the first commit that has a buffer.
         let mut rule = self.matching_window_rule(root, dialog, restored.is_some());
+        self.apply_rule_opacity(root, dialog, restored.is_some());
         // The zone has a monitor already.
         if let (true, Some(rule)) = (zoned, rule.as_mut()) {
             rule.output = None;
@@ -1769,6 +1799,42 @@ impl JffState {
             );
             toplevel.with_pending_state(|state| state.size = Some((fitted.0, fitted.1).into()));
             toplevel.send_pending_configure();
+        }
+    }
+
+    /// Draw the window of `root` with the opacity the `window-rule`s give it, if any. Done once,
+    /// when the window first shows: a reload does not change windows that are open.
+    fn apply_rule_opacity(&mut self, root: &WlSurface, dialog: bool, restored: bool) {
+        if self.config.window_rules().is_empty() {
+            return;
+        }
+        let (app_id, title) = crate::feature::osd::toplevel_names(root);
+        let app_tag = crate::protocol::toplevel_tag::app_tag_of(root);
+        // The tag the user's rules give the window counts here too, even when the placement
+        // code has not got to it yet.
+        let named = crate::protocol::toplevel_tag::user_tag_of(root).or_else(|| {
+            self.config
+                .user_tag_for(&WindowFacts {
+                    app_id: &app_id,
+                    title: &title,
+                    tag: app_tag.as_deref(),
+                    dialog,
+                    restored,
+                })
+                .map(str::to_owned)
+        });
+        let tag = named.or(app_tag);
+        let opacity = self.config.opacity_for(&WindowFacts {
+            app_id: &app_id,
+            title: &title,
+            tag: tag.as_deref(),
+            dialog,
+            restored,
+        });
+        if let Some(opacity) = opacity {
+            tracing::info!("window rule opacity {opacity} for app-id={app_id:?}");
+            self.desk
+                .set_opacity_where(|w| is_window_for(w, root), opacity);
         }
     }
 
