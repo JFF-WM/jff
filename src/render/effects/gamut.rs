@@ -195,7 +195,11 @@ pub fn tint(color: [f32; 4]) -> [f32; 4] {
 
 /// Straight sRGB values as the working space has them.
 pub fn srgb_to_working(space: WorkingSpace, rgb: [f32; 3]) -> [f32; 3] {
-    Conversion::to_working(&ImageDescription::srgb(), space.sdr_white as f32).apply(rgb)
+    Conversion::to_working(
+        &space.source(ImageDescription::srgb()),
+        space.sdr_white as f32,
+    )
+    .apply(rgb)
 }
 
 /// The conversion each surface of the tree of `root` needs, by its element id: every surface for an HDR frame, else those not shown as they are (plain sRGB ones only with `convert_srgb`).
@@ -212,7 +216,7 @@ pub fn conversions(root: &WlSurface, color: &OutputColor) -> Vec<(Id, Conversion
                     .map_or_else(ImageDescription::srgb, |color| color.description);
                 found.push((
                     Id::from_wayland_resource(surface),
-                    Conversion::to_working(&description, space.sdr_white as f32),
+                    Conversion::to_working(&space.source(description), space.sdr_white as f32),
                 ));
             },
             |_, _, _| true,

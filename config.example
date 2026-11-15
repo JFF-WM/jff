@@ -300,8 +300,10 @@ cursor {
 //         // `jff check-config` warns when they stand alone.
 //         hdr
 //         sdr-white 203                      // cd/m2 SDR white is shown at, 10 to 1000, 203 by default
+//         sdr-transfer "gamma22"             // how SDR windows are decoded: "srgb" (default) or "gamma22" (darker darks)
 //         hdr-peak 1000                      // replaces the peak the EDID states, 100 to 10000
 //         hdr-contrast 1.2                   // contrast around SDR white, 0.5 to 2.0, 1.0 by default
+//         hdr-black-level 0.2                // cd/m2 added to the shadows (negative crushes them), -5.0 to 5.0, 0 by default
 //         hdr-saturation 1.1                 // color intensity, 0.0 to 2.0, 1.0 by default, brightness is kept
 //         hdr-white-balance 1.0 0.95 0.9     // gain of red, green and blue, 0.5 to 1.5 each, 1.0 1.0 1.0 by default
 //         hdr-tone-map "bt2390"              // how the frame is rolled off under the peak: "knee" (default) or "bt2390"

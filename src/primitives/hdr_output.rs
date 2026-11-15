@@ -2,7 +2,9 @@
 //!
 //! The tone curve is either chosen by the config ([`ToneMap`]), or, when a visible surface states how bright its content gets (`max_cll`, or the mastering luminance, see [`super::color::ImageDescription::content_light`]), fitted to that peak: content that fits under the panel's peak is shown as it is up to its peak, content brighter than the panel is BT.2390-mapped with its own peak as the source, whatever `hdr-tone-map` says. Which peak that is, for a frame, is [`frame_content_peak`].
 
-use super::color::{Chromaticities, ContentLight, NamedPrimaries};
+use super::color::{
+    Chromaticities, ContentLight, ImageDescription, NamedPrimaries, NamedTf, TransferFunction,
+};
 use super::edid::Primaries;
 use super::gamut::{conversion_matrix, map_gamut, rgb_to_xyz, GamutMap, Mat3};
 use super::hdr::OutputEotf;
@@ -27,6 +29,12 @@ pub const CONTRAST_RANGE: std::ops::RangeInclusive<f32> = 0.5..=2.0;
 
 /// Contrast of an output that does not set `hdr-contrast`.
 pub const DEFAULT_CONTRAST: f32 = 1.0;
+
+/// Smallest and largest `hdr-black-level` accepted, in cd/m².
+pub const BLACK_LEVEL_RANGE: std::ops::RangeInclusive<f32> = -5.0..=5.0;
+
+/// Black level of an output that does not set `hdr-black-level`, in cd/m².
+pub const DEFAULT_BLACK_LEVEL: f32 = 0.0;
 
 /// Smallest and largest `hdr-saturation` accepted, 1.0 leaves the colors as they are.
 pub const SATURATION_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
@@ -168,6 +176,71 @@ pub fn saturate(rgb: [f32; 3], y: f32, saturation: f32) -> [f32; 3] {
     rgb.map(|v| y + (v - y) * saturation)
 }
 
+/// The color `nits` (luminance `y`) with its black level moved by `level` cd/m²: a positive level adds neutral light, a negative one scales the color down, and the effect fades out as the luminance goes up to `pivot`, where it is gone.
+pub fn set_black_level(nits: [f32; 3], y: f32, pivot: f32, level: f32) -> [f32; 3] {
+    let fade = 1.0 - (y / pivot).clamp(0.0, 1.0);
+    let delta = level * fade * fade;
+    if delta >= 0.0 {
+        nits.map(|v| v + delta)
+    } else if y > 1e-6 {
+        let scale = (y + delta).max(0.0) / y;
+        nits.map(|v| v * scale)
+    } else {
+        nits
+    }
+}
+
+/// How SDR content is decoded into the working space of an HDR output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SdrTransfer {
+    /// The piecewise sRGB curve.
+    #[default]
+    Srgb,
+    /// A pure 2.2 power, which is what most SDR displays show: darker darks than sRGB.
+    Gamma22,
+}
+
+impl SdrTransfer {
+    /// The names the config takes, in the order of the variants.
+    pub const NAMES: [&'static str; 2] = ["srgb", "gamma22"];
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "srgb" => Some(Self::Srgb),
+            "gamma22" => Some(Self::Gamma22),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Srgb => "srgb",
+            Self::Gamma22 => "gamma22",
+        }
+    }
+
+    /// `description` as this setting reads it: a surface in sRGB is decoded with a 2.2 power for [`SdrTransfer::Gamma22`], anything else is left as it is.
+    pub fn read(self, description: ImageDescription) -> ImageDescription {
+        match (self, description.tf) {
+            (Self::Gamma22, TransferFunction::Named(NamedTf::Srgb)) => ImageDescription {
+                tf: TransferFunction::Named(NamedTf::Gamma22),
+                ..description
+            },
+            _ => description,
+        }
+    }
+}
+
+impl FinalPass {
+    /// The same pass with the black level moved by `black_level` cd/m², 0 for none.
+    pub fn with_black_level(self, black_level: f32) -> Self {
+        Self {
+            black_level,
+            ..self
+        }
+    }
+}
+
 /// The curve that rolls highlights off under the panel's peak.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ToneMap {
@@ -279,6 +352,8 @@ pub struct FinalPass {
     pub luma_panel: [f32; 3],
     /// The panel's gamut is known: colors outside it are desaturated into it.
     pub map_gamut: bool,
+    /// Black level shift in cd/m², 0 for none, see [`set_black_level`].
+    pub black_level: f32,
     /// Gain of the red, green and blue of BT.2020 light, 1.0 for none.
     pub white_balance: [f32; 3],
     /// Saturation of the colors, 1.0 for none, 0 for gray.
@@ -330,6 +405,7 @@ impl FinalPass {
             luma_2020,
             luma_panel,
             map_gamut,
+            black_level: DEFAULT_BLACK_LEVEL,
             white_balance: DEFAULT_WHITE_BALANCE,
             saturation: DEFAULT_SATURATION,
             contrast: DEFAULT_CONTRAST,
@@ -397,6 +473,8 @@ impl FinalPass {
         // Saturating keeps the luminance, so `y` is the one of the color before and after.
         let y = dot(self.luma_2020, nits);
         nits = saturate(nits, y, self.saturation);
+        nits = set_black_level(nits, y, self.sdr_white, self.black_level);
+        let y = dot(self.luma_2020, nits);
         if y > 1e-6 {
             let contrasted = contrast_curve(y, self.sdr_white, self.contrast);
             let mapped = match (self.content_peak, self.tone) {

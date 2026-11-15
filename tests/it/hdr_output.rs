@@ -7,8 +7,8 @@ use jff_wm::primitives::gamut::{Conversion, Curve};
 use jff_wm::primitives::hdr_output::{
     bt2390_source_peak, bt2390_tone_map, contrast_curve, dither_noise, fitted_tone_map,
     frame_content_peak, hlg_display_nits, hlg_inverse_oetf, low_headroom, pq_decode, pq_encode,
-    saturate, tone_map, FinalPass, ToneMap, BT2020_LUMA, BT2390_SOURCE_PEAK, DEFAULT_SDR_WHITE,
-    HDR_PEAK_RANGE, PQ_PEAK, SDR_WHITE_RANGE,
+    saturate, set_black_level, tone_map, FinalPass, SdrTransfer, ToneMap, BT2020_LUMA,
+    BT2390_SOURCE_PEAK, DEFAULT_SDR_WHITE, HDR_PEAK_RANGE, PQ_PEAK, SDR_WHITE_RANGE,
 };
 
 const PEAK: f32 = 301.8;
@@ -1026,4 +1026,63 @@ fn white_balance_warms_and_cools_white() {
 
 fn dot_luma(rgb: [f32; 3]) -> f32 {
     BT2020_LUMA[0] * rgb[0] + BT2020_LUMA[1] * rgb[1] + BT2020_LUMA[2] * rgb[2]
+}
+
+#[test]
+fn black_level_zero_changes_nothing() {
+    let plain = FinalPass::new(203.0, 1000.0, None);
+    let same = plain.with_black_level(0.0);
+    for v in [[0.0; 3], [0.01, 0.02, 0.03], [0.5; 3], [1.0; 3]] {
+        close(same.apply(v), plain.apply(v), 1e-6);
+    }
+}
+
+#[test]
+fn a_black_level_lifts_black_and_fades_out_by_sdr_white() {
+    let plain = FinalPass::new(203.0, 1000.0, None);
+    let lifted = plain.with_black_level(1.0);
+    close(lifted.apply([0.0; 3]), [pq(1.0); 3], 2e-3);
+    assert!(lifted.apply([0.01; 3])[0] > plain.apply([0.01; 3])[0]);
+    close(lifted.apply([1.0; 3]), plain.apply([1.0; 3]), 1e-6);
+    close(lifted.apply([2.0; 3]), plain.apply([2.0; 3]), 1e-6);
+}
+
+#[test]
+fn a_negative_black_level_crushes_the_shadows_and_keeps_the_hue() {
+    let plain = FinalPass::new(203.0, 1000.0, None);
+    let crushed = plain.with_black_level(-1.0);
+    close(crushed.apply([0.001; 3]), [0.0; 3], 1e-6);
+    let [r, g, b] = crushed.apply([0.02, 0.01, 0.005]);
+    assert!(r > g && g > b);
+    assert!(r < plain.apply([0.02, 0.01, 0.005])[0]);
+    close(crushed.apply([1.0; 3]), plain.apply([1.0; 3]), 1e-6);
+}
+
+#[test]
+fn set_black_level_never_goes_under_black() {
+    let out = set_black_level([0.1, 0.05, 0.02], 0.06, 203.0, -5.0);
+    assert!(out.iter().all(|v| *v >= 0.0));
+}
+
+#[test]
+fn gamma22_reads_srgb_with_a_power_and_leaves_other_curves_alone() {
+    let srgb = ImageDescription::srgb();
+    let plain = Conversion::to_working(&srgb, 203.0).apply([0.1; 3]);
+    let gamma = Conversion::to_working(&SdrTransfer::Gamma22.read(srgb), 203.0).apply([0.1; 3]);
+    assert!((gamma[0] - 0.1f32.powf(2.2)).abs() < 1e-4, "{gamma:?}");
+    assert!(plain[0] > gamma[0]);
+    assert_eq!(SdrTransfer::Srgb.read(srgb), srgb);
+    let pq_description = ImageDescription {
+        tf: TransferFunction::Named(NamedTf::St2084Pq),
+        ..srgb
+    };
+    assert_eq!(SdrTransfer::Gamma22.read(pq_description), pq_description);
+}
+
+#[test]
+fn sdr_transfer_names_round_trip() {
+    for name in SdrTransfer::NAMES {
+        assert_eq!(SdrTransfer::from_name(name).unwrap().name(), name);
+    }
+    assert_eq!(SdrTransfer::from_name("gamma 2.2"), None);
 }

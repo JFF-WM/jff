@@ -39,12 +39,14 @@
 //! `sdr-white` sets the luminance in cd/m² that SDR white is shown at on an HDR monitor (203 by default, 10 to 1000).
 //! `hdr-peak` replaces the peak luminance the EDID states (100 to 10000 cd/m²): the frame is mapped to it and it is what the monitor is told and what clients are told.
 //! `hdr-contrast` sets the contrast of an HDR monitor around SDR white (0.5 to 2.0, 1.0 by default): above 1.0 darks go down and highlights go up, under 1.0 the picture is flatter. SDR white stays where `sdr-white` puts it, and the roll-off under the peak still applies after it.
+//! `sdr-transfer "srgb"|"gamma22"` picks how SDR windows are decoded on an HDR monitor (`"srgb"` by default): `"gamma22"` reads them with a pure 2.2 power, which gives the darker darks most SDR displays show.
+//! `hdr-black-level` moves the black level of an HDR monitor, in cd/m² (-5.0 to 5.0, 0 by default): a positive value lifts the shadows with neutral light, a negative one crushes them, and the effect fades out up to SDR white.
 //! `hdr-saturation` scales the color intensity of an HDR monitor without changing brightness (0.0 to 2.0, 1.0 by default, 0 is gray). Colors it pushes out of the monitor's gamut are brought back in.
 //! `hdr-white-balance` takes the gain of red, green and blue light (0.5 to 1.5 each, `hdr-white-balance 1.0 0.95 0.9` makes the picture warmer, 1.0 1.0 1.0 is none) and is applied before the contrast and the roll-off.
 //! `hdr-tone-map "knee"|"bt2390"` picks how the frame is rolled off under that peak (`"knee"` by default).
 //! `hdr-content-metadata` (on by default, `hdr-content-metadata false` turns it off) fits that roll-off to the content: when a visible PQ surface states how bright it gets (`max_cll`, else the mastering luminance a client sent through wp-color-management), content that fits under the peak is shown as it is, and brighter content is BT.2390-mapped with its own peak as the source, whatever `hdr-tone-map` is. Frames with no such surface keep using `hdr-tone-map`.
-//! `sdr-white`, `hdr-peak`, `hdr-contrast`, `hdr-saturation`, `hdr-white-balance`, `hdr-tone-map` and `hdr-content-metadata` only apply to a monitor with `hdr`, `jff check-config` warns when they stand alone.
-//! `hdr` in `output "jff-winit"` simulates HDR when jff runs nested: the frame goes through the same working space and final pass (with `sdr-white`, `hdr-peak` (1000 by default), `hdr-contrast`, `hdr-saturation`, `hdr-white-balance`, `hdr-tone-map` and `hdr-content-metadata`), clients are told the output is PQ, and `screenshot-fullscreen` saves the 16-bit PNG. The host window is SDR, so it shows the PQ code values themselves, dithered to 8 bits.
+//! `sdr-white`, `sdr-transfer`, `hdr-peak`, `hdr-contrast`, `hdr-black-level`, `hdr-saturation`, `hdr-white-balance`, `hdr-tone-map` and `hdr-content-metadata` only apply to a monitor with `hdr`, `jff check-config` warns when they stand alone.
+//! `hdr` in `output "jff-winit"` simulates HDR when jff runs nested: the frame goes through the same working space and final pass (with `sdr-white`, `hdr-peak` (1000 by default), `sdr-transfer`, `hdr-contrast`, `hdr-black-level`, `hdr-saturation`, `hdr-white-balance`, `hdr-tone-map` and `hdr-content-metadata`), clients are told the output is PQ, and `screenshot-fullscreen` saves the 16-bit PNG. The host window is SDR, so it shows the PQ code values themselves, dithered to 8 bits.
 //! `screenshot-fullscreen` on a monitor in HDR mode saves a 16-bit PNG in PQ and BT.2020 (a `cICP` chunk says so) with the monitor's tone curve, and leaves the clipboard alone. The area and window screenshots are still sRGB.
 //!
 //! Two things that bite when editing the file by hand:
@@ -68,8 +70,8 @@ use smithay::utils::Transform;
 
 use crate::desk::{Goto, Side};
 use crate::primitives::hdr_output::{
-    self, ToneMap, CONTRAST_RANGE, HDR_PEAK_RANGE, SATURATION_RANGE, SDR_WHITE_RANGE,
-    WHITE_BALANCE_RANGE,
+    self, SdrTransfer, ToneMap, BLACK_LEVEL_RANGE, CONTRAST_RANGE, HDR_PEAK_RANGE,
+    SATURATION_RANGE, SDR_WHITE_RANGE, WHITE_BALANCE_RANGE,
 };
 use crate::primitives::input_settings::{button_code, ACCEL_SPEED_RANGE};
 pub use crate::primitives::input_settings::{
@@ -489,6 +491,10 @@ pub struct OutputConfig {
     pub hdr_peak: Option<u32>,
     /// Contrast of an HDR monitor around SDR white, in thousandths (1000 is none), as set by `hdr-contrast`.
     pub hdr_contrast: Option<u32>,
+    /// How SDR windows are decoded on an HDR monitor, sRGB when not set.
+    pub sdr_transfer: Option<SdrTransfer>,
+    /// Black level shift of an HDR monitor in thousandths of cd/m², as set by `hdr-black-level`.
+    pub hdr_black_level: Option<i32>,
     /// Saturation of an HDR monitor in thousandths (1000 is none), as set by `hdr-saturation`.
     pub hdr_saturation: Option<u32>,
     /// Gain of red, green and blue of an HDR monitor in thousandths (1000 is none), as set by `hdr-white-balance`.
@@ -509,6 +515,8 @@ impl OutputConfig {
                 ("sdr-white", self.sdr_white.is_some()),
                 ("hdr-peak", self.hdr_peak.is_some()),
                 ("hdr-contrast", self.hdr_contrast.is_some()),
+                ("sdr-transfer", self.sdr_transfer.is_some()),
+                ("hdr-black-level", self.hdr_black_level.is_some()),
                 ("hdr-saturation", self.hdr_saturation.is_some()),
                 ("hdr-white-balance", self.hdr_white_balance.is_some()),
                 ("hdr-tone-map", self.hdr_tone_map.is_some()),
@@ -2915,6 +2923,34 @@ fn parse_output(node: &KdlNode) -> anyhow::Result<OutputConfig> {
                     );
                 }
                 config.hdr_contrast = Some((value * 1000.0).round() as u32);
+            }
+            "sdr-transfer" => {
+                config.sdr_transfer = Some(match args.as_slice() {
+                    [value] => value
+                        .as_string()
+                        .and_then(SdrTransfer::from_name)
+                        .with_context(|| {
+                            format!(
+                                "sdr-transfer takes {}: sdr-transfer \"gamma22\"",
+                                SdrTransfer::NAMES.map(|n| format!("\"{n}\"")).join(" or ")
+                            )
+                        })?,
+                    _ => bail!(
+                        "sdr-transfer takes one value, {}: sdr-transfer \"gamma22\"",
+                        SdrTransfer::NAMES.map(|n| format!("\"{n}\"")).join(" or ")
+                    ),
+                });
+            }
+            "hdr-black-level" => {
+                let value = float_arg(child)? as f32;
+                if !BLACK_LEVEL_RANGE.contains(&value) {
+                    bail!(
+                        "hdr-black-level takes cd/m² from {} to {}: hdr-black-level 0.2",
+                        BLACK_LEVEL_RANGE.start(),
+                        BLACK_LEVEL_RANGE.end()
+                    );
+                }
+                config.hdr_black_level = Some((value * 1000.0).round() as i32);
             }
             "hdr-saturation" => {
                 let value = float_arg(child)? as f32;

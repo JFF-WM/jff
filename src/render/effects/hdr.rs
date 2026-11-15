@@ -54,6 +54,7 @@ fn program(renderer: &mut GlesRenderer) -> Option<GlesTexProgram> {
                 vec3("luma_2020"),
                 vec3("luma_panel"),
                 UniformName::new("map_on", UniformType::_1f),
+                UniformName::new("black_level", UniformType::_1f),
                 vec3("white_balance"),
                 UniformName::new("saturation", UniformType::_1f),
                 UniformName::new("contrast", UniformType::_1f),
@@ -83,7 +84,10 @@ pub fn supported(renderer: &mut GlesRenderer) -> bool {
 
 /// What an sRGB color (straight alpha last) is in the working space.
 pub fn clear_color(space: WorkingSpace, color: [f32; 4]) -> [f32; 4] {
-    let conversion = Conversion::to_working(&ImageDescription::srgb(), space.sdr_white as f32);
+    let conversion = Conversion::to_working(
+        &space.source(ImageDescription::srgb()),
+        space.sdr_white as f32,
+    );
     let [r, g, b] = conversion.apply([color[0], color[1], color[2]]);
     [r, g, b, color[3]]
 }
@@ -94,7 +98,10 @@ pub fn linearize(
     elements: Vec<JffElement>,
     space: WorkingSpace,
 ) -> Vec<JffElement> {
-    let conversion = Conversion::to_working(&ImageDescription::srgb(), space.sdr_white as f32);
+    let conversion = Conversion::to_working(
+        &space.source(ImageDescription::srgb()),
+        space.sdr_white as f32,
+    );
     let Some(rounding) = Rounding::passthrough(renderer).map(|r| r.with_conversion(conversion))
     else {
         return elements;
@@ -328,6 +335,7 @@ impl RenderElement<GlesRenderer> for HdrFrameElement {
             Uniform::new("luma_2020", pass.luma_2020),
             Uniform::new("luma_panel", pass.luma_panel),
             Uniform::new("map_on", f32::from(u8::from(pass.map_gamut))),
+            Uniform::new("black_level", pass.black_level),
             Uniform::new("white_balance", pass.white_balance),
             Uniform::new("saturation", pass.saturation),
             Uniform::new("contrast", pass.contrast),

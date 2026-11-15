@@ -136,6 +136,15 @@ pub struct OutputColor {
 pub struct WorkingSpace {
     /// Luminance of 1.0, in cd/m².
     pub sdr_white: u32,
+    /// How surfaces in sRGB are decoded.
+    pub sdr_transfer: crate::primitives::hdr_output::SdrTransfer,
+}
+
+impl WorkingSpace {
+    /// `description` as this space reads it, see [`crate::primitives::hdr_output::SdrTransfer::read`].
+    pub fn source(self, description: ImageDescription) -> ImageDescription {
+        self.sdr_transfer.read(description)
+    }
 }
 
 /// What clients are told about a monitor drawn in HDR with `pass`: PQ (or HLG) in BT.2020 up to its peak, with SDR white at its configured level.

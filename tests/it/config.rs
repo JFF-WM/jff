@@ -18,7 +18,7 @@ use jff_wm::config::{
 };
 use jff_wm::config::{ContainerRule, RuleOutput, WindowFacts, WindowMatch};
 use jff_wm::desk::{Goto, Side};
-use jff_wm::primitives::hdr_output::ToneMap;
+use jff_wm::primitives::hdr_output::{SdrTransfer, ToneMap};
 use jff_wm::primitives::layout::MonitorTarget;
 
 fn mods(ctrl: bool, alt: bool, shift: bool, logo: bool) -> ModifiersState {
@@ -2492,4 +2492,50 @@ fn check_warns_about_saturation_and_white_balance_without_hdr() {
     .unwrap();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains("hdr-saturation and hdr-white-balance"));
+}
+
+#[test]
+fn sdr_transfer_and_black_level_parse() {
+    let config = Config::parse(
+        r#"outputs {
+            output "DP-1" { hdr; sdr-transfer "gamma22"; hdr-black-level 0.25; }
+            output "DP-2" { hdr; sdr-transfer "srgb"; hdr-black-level -1; }
+            output "DP-3" { hdr; }
+        }"#,
+    )
+    .unwrap();
+    let first = config.output("DP-1").unwrap();
+    assert_eq!(first.sdr_transfer, Some(SdrTransfer::Gamma22));
+    assert_eq!(first.hdr_black_level, Some(250));
+    let second = config.output("DP-2").unwrap();
+    assert_eq!(second.sdr_transfer, Some(SdrTransfer::Srgb));
+    assert_eq!(second.hdr_black_level, Some(-1000));
+    assert_eq!(config.output("DP-3").unwrap().sdr_transfer, None);
+    assert_eq!(config.output("DP-3").unwrap().hdr_black_level, None);
+}
+
+#[test]
+fn sdr_transfer_and_black_level_fail_when_wrong() {
+    for (key, bad) in [
+        ("sdr-transfer", "\"pq\""),
+        ("sdr-transfer", "1"),
+        ("sdr-transfer", "\"srgb\" \"gamma22\""),
+        ("hdr-black-level", "9"),
+        ("hdr-black-level", "-6"),
+        ("hdr-black-level", "\"low\""),
+    ] {
+        let text = format!(r#"outputs {{ output "DP-1" {{ {key} {bad}; }} }}"#);
+        let message = format!("{:#}", Config::parse(&text).unwrap_err());
+        assert!(message.contains(key), "{key} {bad}: {message}");
+    }
+}
+
+#[test]
+fn check_warns_about_sdr_transfer_and_black_level_without_hdr() {
+    let warnings = Config::check_text(
+        r#"outputs { output "DP-1" { sdr-transfer "gamma22"; hdr-black-level 0.2; } }"#,
+    )
+    .unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("sdr-transfer and hdr-black-level"));
 }

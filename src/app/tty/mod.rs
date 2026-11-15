@@ -1228,6 +1228,12 @@ impl Tty {
             let tone = output_config
                 .and_then(|c| c.hdr_tone_map)
                 .unwrap_or_default();
+            let sdr_transfer = output_config
+                .and_then(|c| c.sdr_transfer)
+                .unwrap_or_default();
+            let black_level = output_config
+                .and_then(|c| c.hdr_black_level)
+                .map_or(hdr_output::DEFAULT_BLACK_LEVEL, |m| m as f32 / 1000.0);
             let saturation = output_config
                 .and_then(|c| c.hdr_saturation)
                 .map_or(hdr_output::DEFAULT_SATURATION, |m| m as f32 / 1000.0);
@@ -1268,6 +1274,7 @@ impl Tty {
                             f32::from(plan.max_luminance),
                             panel.as_ref(),
                         )
+                        .with_black_level(black_level)
                         .with_white_balance(white_balance)
                         .with_saturation(saturation)
                         .with_contrast(contrast)
@@ -1277,7 +1284,14 @@ impl Tty {
                             link_bits(lit.compositor.format())
                                 .min(plan.max_bpc.unwrap_or(u32::MAX)),
                         ));
-                        hdr = Some((WorkingSpace { sdr_white }, pass, content_metadata));
+                        hdr = Some((
+                            WorkingSpace {
+                                sdr_white,
+                                sdr_transfer,
+                            },
+                            pass,
+                            content_metadata,
+                        ));
                         target = hdr_color_state(
                             &plan.with_content(lit.hdr_content.0, lit.hdr_content.1),
                         );
