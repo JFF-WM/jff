@@ -377,6 +377,8 @@ pub struct JffState {
     pub layer_on_demand_focus: Option<WlSurface>,
     /// The menu that currently holds keyboard and pointer, if any.
     pub popup_grab: Option<PopupGrabState>,
+    /// The fingers on a touchscreen (see `input/touch.rs`).
+    pub fingers: crate::primitives::touch::Fingers<smithay::backend::input::TouchSlot, WlSurface>,
 }
 
 impl JffState {
@@ -565,6 +567,8 @@ impl JffState {
                 .expect("failed to add keyboard to seat");
         }
         seat.add_pointer();
+        // Touchscreens (wl_touch), see `input/touch.rs`.
+        seat.add_touch();
 
         // Only winit uses this, and it always has exactly one output.
         let damage_tracker = match outputs.first() {
@@ -681,6 +685,7 @@ impl JffState {
             focused_window: None,
             layer_on_demand_focus: None,
             popup_grab: None,
+            fingers: Default::default(),
         };
         state
             .desk
@@ -1331,8 +1336,9 @@ impl XdgShellHandler for JffState {
             self.desk.mode_of(|w| *w == window),
             WindowMode::Floating | WindowMode::Snapped(_)
         );
-        if draggable {
-            self.start_move(&window, start_data, serial);
+        if draggable && self.start_move(&window, start_data, serial) {
+            // A finger that started this drag belongs to the grab now, not to the client.
+            self.touch_taken_by_grab(serial);
         }
     }
 
@@ -1356,6 +1362,7 @@ impl XdgShellHandler for JffState {
         {
             let edges = crate::input::grabs::resize::edges_from(edges);
             if self.start_member_resize(&window, start_data.clone(), edges, serial) {
+                self.touch_taken_by_grab(serial);
                 return;
             }
         }
@@ -1379,6 +1386,7 @@ impl XdgShellHandler for JffState {
             (size.w, size.h),
         );
         pointer.set_grab(self, grab, serial, Focus::Clear);
+        self.touch_taken_by_grab(serial);
     }
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
@@ -2111,18 +2119,21 @@ impl JffState {
         serial: Serial,
     ) -> Option<GrabStartData<JffState>> {
         let wl_surface = surface.wl_surface();
-        let pointer = self.seat.get_pointer()?;
-        pointer
-            .with_grab(|grab_serial, grab| {
-                let data = grab.start_data();
-                let same_client = data
-                    .focus
-                    .as_ref()
-                    .map(|(focus, _)| focus.id().same_client_as(&wl_surface.id()))
-                    .unwrap_or(false);
-                (grab_serial == serial && same_client).then(|| data.clone())
-            })
-            .flatten()
+        let from_pointer = self.seat.get_pointer().and_then(|pointer| {
+            pointer
+                .with_grab(|grab_serial, grab| {
+                    let data = grab.start_data();
+                    let same_client = data
+                        .focus
+                        .as_ref()
+                        .map(|(focus, _)| focus.id().same_client_as(&wl_surface.id()))
+                        .unwrap_or(false);
+                    (grab_serial == serial && same_client).then(|| data.clone())
+                })
+                .flatten()
+        });
+        // Not a mouse press: a touch of the client's own surface may be what it reacts to.
+        from_pointer.or_else(|| self.touch_interactive_start(wl_surface, serial))
     }
 }
 

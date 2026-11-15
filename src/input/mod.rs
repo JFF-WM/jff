@@ -1,7 +1,8 @@
-//! Input: forwards winit keyboard/pointer events to the seat, and does click-to-focus.
+//! Input: forwards keyboard, pointer, pen and touch events to the seat, and does click-to-focus.
 
 pub mod grabs;
 mod tablet;
+mod touch;
 
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent,
@@ -89,6 +90,19 @@ impl JffState {
             InputEvent::PointerAxis { event } => self.stamp_pointer(Event::time(event)),
             _ => {}
         }
+        // The cursor is for whatever was used last: a finger has no use for one.
+        match &event {
+            InputEvent::TouchDown { .. } | InputEvent::TouchMotion { .. } => {
+                self.cursor.set_touch_hidden(true)
+            }
+            InputEvent::PointerMotion { .. }
+            | InputEvent::PointerMotionAbsolute { .. }
+            | InputEvent::PointerButton { .. }
+            | InputEvent::PointerAxis { .. }
+            | InputEvent::TabletToolAxis { .. }
+            | InputEvent::TabletToolProximity { .. } => self.cursor.set_touch_hidden(false),
+            _ => {}
+        }
         match event {
             InputEvent::Keyboard { event } => {
                 // A real key while a virtual keyboard's keymap is on the seat: back to the
@@ -123,6 +137,13 @@ impl JffState {
             InputEvent::TabletToolProximity { event } => self.tablet_tool_proximity::<B>(&event),
             InputEvent::TabletToolTip { event } => self.tablet_tool_tip::<B>(&event),
             InputEvent::TabletToolButton { event } => self.tablet_tool_button::<B>(&event),
+
+            // Touchscreens (wl_touch), see `touch.rs`.
+            InputEvent::TouchDown { event } => self.touch_down::<B>(&event),
+            InputEvent::TouchMotion { event } => self.touch_motion::<B>(&event),
+            InputEvent::TouchUp { event } => self.touch_up::<B>(&event),
+            InputEvent::TouchCancel { event } => self.touch_cancel(Event::time(&event)),
+            InputEvent::TouchFrame { .. } => self.touch_frame(),
 
             InputEvent::PointerButton { event } => {
                 self.pointer_button(event.button_code(), event.state(), event.time());
@@ -621,6 +642,19 @@ impl JffState {
     /// overview and screenshot selection, then the client under the pointer. Real mice and
     /// `jff msg click` both come through here.
     pub(crate) fn pointer_button(&mut self, button: u32, state: ButtonState, time: InputTime) {
+        self.pointer_button_with(button, state, time, SERIAL_COUNTER.next_serial());
+    }
+
+    /// [`JffState::pointer_button`] with the serial the event carries. A touch press passes
+    /// the serial of the `wl_touch.down` it goes with, so a client that answers that touch
+    /// with a move, a resize or a menu is recognised (see `touch_interactive_start`).
+    pub(crate) fn pointer_button_with(
+        &mut self,
+        button: u32,
+        state: ButtonState,
+        time: InputTime,
+        serial: Serial,
+    ) {
         self.hotkey_input_seen(None);
         // Mouse bindings (MouseBack, MouseForward): the press runs the action, and both
         // press and release are kept from clients so none sees half a click.
@@ -674,7 +708,6 @@ impl JffState {
             return;
         }
         let pointer = self.seat.get_pointer().unwrap();
-        let serial = SERIAL_COUNTER.next_serial();
 
         // Click-to-focus and click-to-raise, before the click reaches the client.
         if state == ButtonState::Pressed && !self.session_locked() {

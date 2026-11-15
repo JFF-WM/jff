@@ -1,7 +1,8 @@
 //! Drag-and-drop between clients, and the drag icon that follows the pointer.
 //!
 //! Smithay hands us the drag through `WaylandDndGrabHandler::dnd_requested`. We take the
-//! pointer with a `DnDGrab`, draw the icon the client attached, drop it when the drag ends.
+//! pointer (or, for a drag that started with a finger, the touch) with a `DnDGrab`, draw the
+//! icon the client attached, drop it when the drag ends.
 
 use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
@@ -54,7 +55,30 @@ impl WaylandDndGrabHandler for JffState {
                 pointer.set_grab(self, grab, serial, Focus::Keep);
                 self.toplevel_drag_started(client.as_ref());
             }
-            GrabType::Touch => source.cancel(), // no touch support
+            GrabType::Touch => {
+                let Some(touch) = seat.get_touch() else {
+                    source.cancel();
+                    return;
+                };
+                // Needs a finger down, or it's not a real drag.
+                let Some(start_data) = touch.grab_start_data() else {
+                    source.cancel();
+                    return;
+                };
+                let client = start_data
+                    .focus
+                    .as_ref()
+                    .and_then(|(surface, _)| surface.client());
+                self.dnd_icon = icon;
+                // The icon follows the seat pointer, which the primary finger drives
+                // (`input/touch.rs`). The cursor itself stays hidden while a finger is used.
+                self.cursor
+                    .set_status(CursorImageStatus::Named(CursorIcon::Grabbing));
+
+                let grab = DnDGrab::new_touch(&self.display_handle, start_data, source, seat);
+                touch.set_grab(self, grab, serial);
+                self.toplevel_drag_started(client.as_ref());
+            }
         }
     }
 }

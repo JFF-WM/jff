@@ -138,6 +138,16 @@ impl JffState {
             .stamp(DeviceKind::Keyboard, &focus, input_time_nsec(time));
     }
 
+    /// Before a `wl_touch` event: tell the client the finger's events go to when it happened.
+    /// `surface` is where the finger is sent, not the pointer focus (a touch has none).
+    pub(crate) fn stamp_touch(&mut self, surface: &WlSurface, time: InputTime) {
+        if self.input_timestamps.is_empty() {
+            return;
+        }
+        self.input_timestamps
+            .stamp(DeviceKind::Touch, surface, input_time_nsec(time));
+    }
+
     /// Before a `wl_pointer` event: tell the pointer focus client when it happened.
     pub(crate) fn stamp_pointer(&mut self, time: InputTime) {
         if self.input_timestamps.is_empty() {
@@ -176,7 +186,7 @@ impl Dispatch<ZwpInputTimestampsManagerV1, ()> for JffState {
     ) {
         use zwp_input_timestamps_manager_v1::Request;
         // An object is always created, even for a device jff never sends events on: the
-        // protocol has no way to refuse (touch: jff has no touch support yet).
+        // protocol has no way to refuse.
         let (id, device) = match request {
             Request::GetKeyboardTimestamps { id, keyboard } => (id, Device::Keyboard(keyboard)),
             Request::GetPointerTimestamps { id, pointer } => (id, Device::Pointer(pointer)),

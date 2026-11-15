@@ -70,6 +70,8 @@ pub struct CursorManager {
     theme: CursorTheme,
     size: i32,
     status: CursorImageStatus,
+    /// A finger is the input device in use: there is no cursor to look at (see `input/touch.rs`).
+    hidden_for_touch: bool,
     cache: HashMap<CursorIcon, Rc<Cursor>>,
     fallback: Rc<Cursor>,
 }
@@ -89,6 +91,7 @@ impl CursorManager {
             theme: CursorTheme::load(&theme_name),
             size,
             status: CursorImageStatus::default_named(),
+            hidden_for_touch: false,
             cache: HashMap::new(),
             fallback: Rc::new(builtin_arrow()),
         }
@@ -99,12 +102,21 @@ impl CursorManager {
         self.status = status;
     }
 
+    /// Hide the cursor while a touchscreen is in use, show it again when a mouse, touchpad or
+    /// pen moves. The client's own choice of cursor (`set_status`) is left as it is.
+    pub fn set_touch_hidden(&mut self, hidden: bool) {
+        self.hidden_for_touch = hidden;
+    }
+
     /// The cursor being drawn is a themed one that animates (the busy spinner).
     pub fn is_animated(&mut self) -> bool {
         matches!(self.render_cursor(), RenderCursor::Named(cursor) if cursor.is_animated())
     }
 
     pub fn render_cursor(&mut self) -> RenderCursor {
+        if self.hidden_for_touch {
+            return RenderCursor::Hidden;
+        }
         // A client that set a cursor surface and then went away leaves a dead surface behind.
         if let CursorImageStatus::Surface(surface) = &self.status {
             if !surface.alive() {

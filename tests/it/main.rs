@@ -44,6 +44,7 @@ mod screenshot_capture;
 mod screenshot_save;
 mod scroll_steps;
 mod tile_tree;
+mod touch;
 mod window_anim;
 mod xx_hotkey;
 mod yuv;
