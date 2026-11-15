@@ -7,7 +7,7 @@
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
 //! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
-//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), the first rule that fits a window applies), and
+//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -1120,6 +1120,9 @@ pub struct WindowRule {
     /// `tag "name"`: the window gets this tag of the user's, which `match tag` and the other
     /// rules see from then on. It is its own step, see [`Config::user_tag_for`].
     pub tag: Option<String>,
+    /// `opacity 0.9`: how opaque the window is drawn, in thousandths (1000 is opaque). Like
+    /// `tag` it is its own step, see [`Config::opacity_for`].
+    pub opacity: Option<u16>,
 }
 
 impl WindowRule {
@@ -1141,12 +1144,13 @@ impl WindowRule {
             || self.places_window()
             || self.container.is_some()
             || self.tag.is_some()
+            || self.opacity.is_some()
     }
 
-    /// Whether `tag` is all the rule does. Such a rule only names windows, so it does not use up
-    /// the one rule a window gets for its placement.
+    /// Whether `tag` and `opacity` are all the rule does. Such a rule only names or dresses
+    /// windows, so it does not use up the one rule a window gets for its placement.
     pub fn only_tags(&self) -> bool {
-        self.tag.is_some()
+        (self.tag.is_some() || self.opacity.is_some())
             && self.output.is_none()
             && self.workspace.is_none()
             && self.container.is_none()
@@ -1842,6 +1846,17 @@ impl Config {
             .iter()
             .filter(|rule| rule.matches(window))
             .find_map(|rule| rule.tag.as_deref())
+    }
+
+    /// The opacity the user's rules give a window, 0 to 1: that of the first rule with an
+    /// `opacity` whose `match` lines all hold. Like [`Config::user_tag_for`] it does not depend
+    /// on which rule the window gets for its placement. `None` when no rule gives one.
+    pub fn opacity_for(&self, window: &WindowFacts<'_>) -> Option<f32> {
+        self.window_rules
+            .iter()
+            .filter(|rule| rule.matches(window))
+            .find_map(|rule| rule.opacity)
+            .map(|thousandths| f32::from(thousandths) / 1000.0)
     }
 
     /// Whether windows can be grouped in tiling containers (`tiling-containers`, off by default).
@@ -2552,6 +2567,13 @@ fn parse_window_rule(node: &KdlNode) -> anyhow::Result<WindowRule> {
                     bail!("tag takes a name for the window, not an empty string");
                 }
                 rule.tag = Some(tag);
+            }
+            "opacity" => {
+                let opacity = float_arg(child)?;
+                if !(0.0..=1.0).contains(&opacity) {
+                    bail!("opacity takes a number from 0 (invisible) to 1 (opaque)");
+                }
+                rule.opacity = Some((opacity * 1000.0).round() as u16);
             }
             other => bail!("unknown window-rule setting {other:?}"),
         }

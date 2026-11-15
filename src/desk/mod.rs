@@ -97,6 +97,8 @@ pub struct Entry<W> {
     /// Whether the window belongs to the scratchpad: put away with [`Desk::hide_where`] and
     /// brought back by the scratchpad key, as opposed to a minimized one.
     pub scratch: bool,
+    /// How opaque the window is drawn, 0 to 1 (a `window-rule` sets it).
+    pub opacity: f32,
 }
 
 pub struct Desk<W> {
@@ -173,6 +175,7 @@ impl<W> Desk<W> {
             container: None,
             hidden: None,
             scratch: false,
+            opacity: 1.0,
         });
         pos
     }
@@ -264,6 +267,13 @@ impl<W> Desk<W> {
         entry.hidden = None;
         self.entries.push(entry);
         true
+    }
+
+    /// Draw the first window matching `pred` with this opacity (clamped to 0 to 1).
+    pub fn set_opacity_where(&mut self, pred: impl Fn(&W) -> bool, opacity: f32) {
+        if let Some(e) = self.entries.iter_mut().find(|e| pred(&e.window)) {
+            e.opacity = opacity.clamp(0.0, 1.0);
+        }
     }
 
     /// Take the first window matching `pred` into the scratchpad, or out of it.

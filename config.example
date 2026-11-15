@@ -425,6 +425,9 @@ window-rule {
     open-workspace 1
 }
 
+// opacity for kitty terminal
+window-rule { match app-id="kitty"; opacity 0.9; }
+
 // ---------------------------------------------------------------------------------------------
 // Container rules (need `tiling-containers`). Any number of blocks.
 //

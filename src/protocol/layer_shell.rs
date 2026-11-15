@@ -60,8 +60,8 @@ pub const OVERLAY_ONLY: [Layer; 1] = [Layer::Overlay];
 /// path can leave those elements out and let `DrmCompositor` put the window's buffer straight on
 /// the primary plane (direct scanout). A window that was asked to go fullscreen but still has
 /// its old size doesn't count: the windows behind it are still visible. Neither does a window
-/// its client faded (wp_alpha_modifier_v1): what is behind shows through, so the compositor has
-/// to blend it.
+/// its client faded (wp_alpha_modifier_v1) or a `window-rule` gave an `opacity`: what is behind
+/// shows through, so the compositor has to blend it.
 pub fn fullscreen_covers(desk: &Desk<Window>, rect: Rect) -> bool {
     let Some(entry) = desk.top_down().find(|entry| {
         let size = entry.window.geometry().size;
@@ -74,6 +74,7 @@ pub fn fullscreen_covers(desk: &Desk<Window>, rect: Rect) -> bool {
         return false;
     }
     alpha::is_opaque(window_multiplier(&entry.window))
+        && entry.opacity >= 1.0
         && entry.window.toplevel().is_some_and(|toplevel| {
             toplevel
                 .with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen))

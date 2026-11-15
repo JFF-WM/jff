@@ -583,7 +583,7 @@ impl JffState {
                 popup_radius,
                 color,
                 BorderPaint::of(border, &entry.window, self.focused_window.as_ref()),
-                OpenFrame::DONE,
+                OpenFrame::DONE.with_opacity(entry.opacity),
                 &mut elements,
             );
         }

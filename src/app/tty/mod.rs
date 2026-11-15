@@ -2066,7 +2066,7 @@ impl JffState {
                             color
                         },
                         BorderPaint::of(border, &entry.window, self.focused_window.as_ref()),
-                        if animate {
+                        (if animate {
                             crate::feature::window_anim::open_frame(
                                 open_style,
                                 entry.shown,
@@ -2075,7 +2075,8 @@ impl JffState {
                             )
                         } else {
                             crate::feature::window_anim::OpenFrame::DONE
-                        },
+                        })
+                        .with_opacity(entry.opacity),
                         &mut elements,
                     );
                     // nothing below the covering window goes in the frame

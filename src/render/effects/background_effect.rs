@@ -362,7 +362,9 @@ pub fn window_elements(
 ) {
     // Popups and the scaled picture of a window that is opening convert their surfaces to this.
     let _color = gamut::enter(color);
-    let alpha = open.alpha;
+    // The blur keeps the strength of the opening, only the window itself gets the rule's opacity.
+    let blur_alpha = open.alpha;
+    let alpha = open.alpha * open.opacity;
     // A window that is still opening has no outline (it would show at full strength behind a
     // half-transparent or moving window). Its blur fades in with it, see `open.alpha`.
     let border = if open.settled() { border } else { None };
@@ -502,7 +504,7 @@ pub fn window_elements(
             1.0,
             blur,
             rounding.as_ref(),
-            alpha,
+            blur_alpha,
             &mut |element| out.push(JffElement::from(element.with_wallpaper_source(snapshot))),
         );
     }
@@ -560,7 +562,7 @@ fn scaled_window(
         .map(|toplevel| super::pixel_alpha::modes(toplevel.wl_surface()))
         .unwrap_or_default();
     let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-        window.render_elements(&mut *renderer, from, scale, open.alpha);
+        window.render_elements(&mut *renderer, from, scale, open.alpha * open.opacity);
     for surface in surfaces {
         let conversion = gamut::find(&conversions, surface.id());
         let alpha_mode = super::pixel_alpha::find(&alpha_modes, surface.id());

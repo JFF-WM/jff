@@ -2373,3 +2373,36 @@ fn minimize_and_scratchpad_take_no_arguments() {
     assert!(Config::parse(r#"binds { Alt+1 { minimize "now"; } }"#).is_err());
     assert!(Config::parse(r#"binds { Alt+1 { scratchpad 1; } }"#).is_err());
 }
+
+#[test]
+fn window_rule_opacity_is_parsed() {
+    let config = Config::parse(
+        r#"window-rule { match app-id="kitty"; opacity 0.85; }
+           window-rule { match app-id="kitty"; open-size 800 600; }
+           window-rule { match app-id="mpv"; opacity 1; }"#,
+    )
+    .unwrap();
+    let facts = |app_id| WindowFacts {
+        app_id,
+        title: "",
+        tag: None,
+        dialog: false,
+        restored: false,
+    };
+    assert_eq!(config.opacity_for(&facts("kitty")), Some(0.85));
+    assert_eq!(config.opacity_for(&facts("mpv")), Some(1.0));
+    assert_eq!(config.opacity_for(&facts("firefox")), None);
+    // A rule with only an opacity does not use up the rule a window gets for its placement.
+    let placed = config.window_rule_for(&facts("kitty")).unwrap();
+    assert_eq!(placed.size, Some((800, 600)));
+    assert!(config.window_rule_for(&facts("mpv")).is_none());
+}
+
+#[test]
+fn rejects_bad_window_rule_opacity() {
+    assert!(Config::parse("window-rule { opacity 1.5; }").is_err());
+    assert!(Config::parse("window-rule { opacity -0.1; }").is_err());
+    assert!(Config::parse(r#"window-rule { opacity "half"; }"#).is_err());
+    assert!(Config::parse("window-rule { opacity; }").is_err());
+    assert!(Config::parse("window-rule { opacity 0.5 0.6; }").is_err());
+}

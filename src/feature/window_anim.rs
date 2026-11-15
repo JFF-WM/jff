@@ -54,6 +54,10 @@ pub struct OpenFrame {
     pub scale: f64,
     /// Pixels below its place.
     pub dy: i32,
+    /// How opaque the window is drawn all the time (a `window-rule`'s `opacity`), on top of
+    /// `alpha`. It has nothing to do with opening, so it does not keep a window from being
+    /// [`settled`](OpenFrame::settled).
+    pub opacity: f32,
 }
 
 impl OpenFrame {
@@ -62,10 +66,16 @@ impl OpenFrame {
         alpha: 1.0,
         scale: 1.0,
         dy: 0,
+        opacity: 1.0,
     };
 
     pub fn settled(&self) -> bool {
-        *self == Self::DONE
+        self.alpha == Self::DONE.alpha && self.scale == Self::DONE.scale && self.dy == Self::DONE.dy
+    }
+
+    /// The same frame for a window drawn with `opacity`.
+    pub fn with_opacity(self, opacity: f32) -> Self {
+        Self { opacity, ..self }
     }
 }
 

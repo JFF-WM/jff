@@ -99,3 +99,15 @@ fn the_open_style_is_read_from_the_block() {
     assert_eq!(Config::default().window_open_style(), OpenStyle::Fade);
     assert!(Config::parse("window-animations { open \"spin\" }").is_err());
 }
+
+#[test]
+fn a_rule_opacity_does_not_unsettle_a_window() {
+    let faded = OpenFrame::DONE.with_opacity(0.5);
+    assert!(faded.settled());
+    assert_eq!(faded.alpha, 1.0);
+    assert_eq!(faded.opacity, 0.5);
+    // A window that is still opening is not settled whatever its opacity.
+    let shown = Instant::now();
+    let opening = open_frame(OpenStyle::Fade, Some(shown), shown, OPEN).with_opacity(1.0);
+    assert!(!opening.settled());
+}

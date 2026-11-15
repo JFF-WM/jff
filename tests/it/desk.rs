@@ -499,3 +499,17 @@ fn hidden_windows_do_not_make_a_workspace_occupied() {
     assert_eq!(d.count_on(0), 0);
     assert_eq!(d.step_occupied("", 3, -1, 10), 3);
 }
+
+#[test]
+fn windows_are_opaque_until_given_an_opacity() {
+    let mut d = Desk::default();
+    d.add("a");
+    d.add("b");
+    assert_eq!(d.find_by(|w| *w == "a").map(|e| e.opacity), Some(1.0));
+    d.set_opacity_where(|w| *w == "a", 0.8);
+    assert_eq!(d.find_by(|w| *w == "a").map(|e| e.opacity), Some(0.8));
+    assert_eq!(d.find_by(|w| *w == "b").map(|e| e.opacity), Some(1.0));
+    // Out of range is held to 0 and 1.
+    d.set_opacity_where(|w| *w == "a", 3.0);
+    assert_eq!(d.find_by(|w| *w == "a").map(|e| e.opacity), Some(1.0));
+}
