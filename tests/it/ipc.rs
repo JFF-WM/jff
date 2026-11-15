@@ -13,6 +13,7 @@ use jff_wm::ipc::{
     COMMANDS, MAX_PENDING,
 };
 use jff_wm::primitives::json::{json_opt, json_str, pretty};
+use jff_wm::primitives::layout::MonitorTarget;
 
 #[test]
 fn requests_are_parsed() {
@@ -567,4 +568,41 @@ fn container_layout_requests_are_parsed() {
     ] {
         assert!(COMMANDS.contains(command));
     }
+}
+
+#[test]
+fn monitor_requests_are_parsed() {
+    assert_eq!(
+        parse_request("focus-monitor right"),
+        Ok(Request::FocusMonitor(MonitorTarget::Right))
+    );
+    assert_eq!(
+        parse_request("focus-monitor DP-2"),
+        Ok(Request::FocusMonitor(MonitorTarget::Named(
+            "DP-2".to_string()
+        )))
+    );
+    assert_eq!(
+        parse_request("move-to-monitor next"),
+        Ok(Request::MoveToMonitor(None, MonitorTarget::Next))
+    );
+    assert_eq!(
+        parse_request("move-to-monitor left 9"),
+        Ok(Request::MoveToMonitor(Some(9), MonitorTarget::Left))
+    );
+    assert_eq!(
+        parse_request("move-workspace-to-monitor up"),
+        Ok(Request::MoveWorkspaceToMonitor(MonitorTarget::Up))
+    );
+}
+
+#[test]
+fn bad_monitor_requests_are_refused() {
+    assert!(parse_request("focus-monitor").is_err());
+    assert!(parse_request("focus-monitor left right").is_err());
+    assert!(parse_request("move-to-monitor").is_err());
+    assert!(parse_request("move-to-monitor left x").is_err());
+    assert!(parse_request("move-to-monitor left 1 2").is_err());
+    assert!(parse_request("move-workspace-to-monitor").is_err());
+    assert!(parse_request("move-workspace-to-monitor left 1").is_err());
 }

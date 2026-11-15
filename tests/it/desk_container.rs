@@ -2026,3 +2026,26 @@ mod apply_layout {
         );
     }
 }
+
+#[test]
+fn a_container_goes_along_when_monitors_trade() {
+    let (mut d, c) = container_of(&["a", "b", "x"], &["a", "b"], Axis::Horizontal);
+    d.set_per_output(true, "");
+    d.set_current_on("HDMI-1", 2);
+    // "a" and "b" were added with no monitor: put them on DP-1, "x" on HDMI-1.
+    assert!(d.set_output_where(|w| *w == "a", "DP-1"));
+    assert!(d.set_output_where(|w| *w == "x", "HDMI-1"));
+    assert!(d.swap_monitors("DP-1", "HDMI-1"));
+    let container = d.container(c).expect("the container exists");
+    assert_eq!(container.output(), "HDMI-1");
+    assert_eq!(container.workspace(), 2);
+    for window in ["a", "b"] {
+        assert_eq!(
+            d.home_of(|w| *w == window),
+            Some(("HDMI-1".to_owned(), 2)),
+            "{window} goes with its container"
+        );
+    }
+    assert_eq!(d.home_of(|w| *w == "x"), Some(("DP-1".to_owned(), 0)));
+    assert_eq!(leaves(&d, c), ["a", "b"]);
+}

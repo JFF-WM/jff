@@ -354,3 +354,79 @@ fn stepping_only_counts_windows_of_that_monitor() {
     assert_eq!(d.step_occupied("left", 0, 1, 10), 0);
     assert_eq!(d.step_occupied("right", 0, 1, 10), 3);
 }
+
+#[test]
+fn monitors_trade_what_they_show() {
+    let mut d = per_output_desk();
+    d.add_on("a", "left");
+    d.add_on("b", "right");
+    d.set_current_on("left", 1);
+    d.set_current_on("right", 2);
+    // "c" is shown on the left monitor (workspace 1), "e" on the right one (workspace 2),
+    // "a" and "b" are on workspace 0 of their monitors, hidden.
+    d.add_on("c", "left");
+    d.add_on("e", "right");
+    assert!(d.swap_monitors("left", "right"));
+    assert_eq!(d.home_of(|w| *w == "c"), Some(("right".to_owned(), 2)));
+    assert_eq!(d.home_of(|w| *w == "e"), Some(("left".to_owned(), 1)));
+    // Each monitor still shows the workspace it showed, now with the other one's windows.
+    assert_eq!(d.current_on("left"), 1);
+    assert_eq!(d.current_on("right"), 2);
+    assert_eq!(order(&d), ["e", "c"]);
+    // Hidden windows stay where they were.
+    assert_eq!(d.home_of(|w| *w == "a"), Some(("left".to_owned(), 0)));
+    assert_eq!(d.home_of(|w| *w == "b"), Some(("right".to_owned(), 0)));
+}
+
+#[test]
+fn trading_twice_puts_everything_back() {
+    let mut d = per_output_desk();
+    d.add_on("a", "left");
+    d.add_on("b", "right");
+    d.set_current_on("right", 3);
+    d.add_on("c", "right");
+    assert!(d.swap_monitors("left", "right"));
+    assert!(d.swap_monitors("right", "left"));
+    assert_eq!(d.home_of(|w| *w == "a"), Some(("left".to_owned(), 0)));
+    assert_eq!(d.home_of(|w| *w == "b"), Some(("right".to_owned(), 0)));
+    assert_eq!(d.home_of(|w| *w == "c"), Some(("right".to_owned(), 3)));
+}
+
+#[test]
+fn a_third_monitor_is_left_alone_by_a_trade() {
+    let mut d = per_output_desk();
+    d.add_on("a", "left");
+    d.add_on("b", "right");
+    d.add_on("c", "middle");
+    assert!(d.swap_monitors("left", "right"));
+    assert_eq!(d.home_of(|w| *w == "c"), Some(("middle".to_owned(), 0)));
+}
+
+#[test]
+fn trading_with_yourself_or_without_per_output_changes_nothing() {
+    let mut d = per_output_desk();
+    d.add_on("a", "left");
+    assert!(!d.swap_monitors("left", "left"));
+    assert_eq!(d.home_of(|w| *w == "a"), Some(("left".to_owned(), 0)));
+    let mut shared = Desk::default();
+    shared.add_on("a", "left");
+    assert!(!shared.swap_monitors("left", "right"));
+    assert_eq!(shared.home_of(|w| *w == "a"), Some(("left".to_owned(), 0)));
+}
+
+#[test]
+fn a_trade_does_not_merge_into_a_hidden_workspace() {
+    let mut d = per_output_desk();
+    // The right monitor shows workspace 1 and has "h" hidden on workspace 0.
+    d.add_on("h", "right");
+    d.set_current_on("right", 1);
+    d.add_on("s", "right");
+    d.add_on("a", "left");
+    assert!(d.swap_monitors("left", "right"));
+    // "a" lands on workspace 1 of the right monitor and "s" on workspace 0 of the left one.
+    // "h", hidden on workspace 0 of the right monitor, is not mixed in with either.
+    assert_eq!(d.home_of(|w| *w == "a"), Some(("right".to_owned(), 1)));
+    assert_eq!(d.home_of(|w| *w == "s"), Some(("left".to_owned(), 0)));
+    assert_eq!(d.home_of(|w| *w == "h"), Some(("right".to_owned(), 0)));
+    assert_eq!(d.current_on("right"), 1);
+}

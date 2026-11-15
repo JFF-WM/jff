@@ -282,6 +282,58 @@ impl<W> Desk<W> {
         }
     }
 
+    /// With per-output workspaces: the monitors `a` and `b` trade what they show. The windows
+    /// of the workspace `a` shows go to `b`, onto the workspace `b` shows, and the windows of
+    /// that one come to `a` the same way, so every monitor keeps showing the workspace number
+    /// it showed and nothing lands among windows that were hidden. A container goes as one with
+    /// all its windows. Windows on other workspaces stay where they are. Only the books are
+    /// kept here: the caller moves the windows' positions to the other monitor (and lays the
+    /// containers out there), or [`Desk::assign_outputs`] puts them back. Returns false, having
+    /// changed nothing, without per-output workspaces or when `a` and `b` are the same monitor.
+    pub fn swap_monitors(&mut self, a: &str, b: &str) -> bool {
+        if !self.per_output || a == b {
+            return false;
+        }
+        let (shown_a, shown_b) = (self.current_on(a), self.current_on(b));
+        // The place a thing on (monitor, workspace) goes to, `None` when it stays.
+        let destination = |output: &str, workspace: usize| {
+            if output == a && workspace == shown_a {
+                Some((b.to_owned(), shown_b))
+            } else if output == b && workspace == shown_b {
+                Some((a.to_owned(), shown_a))
+            } else {
+                None
+            }
+        };
+        for entry in &mut self.entries {
+            // A member goes where its container goes, below.
+            if entry.container.is_some() {
+                continue;
+            }
+            if let Some((output, workspace)) = destination(&entry.output, entry.workspace) {
+                entry.output = output;
+                entry.workspace = workspace;
+            }
+        }
+        for ci in 0..self.containers.len() {
+            let moved = match self.containers.get_mut(ci) {
+                Some(c) => match destination(&c.output, c.workspace) {
+                    Some((output, workspace)) => {
+                        c.output = output;
+                        c.workspace = workspace;
+                        true
+                    }
+                    None => false,
+                },
+                None => false,
+            };
+            if moved {
+                self.sync_members(ci);
+            }
+        }
+        true
+    }
+
     /// How many windows live on `workspace`.
     pub fn count_on(&self, workspace: usize) -> usize {
         self.entries

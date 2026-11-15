@@ -874,6 +874,9 @@ impl JffState {
             Action::SwitchWindow { backwards } => self.open_switcher(backwards),
             Action::Workspace(goto) => self.goto_workspace(goto),
             Action::MoveToWorkspace(workspace) => self.move_focused_to_workspace(workspace),
+            Action::FocusMonitor(target) => self.focus_monitor_bind(&target),
+            Action::MoveToMonitor(target) => self.move_to_monitor_bind(&target),
+            Action::MoveWorkspaceToMonitor(target) => self.move_workspace_to_monitor_bind(&target),
             Action::ReloadConfig => self.reload_config(),
             Action::ScreenshotArea => {
                 if let Err(why) = self.start_screenshot_area() {

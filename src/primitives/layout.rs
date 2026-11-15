@@ -210,3 +210,154 @@ pub fn hot_corner_barrier(
         None => to,
     }
 }
+
+/// A way across the shared desktop, from one monitor to the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Whether the ranges `a..a + alen` and `b..b + blen` share some room.
+fn overlaps(a: i32, alen: i32, b: i32, blen: i32) -> bool {
+    a.max(b) < (a + alen).min(b + blen)
+}
+
+/// A monitor that is on, as opposed to one without a mode (zero size).
+fn is_lit(rect: Rect) -> bool {
+    rect.2 > 0 && rect.3 > 0
+}
+
+/// The monitor next to `rects[from]` in `direction`, as an index into `rects`. One counts when
+/// it lies wholly beyond that edge of `from`, touching it or with room between. Among those,
+/// one that faces `from` (their extents along the edge share some room) beats one that only
+/// lies diagonally, then the closest wins, then the one most in line. `None` at the edge of
+/// the desktop, or when `from` is no monitor. Going by the edge and not by the center keeps a
+/// shorter monitor that sits beside a taller one from being "above" it.
+pub fn neighbor(rects: &[Rect], from: usize, direction: Direction) -> Option<usize> {
+    let f = *rects.get(from)?;
+    let middle = |r: Rect| (r.0 as f64 + r.2 as f64 / 2.0, r.1 as f64 + r.3 as f64 / 2.0);
+    let (fx, fy) = middle(f);
+    rects
+        .iter()
+        .enumerate()
+        .filter(|(i, r)| *i != from && is_lit(**r))
+        .filter_map(|(i, r)| {
+            let (cx, cy) = middle(*r);
+            // The room between the two edges that face each other, whether the two share
+            // some of the edge, and how far off the line the center is.
+            let (across_v, across_h) = (overlaps(f.1, f.3, r.1, r.3), overlaps(f.0, f.2, r.0, r.2));
+            let (dx, dy) = ((fx - cx).abs(), (fy - cy).abs());
+            let (gap, facing, off) = match direction {
+                Direction::Left => (f.0 - (r.0 + r.2), across_v, dy),
+                Direction::Right => (r.0 - (f.0 + f.2), across_v, dy),
+                Direction::Up => (f.1 - (r.1 + r.3), across_h, dx),
+                Direction::Down => (r.1 - (f.1 + f.3), across_h, dx),
+            };
+            (gap >= 0).then_some((i, !facing, gap, off))
+        })
+        .min_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(a.3.total_cmp(&b.3)))
+        .map(|(i, ..)| i)
+}
+
+/// The monitor after `rects[from]` (before it with `backwards`), wrapping, in the order the
+/// monitors are on the desktop: left to right, then top to bottom. Not the order they were
+/// plugged in. `None` when there is no other monitor that is on, or `from` is no monitor.
+pub fn cycle(rects: &[Rect], from: usize, backwards: bool) -> Option<usize> {
+    let mut order: Vec<usize> = (0..rects.len())
+        .filter(|&i| i == from || is_lit(rects[i]))
+        .collect();
+    order.sort_by_key(|&i| (rects[i].0, rects[i].1, i));
+    if order.len() < 2 {
+        return None;
+    }
+    let at = order.iter().position(|&i| i == from)?;
+    let n = order.len();
+    Some(
+        order[if backwards {
+            (at + n - 1) % n
+        } else {
+            (at + 1) % n
+        }],
+    )
+}
+
+/// Which monitor `focus-monitor`, `move-to-monitor` and `move-workspace-to-monitor` mean,
+/// seen from the monitor in use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MonitorTarget {
+    Left,
+    Right,
+    Up,
+    Down,
+    /// The next monitor in [`cycle`] order, wrapping.
+    Next,
+    Prev,
+    /// The monitor with this name (`DP-1`), as `jff msg outputs` lists them.
+    Named(String),
+}
+
+impl MonitorTarget {
+    /// What the words of a target are, for error messages.
+    pub const WORDS: &'static str = "left, right, up, down, next, prev or a monitor name";
+
+    /// `left`, `right`, `up`, `down`, `next` and `prev` in any case are those directions, any
+    /// other word is the name of a monitor, as it is. `None` for an empty word.
+    pub fn parse(word: &str) -> Option<Self> {
+        let word = word.trim();
+        if word.is_empty() {
+            return None;
+        }
+        Some(match word.to_ascii_lowercase().as_str() {
+            "left" => Self::Left,
+            "right" => Self::Right,
+            "up" => Self::Up,
+            "down" => Self::Down,
+            "next" => Self::Next,
+            "prev" => Self::Prev,
+            _ => Self::Named(word.to_owned()),
+        })
+    }
+
+    /// The index in `rects` (and in `names`, which is in the same order) of the monitor this
+    /// means from `rects[from]`. A name can give `from` itself, a way never does. The error
+    /// says why there is no such monitor, in words for a toast.
+    pub fn resolve(&self, rects: &[Rect], names: &[String], from: usize) -> Result<usize, String> {
+        let beside = |direction: Direction, way: &str| {
+            neighbor(rects, from, direction).ok_or_else(|| format!("There is no monitor {way}."))
+        };
+        let around = |backwards: bool| {
+            cycle(rects, from, backwards)
+                .ok_or_else(|| "There is no other monitor to go to.".to_string())
+        };
+        match self {
+            Self::Left => beside(Direction::Left, "to the left"),
+            Self::Right => beside(Direction::Right, "to the right"),
+            Self::Up => beside(Direction::Up, "above"),
+            Self::Down => beside(Direction::Down, "below"),
+            Self::Next => around(false),
+            Self::Prev => around(true),
+            Self::Named(name) => names
+                .iter()
+                .position(|candidate| candidate == name)
+                .ok_or_else(|| format!("There is no monitor named \"{name}\".")),
+        }
+    }
+}
+
+/// Where a window of `size` at `pos` goes when it is sent from the monitor at `from` to the
+/// one at `to`: the same offset from the monitor's corner, moved the least needed to be
+/// inside the new one when that is smaller.
+pub fn carry_pos(pos: Pos, size: Size, from: Rect, to: Rect) -> Pos {
+    fit_into((pos.0 - from.0 + to.0, pos.1 - from.1 + to.1), size, to)
+}
+
+/// Where a window of `size` sits in the middle of `rect`.
+pub fn center_in(size: Size, rect: Rect) -> Pos {
+    (
+        rect.0 + (rect.2 - size.0) / 2,
+        rect.1 + (rect.3 - size.1) / 2,
+    )
+}

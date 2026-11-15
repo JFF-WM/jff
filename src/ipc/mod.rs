@@ -27,6 +27,9 @@
 //! workspaces                 the shown workspace and how many there are
 //! workspace N|next|prev      show a workspace (N counts from 1)
 //! move-to-workspace N [ID]   send a view (the focused one without an ID) to workspace N
+//! focus-monitor TARGET       put the pointer and the keyboard on another monitor
+//! move-to-monitor TARGET [ID]  send a view (the focused one without an ID) to another monitor, the keyboard and the pointer follow
+//! move-workspace-to-monitor TARGET  trade the workspace the pointer's monitor shows with the one TARGET shows (needs `workspaces { per-output }`)
 //! move-cursor X Y            put the pointer at X, Y (pixels in the shared space, like events)
 //! click left|right|middle    press and release that button where the pointer is
 //! toggle-overview            open the window overview, or close it when it is open
@@ -54,7 +57,15 @@
 //! Replies look like `{"ok":true,"view":{...}}`, `{"ok":true,"views":[...]}`, or
 //! `{"ok":false,"error":"..."}`. Workspace commands reply
 //! `{"ok":true,"workspace":2,"count":9}` (the shown workspace, from 1). `status` replies
-//! `{"ok":true,"views":[...],"workspace":2,"count":9}`. A view is
+//! `{"ok":true,"views":[...],"workspace":2,"count":9}`. `TARGET` of the three monitor commands is `left`,
+//! `right`, `up`, `down` (the monitor that lies that way from the one in use, from the view's
+//! for `move-to-monitor`), `next`, `prev` (left to right, then top to bottom, wrapping) or the
+//! name of a monitor as `outputs` lists it. `focus-monitor` replies `{"ok":true,"output":"DP-2"}`,
+//! `move-to-monitor` `{"ok":true,"output":"DP-2","view":{...}}` (the view is on the workspace that
+//! monitor shows), `move-workspace-to-monitor`
+//! `{"ok":true,"output":"DP-2","workspace":2,"count":9}` with the workspace now shown there. A target
+//! that is not there (the edge of the desktop, a name that is not connected) is an error reply.
+//! A view is
 //! `{"id":1,"app_id":"foot","title":"~","x":40,"y":40,"width":800,"height":600,
 //!   "maximized":false,"fullscreen":false,"focused":true,"urgent":false,"output":"DP-1",
 //!   "workspace":1,"pid":4242,"container":null}`.
@@ -239,6 +250,7 @@ use crate::ipc::events::{
     OutputColor, OutputInfo, PopupInfo, Snapshot, View,
 };
 use crate::primitives::json::{json_opt, json_str, pretty};
+use crate::primitives::layout::MonitorTarget;
 use crate::protocol::layer_shell::{is_mapped, Under};
 use crate::state::JffState;
 
@@ -331,6 +343,12 @@ pub enum Request {
     Workspace(Goto),
     /// Workspace number, counted from 1, as typed.
     MoveToWorkspace(Option<u64>, usize),
+    /// `focus-monitor TARGET`: the pointer and the keyboard go to that monitor.
+    FocusMonitor(MonitorTarget),
+    /// `move-to-monitor TARGET [ID]`: send a view to that monitor.
+    MoveToMonitor(Option<u64>, MonitorTarget),
+    /// `move-workspace-to-monitor TARGET`: trade workspaces with that monitor.
+    MoveWorkspaceToMonitor(MonitorTarget),
     /// `spawn-sh LINE`: the command line, verbatim.
     SpawnShell(String),
     /// `spawn PROG ARG...`: split on whitespace, no shell, no quoting.
@@ -354,7 +372,7 @@ pub enum Request {
 
 pub const COMMANDS: &str =
     "views, status, outputs, focused, view-info, close, maximize, unmaximize, toggle-maximize, \
-     fullscreen, unfullscreen, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, spawn, spawn-sh, \
+     fullscreen, unfullscreen, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
      screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
@@ -362,6 +380,12 @@ fn parse_workspace_number(word: &str) -> Result<usize, String> {
         .ok()
         .filter(|n| *n >= 1)
         .ok_or_else(|| format!("{word:?} is not a workspace number (they count from 1)"))
+}
+
+/// A monitor target of `focus-monitor`, `move-to-monitor` or `move-workspace-to-monitor`.
+fn parse_monitor(word: &str) -> Result<MonitorTarget, String> {
+    MonitorTarget::parse(word)
+        .ok_or_else(|| format!("{word:?} is not a monitor, use {}", MonitorTarget::WORDS))
 }
 
 /// The slot tags of `template` as a JSON array, `null` for a free slot.
@@ -496,6 +520,37 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
             return Err(
                 "move-to-workspace needs a workspace number and optionally a view id".to_string(),
             );
+        }
+        ("focus-monitor", [word]) => return Ok(Request::FocusMonitor(parse_monitor(word)?)),
+        ("focus-monitor", _) => {
+            return Err(format!(
+                "focus-monitor needs one monitor: {}",
+                MonitorTarget::WORDS
+            ));
+        }
+        ("move-to-monitor", [word]) => {
+            return Ok(Request::MoveToMonitor(None, parse_monitor(word)?));
+        }
+        ("move-to-monitor", [word, id]) => {
+            let id = id
+                .parse::<u64>()
+                .map_err(|_| format!("{id:?} is not a view id"))?;
+            return Ok(Request::MoveToMonitor(Some(id), parse_monitor(word)?));
+        }
+        ("move-to-monitor", _) => {
+            return Err(format!(
+                "move-to-monitor needs a monitor ({}) and optionally a view id",
+                MonitorTarget::WORDS
+            ));
+        }
+        ("move-workspace-to-monitor", [word]) => {
+            return Ok(Request::MoveWorkspaceToMonitor(parse_monitor(word)?));
+        }
+        ("move-workspace-to-monitor", _) => {
+            return Err(format!(
+                "move-workspace-to-monitor needs one monitor: {}",
+                MonitorTarget::WORDS
+            ));
         }
         _ => {}
     }
@@ -740,6 +795,31 @@ impl JffState {
                 Ok(format!(
                     "{{\"ok\":true,\"view\":{}}}\n",
                     self.view_json(&window)
+                ))
+            }
+            Request::FocusMonitor(target) => {
+                let output = self.focus_monitor(&target)?;
+                Ok(format!(
+                    "{{\"ok\":true,\"output\":{}}}\n",
+                    json_str(&output)
+                ))
+            }
+            Request::MoveToMonitor(id, target) => {
+                let window = self.target_window(id)?;
+                let output = self.move_to_monitor(&window, &target)?;
+                Ok(format!(
+                    "{{\"ok\":true,\"output\":{},\"view\":{}}}\n",
+                    json_str(&output),
+                    self.view_json(&window)
+                ))
+            }
+            Request::MoveWorkspaceToMonitor(target) => {
+                let output = self.move_workspace_to_monitor(&target)?;
+                Ok(format!(
+                    "{{\"ok\":true,\"output\":{},\"workspace\":{},\"count\":{}}}\n",
+                    json_str(&output),
+                    self.current_workspace() + 1,
+                    self.workspace_count()
                 ))
             }
             Request::SpawnShell(line) => {

@@ -11,6 +11,8 @@
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
+//! `binds` has three actions for several monitors, each takes one target: `left`, `right`, `up`, `down` (the monitor that lies that way from the one in use), `next`, `prev` (left to right, then top to bottom, wrapping) or the name of a monitor (`"DP-2"`, see `jff msg outputs`). `focus-monitor "right"` moves the pointer and the keyboard there (to the topmost window, or to the middle of an empty monitor). `move-to-monitor "right"` sends the focused window there, pointer and keyboard follow, and a window of a tiling container takes its container along. `move-workspace-to-monitor "right"` trades what the monitor in use shows with what that monitor shows, and needs `workspaces { per-output }`. A target that does not exist (the edge of the desktop) does nothing, a name that is not connected shows an error toast.
+//!
 //! `warp-mouse-to-focus` moves the pointer to the center of a window when it gets the keyboard by something other than the pointer (a binding, the switcher, a new window, a closed one, a taskbar, a workspace switch), also when the pointer is over it already, unless the focus came from a click, a game has locked the pointer, or a window is being dragged. Off by default.
 //!
 //! `input { … }` sets up pointer devices: `touchpad { … }` and `mouse { … }` for every device of that kind, and `device "NAME" { … }` for the one with that libinput name (jff logs the name of every device it sees, at info level), which wins over the two. Inside: `tap`, `tap-button-map "left-right-middle"|"left-middle-right"`, `drag`, `natural-scroll`, `accel-speed N` (-1 to 1), `accel-profile "flat"|"adaptive"`, `scroll-method "none"|"two-finger"|"edge"|"on-button-down"`, `scroll-button "middle"|CODE`, `disable-while-typing`, `click-method "button-areas"|"clickfinger"`, `middle-emulation`, `left-handed`, `off` and `disable-on-external-mouse`. A setting that is not there stays at the device's own default, except `tap` on a touchpad, which is on. Applied when a device is plugged in and on reload, only on the TTY backend. A setting a device doesn't support is skipped.
@@ -65,6 +67,7 @@ use crate::primitives::input_settings::{button_code, ACCEL_SPEED_RANGE};
 pub use crate::primitives::input_settings::{
     AccelProfile, ClickMethod, DeviceKind, DeviceSettings, ScrollMethod, TapButtonMap,
 };
+use crate::primitives::layout::MonitorTarget;
 
 /// Default number of workspaces.
 pub const DEFAULT_WORKSPACES: usize = 9;
@@ -212,6 +215,20 @@ pub enum Action {
     Workspace(Goto),
     /// Send the focused window to workspace `n` (0-based).
     MoveToWorkspace(usize),
+    /// Move the pointer and the keyboard to another monitor: the topmost window there gets the
+    /// keyboard and the pointer goes to its center (to the center of the monitor when it has no
+    /// window). The monitor is a direction from the one in use, `next`/`prev`, or a name
+    /// (`focus-monitor "right"`, `focus-monitor "DP-2"`).
+    FocusMonitor(MonitorTarget),
+    /// Send the focused window to another monitor, with the pointer and the keyboard following
+    /// it. It keeps its place on the monitor (a maximized, snapped or fullscreen window is
+    /// fitted to the new one), and lands on the workspace that monitor shows. A window of a
+    /// tiling container takes its container along.
+    MoveToMonitor(MonitorTarget),
+    /// Trade places with another monitor: the windows of the workspace the monitor in use shows
+    /// go to that monitor, and its windows come here, each monitor keeps showing the workspace
+    /// number it showed. The pointer follows. Needs `workspaces { per-output }`.
+    MoveWorkspaceToMonitor(MonitorTarget),
     /// Re-read the config file.
     ReloadConfig,
     /// Screenshot: frozen picture of the monitor under the pointer, drag a rectangle.
@@ -3039,6 +3056,23 @@ fn parse_action(node: &KdlNode) -> anyhow::Result<Action> {
                 "apply-container-layout takes one layout name, like apply-container-layout \"Dev\""
             ),
         },
+        "focus-monitor" | "move-to-monitor" | "move-workspace-to-monitor" => {
+            let target = match <[String; 1]>::try_from(args) {
+                Ok([word]) => MonitorTarget::parse(&word),
+                Err(_) => None,
+            }
+            .with_context(|| {
+                format!(
+                    "{name} takes one monitor ({}), like {name} \"right\"",
+                    MonitorTarget::WORDS
+                )
+            })?;
+            Ok(match name {
+                "focus-monitor" => Action::FocusMonitor(target),
+                "move-to-monitor" => Action::MoveToMonitor(target),
+                _ => Action::MoveWorkspaceToMonitor(target),
+            })
+        }
         "quit" => no_args(Action::Quit),
         other => bail!("unknown action {other:?}"),
     }

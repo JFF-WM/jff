@@ -109,16 +109,7 @@ impl JffState {
             return;
         }
 
-        // The overview, a move/resize, and an open menu all hold windows of the workspace
-        // that's about to disappear, let go first. Panel menus go too, they'd otherwise stay
-        // open over a workspace they weren't opened on.
-        self.dismiss_popups();
-        self.abort_overview();
-        if let Some(pointer) = self.seat.get_pointer() {
-            if pointer.is_grabbed() {
-                pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), InputTime::now());
-            }
-        }
+        self.let_go_of_windows();
 
         if self.desk.per_output() {
             tracing::info!("workspace {} -> {} on {output}", before + 1, target + 1);
@@ -128,6 +119,20 @@ impl JffState {
         self.desk.set_current_on(output, target);
         self.refocus_topmost();
         self.refresh_pointer_focus();
+    }
+
+    /// The overview, a move/resize, and an open menu all hold windows that are about to
+    /// disappear or move away (a workspace switch, a window sent to another monitor), let go
+    /// of them first. Panel menus go too, they'd otherwise stay open over a place they weren't
+    /// opened on.
+    pub fn let_go_of_windows(&mut self) {
+        self.dismiss_popups();
+        self.abort_overview();
+        if let Some(pointer) = self.seat.get_pointer() {
+            if pointer.is_grabbed() {
+                pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), InputTime::now());
+            }
+        }
     }
 
     /// Show the workspace `window` lives on (it may be hidden right now), on its monitor.

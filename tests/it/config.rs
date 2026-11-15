@@ -19,6 +19,7 @@ use jff_wm::config::{
 use jff_wm::config::{ContainerRule, RuleOutput, WindowFacts, WindowMatch};
 use jff_wm::desk::{Goto, Side};
 use jff_wm::primitives::hdr_output::ToneMap;
+use jff_wm::primitives::layout::MonitorTarget;
 
 fn mods(ctrl: bool, alt: bool, shift: bool, logo: bool) -> ModifiersState {
     ModifiersState {
@@ -2290,4 +2291,51 @@ fn rejects_bad_output_transforms() {
     assert!(Config::parse(r#"outputs { output "DP-1" { transform "45"; } }"#).is_err());
     assert!(Config::parse(r#"outputs { output "DP-1" { transform 90; } }"#).is_err());
     assert!(Config::parse(r#"outputs { output "DP-1" { transform "90" "180"; } }"#).is_err());
+}
+
+#[test]
+fn monitor_actions_are_parsed() {
+    let config = Config::parse(
+        r#"binds {
+            Super+Right { focus-monitor "right"; }
+            Super+Left { focus-monitor "left"; }
+            Super+Shift+Right { move-to-monitor "next"; }
+            Super+Ctrl+Up { move-workspace-to-monitor "Up"; }
+            Super+Shift+M { move-to-monitor "DP-2"; }
+        }"#,
+    )
+    .unwrap();
+    let logo = mods(false, false, false, true);
+    let logo_shift = mods(false, false, true, true);
+    assert_eq!(
+        config.action_for(&logo, key("Right")),
+        Some(&Action::FocusMonitor(MonitorTarget::Right))
+    );
+    assert_eq!(
+        config.action_for(&logo, key("Left")),
+        Some(&Action::FocusMonitor(MonitorTarget::Left))
+    );
+    assert_eq!(
+        config.action_for(&logo_shift, key("Right")),
+        Some(&Action::MoveToMonitor(MonitorTarget::Next))
+    );
+    assert_eq!(
+        config.action_for(&mods(true, false, false, true), key("Up")),
+        Some(&Action::MoveWorkspaceToMonitor(MonitorTarget::Up))
+    );
+    assert_eq!(
+        config.action_for(&logo_shift, key("m")),
+        Some(&Action::MoveToMonitor(MonitorTarget::Named(
+            "DP-2".to_string()
+        )))
+    );
+}
+
+#[test]
+fn rejects_bad_monitor_actions() {
+    assert!(Config::parse("binds { Alt+1 { focus-monitor; } }").is_err());
+    assert!(Config::parse(r#"binds { Alt+1 { focus-monitor ""; } }"#).is_err());
+    assert!(Config::parse(r#"binds { Alt+1 { focus-monitor "left" "right"; } }"#).is_err());
+    assert!(Config::parse("binds { Alt+1 { move-to-monitor 2; } }").is_err());
+    assert!(Config::parse("binds { Alt+1 { move-workspace-to-monitor; } }").is_err());
 }

@@ -1,8 +1,9 @@
 //! Tests for `jff_wm::primitives::layout`.
 
 use jff_wm::primitives::layout::{
-    arrange, bounds, clamp_to_rects, dialog_pos, fit_into, hot_corner_barrier, hot_corner_rect,
-    inside_any_corner, intersects, nearest, reachable, Rect,
+    arrange, bounds, carry_pos, center_in, clamp_to_rects, cycle, dialog_pos, fit_into,
+    hot_corner_barrier, hot_corner_rect, inside_any_corner, intersects, nearest, neighbor,
+    reachable, Direction, MonitorTarget, Rect,
 };
 
 const A: Rect = (0, 0, 1920, 1080);
@@ -230,4 +231,149 @@ fn a_dialog_too_big_for_the_monitor_keeps_its_corner_reachable() {
         dialog_pos((3000, 2000), Some((0, 0, 800, 600)), A, 40),
         (40, 40)
     );
+}
+
+/// Three monitors in a row, plugged in in a different order than they sit.
+const ROW: [Rect; 3] = [
+    (1920, 0, 1920, 1080),
+    (0, 0, 1920, 1080),
+    (3840, 0, 1280, 1024),
+];
+
+#[test]
+fn neighbors_in_a_row() {
+    // ROW[1] is on the left, ROW[0] in the middle, ROW[2] on the right.
+    assert_eq!(neighbor(&ROW, 0, Direction::Left), Some(1));
+    assert_eq!(neighbor(&ROW, 0, Direction::Right), Some(2));
+    assert_eq!(neighbor(&ROW, 1, Direction::Right), Some(0));
+    assert_eq!(neighbor(&ROW, 2, Direction::Left), Some(0));
+    // The edges of the desktop, and nothing above or below a row.
+    assert_eq!(neighbor(&ROW, 1, Direction::Left), None);
+    assert_eq!(neighbor(&ROW, 2, Direction::Right), None);
+    assert_eq!(neighbor(&ROW, 0, Direction::Up), None);
+    assert_eq!(neighbor(&ROW, 0, Direction::Down), None);
+}
+
+#[test]
+fn neighbors_above_and_below() {
+    let rects = [A, (0, 1080, 1920, 1080)];
+    assert_eq!(neighbor(&rects, 0, Direction::Down), Some(1));
+    assert_eq!(neighbor(&rects, 1, Direction::Up), Some(0));
+    assert_eq!(neighbor(&rects, 0, Direction::Right), None);
+}
+
+#[test]
+fn the_closest_facing_monitor_wins() {
+    // Two to the right of A: a near one that faces it and a far one, the near one is next.
+    let rects = [A, (3200, 0, 1280, 1024), (1920, 0, 1280, 1024)];
+    assert_eq!(neighbor(&rects, 0, Direction::Right), Some(2));
+    // A monitor that faces A beats a nearer one that only lies diagonally.
+    let rects = [A, (1920, 1500, 800, 600), (2720, 0, 1280, 1024)];
+    assert_eq!(neighbor(&rects, 0, Direction::Right), Some(2));
+    // Without one that faces it, the diagonal one is still to the right.
+    let rects = [A, (1920, 1500, 800, 600)];
+    assert_eq!(neighbor(&rects, 0, Direction::Right), Some(1));
+}
+
+#[test]
+fn a_monitor_that_is_off_is_nobodys_neighbor() {
+    let rects = [A, (1920, 0, 0, 0), B];
+    assert_eq!(neighbor(&rects, 0, Direction::Right), Some(2));
+    assert_eq!(cycle(&rects, 0, false), Some(2));
+}
+
+#[test]
+fn neighbor_of_nothing_is_nothing() {
+    assert_eq!(neighbor(&[], 0, Direction::Left), None);
+    assert_eq!(neighbor(&ROW, 7, Direction::Left), None);
+}
+
+#[test]
+fn cycling_goes_by_position_and_wraps() {
+    // Left to right: ROW[1], ROW[0], ROW[2].
+    assert_eq!(cycle(&ROW, 1, false), Some(0));
+    assert_eq!(cycle(&ROW, 0, false), Some(2));
+    assert_eq!(cycle(&ROW, 2, false), Some(1));
+    assert_eq!(cycle(&ROW, 1, true), Some(2));
+    assert_eq!(cycle(&ROW, 0, true), Some(1));
+}
+
+#[test]
+fn cycling_needs_another_monitor() {
+    assert_eq!(cycle(&[A], 0, false), None);
+    assert_eq!(cycle(&[], 0, false), None);
+    assert_eq!(cycle(&ROW, 9, false), None);
+    // Two on top of each other: top to bottom.
+    let stacked = [(0, 1080, 1920, 1080), A];
+    assert_eq!(cycle(&stacked, 1, false), Some(0));
+    assert_eq!(cycle(&stacked, 0, false), Some(1));
+}
+
+#[test]
+fn monitor_targets_are_parsed() {
+    assert_eq!(MonitorTarget::parse("left"), Some(MonitorTarget::Left));
+    assert_eq!(MonitorTarget::parse("RIGHT"), Some(MonitorTarget::Right));
+    assert_eq!(MonitorTarget::parse("Up"), Some(MonitorTarget::Up));
+    assert_eq!(MonitorTarget::parse("down"), Some(MonitorTarget::Down));
+    assert_eq!(MonitorTarget::parse("next"), Some(MonitorTarget::Next));
+    assert_eq!(MonitorTarget::parse("prev"), Some(MonitorTarget::Prev));
+    // Anything else is a name, kept as it is.
+    assert_eq!(
+        MonitorTarget::parse("DP-2"),
+        Some(MonitorTarget::Named("DP-2".to_string()))
+    );
+    assert_eq!(MonitorTarget::parse(""), None);
+    assert_eq!(MonitorTarget::parse("   "), None);
+}
+
+#[test]
+fn monitor_targets_are_resolved() {
+    let names: Vec<String> = ["DP-1", "HDMI-1", "DP-2"].map(String::from).to_vec();
+    // DP-1 is in the middle (ROW[0]).
+    assert_eq!(MonitorTarget::Left.resolve(&ROW, &names, 0), Ok(1));
+    assert_eq!(MonitorTarget::Right.resolve(&ROW, &names, 0), Ok(2));
+    assert_eq!(MonitorTarget::Next.resolve(&ROW, &names, 0), Ok(2));
+    assert_eq!(MonitorTarget::Prev.resolve(&ROW, &names, 0), Ok(1));
+    assert_eq!(
+        MonitorTarget::Named("DP-2".to_string()).resolve(&ROW, &names, 0),
+        Ok(2)
+    );
+    // A name can be the monitor in use, a way never is.
+    assert_eq!(
+        MonitorTarget::Named("DP-1".to_string()).resolve(&ROW, &names, 0),
+        Ok(0)
+    );
+    assert!(MonitorTarget::Up.resolve(&ROW, &names, 0).is_err());
+    assert!(MonitorTarget::Left.resolve(&ROW, &names, 1).is_err());
+    assert!(MonitorTarget::Next.resolve(&[A], &names, 0).is_err());
+    let missing = MonitorTarget::Named("DP-9".to_string()).resolve(&ROW, &names, 0);
+    assert!(missing.unwrap_err().contains("DP-9"));
+}
+
+#[test]
+fn a_window_keeps_its_offset_when_it_goes_to_another_monitor() {
+    // 100 px in and 50 px down from the corner of A: the same on B.
+    assert_eq!(carry_pos((100, 50), (400, 300), A, B), (1920 + 100, 50));
+    // And back.
+    assert_eq!(carry_pos((2020, 50), (400, 300), B, A), (100, 50));
+}
+
+#[test]
+fn a_window_that_does_not_fit_the_new_monitor_is_moved_inside() {
+    let small: Rect = (1920, 0, 800, 600);
+    // 1500 px in on a monitor that is 800 wide: pushed back until it fits.
+    assert_eq!(
+        carry_pos((1500, 700), (400, 300), A, small),
+        (1920 + 800 - 400, 600 - 300)
+    );
+}
+
+#[test]
+fn a_window_is_centered_in_a_monitor() {
+    assert_eq!(
+        center_in((400, 200), B),
+        (1920 + (1280 - 400) / 2, (1024 - 200) / 2)
+    );
+    // One bigger than the monitor hangs over evenly.
+    assert_eq!(center_in((2000, 1200), A), (-40, -60));
 }
