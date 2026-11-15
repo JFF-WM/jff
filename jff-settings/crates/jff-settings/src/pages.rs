@@ -19,11 +19,15 @@ pub enum Kind {
         optional: bool,
         positional: bool,
     },
+    /// Decimal number. `digits` is how many decimals the row shows, `optional` adds a reset
+    /// button that removes the key.
     Float {
         min: f64,
         max: f64,
         step: f64,
+        digits: u32,
         default: f64,
+        optional: bool,
     },
     /// Bare name is on, `#false` is off.
     Flag { default: bool },
@@ -38,6 +42,12 @@ pub enum Kind {
     Choice {
         options: &'static [(&'static str, &'static str)],
         default: &'static str,
+    },
+    /// Like `Choice`, but the first entry (`unset`) removes the key, so the device or the
+    /// compositor keeps its own default.
+    Pick {
+        options: &'static [(&'static str, &'static str)],
+        unset: &'static str,
     },
     /// Free text, empty removes the key. Applied with Enter or the check button.
     Text,
@@ -54,6 +64,13 @@ pub enum Kind {
         min: i64,
         max: i64,
         default: (i64, i64),
+    },
+    /// Three decimal numbers on one line, like `hdr-white-balance R G B`. Can be reset.
+    Triple {
+        min: f64,
+        max: f64,
+        step: f64,
+        default: [f64; 3],
     },
 }
 
@@ -97,6 +114,10 @@ pub enum Body {
     Outputs(Vec<Group>),
     Rules,
     Binds,
+    /// Touchpad and mouse groups, then the list of single devices.
+    Pointer,
+    /// The `tiling-containers` switch, then the container rules.
+    Containers,
 }
 
 pub struct Page {
@@ -125,7 +146,7 @@ impl Page {
         };
         match &self.body {
             Body::Groups(groups) | Body::Outputs(groups) => groups.iter().for_each(&mut add_group),
-            Body::Rules | Body::Binds => {}
+            Body::Rules | Body::Binds | Body::Pointer | Body::Containers => {}
         }
         text.to_lowercase()
     }
@@ -148,13 +169,19 @@ pub fn build() -> Vec<Page> {
         Page {
             id: "multitasking",
             title: "Multitasking",
-            keywords: "workspaces hot corner overview switcher alt tab wall drag maximize",
+            keywords: "workspaces hot corner overview switcher alt tab wall drag maximize focus follows mouse warp",
             body: Body::Groups(multitasking()),
+        },
+        Page {
+            id: "containers",
+            title: "Containers",
+            keywords: "tiling groups tile layout name match app id title tag",
+            body: Body::Containers,
         },
         Page {
             id: "displays",
             title: "Displays",
-            keywords: "monitor output resolution mode refresh rate hdr tone map bt2390 knee content metadata sdr white peak icc profile position vrr tearing color management",
+            keywords: "monitor output resolution mode refresh rate hdr tone map bt2390 knee content metadata sdr white peak icc profile position vrr tearing color management transfer gamma contrast saturation white balance black level shadow gamut luminance",
             body: Body::Outputs(displays()),
         },
         Page {
@@ -162,6 +189,12 @@ pub fn build() -> Vec<Page> {
             title: "Keyboard",
             keywords: "layout xkb variant repeat delay num lock hotkeys",
             body: Body::Groups(keyboard()),
+        },
+        Page {
+            id: "pointer",
+            title: "Mouse & Touchpad",
+            keywords: "cursor theme size hide typing pointer input tap click scroll natural acceleration speed profile flat adaptive left handed middle emulation device libinput typing external",
+            body: Body::Pointer,
         },
         Page {
             id: "shortcuts",
@@ -178,13 +211,13 @@ pub fn build() -> Vec<Page> {
         Page {
             id: "startup",
             title: "Startup Applications",
-            keywords: "autostart programs commands shell login",
+            keywords: "autostart programs commands shell login restore session apps",
             body: Body::Groups(startup()),
         },
         Page {
             id: "system",
             title: "System",
-            keywords: "screenshots log file level folder clipboard cursor",
+            keywords: "screenshots log file level folder clipboard",
             body: Body::Groups(system()),
         },
     ]
@@ -226,6 +259,50 @@ fn int(
             block_default: None,
             optional: false,
             positional: false,
+        },
+    )
+}
+
+fn float(
+    path: &'static [&'static str],
+    title: &'static str,
+    subtitle: &'static str,
+    (min, max, step, digits): (f64, f64, f64, u32),
+    default: f64,
+) -> Field {
+    field(
+        path,
+        title,
+        subtitle,
+        Kind::Float {
+            min,
+            max,
+            step,
+            digits,
+            default,
+            optional: false,
+        },
+    )
+}
+
+fn pick(
+    path: &'static [&'static str],
+    title: &'static str,
+    subtitle: &'static str,
+    options: &'static [(&'static str, &'static str)],
+    unset: &'static str,
+) -> Field {
+    field(path, title, subtitle, Kind::Pick { options, unset })
+}
+
+/// On, off, or left to the device.
+fn tri(path: &'static [&'static str], title: &'static str, subtitle: &'static str) -> Field {
+    field(
+        path,
+        title,
+        subtitle,
+        Kind::Tri {
+            unset: "Device Default",
         },
     )
 }
@@ -279,7 +356,9 @@ impl Field {
 
     fn optional(mut self) -> Self {
         match &mut self.kind {
-            Kind::Int { optional, .. } | Kind::Color { optional, .. } => *optional = true,
+            Kind::Int { optional, .. }
+            | Kind::Float { optional, .. }
+            | Kind::Color { optional, .. } => *optional = true,
             _ => {}
         }
         self
@@ -346,7 +425,15 @@ fn list(
 // ------------------------------------------------------------------- pages
 
 fn appearance() -> Vec<Group> {
-    const ANIMATE: &[(&str, &str)] = &[("none", "None"), ("spin", "Spin"), ("sweep", "Sweep")];
+    const ANIMATE: &[(&str, &str)] = &[
+        ("none", "None"),
+        ("spin", "Spin"),
+        ("sweep", "Sweep"),
+        ("smoke", "Smoke"),
+        ("neon", "Neon"),
+        ("aurora", "Aurora"),
+    ];
+    const LOOK: &[(&str, &str)] = &[("plain", "Plain"), ("paper", "Paper")];
     vec![
         group(
             "Windows",
@@ -403,6 +490,13 @@ fn appearance() -> Vec<Group> {
                     0,
                     5_000,
                     150,
+                ),
+                choice(
+                    &["border", "look"],
+                    "Look",
+                    "Paper draws the border as a sheet around the window",
+                    LOOK,
+                    "plain",
                 ),
                 color(&["border", "color"], "Color", "#595966ff"),
                 color(&["border", "focus-color"], "Focused Color", "#598cf2ff"),
@@ -475,7 +569,9 @@ fn effects() -> Vec<Group> {
                         min: 0.1,
                         max: 64.0,
                         step: 0.5,
+                        digits: 1,
                         default: 3.0,
+                        optional: false,
                     },
                 ),
                 flag(&["blur", "all-windows"], "Blur All Windows", "", false),
@@ -574,6 +670,23 @@ fn multitasking() -> Vec<Group> {
                     &["workspaces", "per-output"],
                     "Workspaces on Each Display",
                     "Every monitor gets its own set",
+                    false,
+                ),
+            ],
+        ),
+        group(
+            "Focus",
+            vec![
+                flag(
+                    &["focus-follows-mouse"],
+                    "Focus Follows Mouse",
+                    "The keyboard moves to the window under the pointer",
+                    false,
+                ),
+                flag(
+                    &["warp-mouse-to-focus"],
+                    "Mouse Follows Focus",
+                    "The pointer jumps to a window that gets focus by other means, like Alt+Tab. Use it with Focus Follows Mouse",
                     false,
                 ),
             ],
@@ -785,6 +898,15 @@ fn keyboard() -> Vec<Group> {
 
 fn startup() -> Vec<Group> {
     vec![
+        group(
+            "Session",
+            vec![flag(
+                &["restore-apps"],
+                "Restore Apps From the Last Session",
+                "Starts the apps that were open when jff last ran and puts their windows back on their display and workspace. Read at startup",
+                false,
+            )],
+        ),
         group("", Vec::new()).lists(vec![TextList {
             parent: &[],
             name: "autostart",
@@ -855,6 +977,17 @@ pub fn output_fields() -> Vec<Field> {
         ("always", "Always"),
     ];
     const TONE_MAP: &[(&str, &str)] = &[("knee", "Knee"), ("bt2390", "BT.2390")];
+    const TRANSFORM: &[(&str, &str)] = &[
+        ("90", "Rotate 90° Counter-Clockwise"),
+        ("180", "Rotate 180°"),
+        ("270", "Rotate 270° Counter-Clockwise"),
+        ("flipped", "Flip"),
+        ("flipped-90", "Flip and Rotate 90°"),
+        ("flipped-180", "Flip and Rotate 180°"),
+        ("flipped-270", "Flip and Rotate 270°"),
+    ];
+    const SDR_TRANSFER: &[(&str, &str)] = &[("srgb", "sRGB"), ("gamma22", "Gamma 2.2")];
+    const GAMUT_MAP: &[(&str, &str)] = &[("compress", "Compress"), ("clip", "Clip")];
     vec![
         field(&["off"], "Turn Off This Display", "", Kind::Presence),
         field(
@@ -872,6 +1005,13 @@ pub fn output_fields() -> Vec<Field> {
             "Mode",
             "Read from wlr-randr. Automatic is the display's preferred mode",
             Kind::Mode,
+        ),
+        pick(
+            &["transform"],
+            "Rotation",
+            "Turns the picture onto the panel, for a display that is mounted sideways or upside down",
+            TRANSFORM,
+            "Normal",
         ),
         choice(
             &["adaptive-sync"],
@@ -895,6 +1035,13 @@ pub fn output_fields() -> Vec<Field> {
             203,
         )
         .optional(),
+        choice(
+            &["sdr-transfer"],
+            "SDR Decoding",
+            "How SDR windows are read on an HDR display. Gamma 2.2 gives the darker darks most SDR displays show. Only used with HDR on",
+            SDR_TRANSFER,
+            "srgb",
+        ),
         int(
             &["hdr-peak"],
             "HDR Peak",
@@ -904,6 +1051,49 @@ pub fn output_fields() -> Vec<Field> {
             400,
         )
         .optional(),
+        float(
+            &["hdr-min-luminance"],
+            "Display Black Level",
+            "Black of the panel in cd/m², used instead of the one the display reports. The shadows are raised off it. Only used with HDR on",
+            (0.0, 1.0, 0.01, 3),
+            0.0,
+        )
+        .optional(),
+        float(
+            &["hdr-contrast"],
+            "Contrast",
+            "Around SDR white. Above 1 darks go down and highlights go up, under 1 the picture is flatter. Only used with HDR on",
+            (0.5, 2.0, 0.05, 2),
+            1.0,
+        )
+        .optional(),
+        float(
+            &["hdr-black-level"],
+            "Shadow Lift",
+            "Light added to the shadows in cd/m². A negative value crushes them. Only used with HDR on",
+            (-5.0, 5.0, 0.1, 2),
+            0.0,
+        )
+        .optional(),
+        float(
+            &["hdr-saturation"],
+            "Saturation",
+            "Color intensity, brightness is kept. 0 is gray. Only used with HDR on",
+            (0.0, 2.0, 0.05, 2),
+            1.0,
+        )
+        .optional(),
+        field(
+            &["hdr-white-balance"],
+            "White Balance",
+            "Gain of red, green and blue. Lower blue for a warmer picture. Only used with HDR on",
+            Kind::Triple {
+                min: 0.5,
+                max: 1.5,
+                step: 0.01,
+                default: [1.0, 1.0, 1.0],
+            },
+        ),
         choice(
             &["hdr-tone-map"],
             "HDR Tone Mapping",
@@ -916,6 +1106,13 @@ pub fn output_fields() -> Vec<Field> {
             "Use Content Brightness",
             "Fits the roll-off to the peak the content states. Only used with HDR on",
             true,
+        ),
+        choice(
+            &["hdr-gamut-map"],
+            "Out-of-Gamut Colors",
+            "Compress moves colors the display can't show toward gray, Clip cuts each channel. Needs the display's primaries. Only used with HDR on",
+            GAMUT_MAP,
+            "compress",
         ),
         text(&["icc-profile"], "ICC Profile Path"),
         field(
@@ -961,6 +1158,34 @@ pub fn rule_fields() -> Vec<Field> {
                 default: (800, 600),
             },
         ),
+        float(
+            &["opacity"],
+            "Opacity",
+            "How opaque the window is drawn, from 0 (invisible) to 1. Set when the window opens",
+            (0.0, 1.0, 0.05, 2),
+            1.0,
+        )
+        .optional(),
+        text(&["tag"], "Give the Window a Tag"),
+        text(
+            &["open-in-container"],
+            "Open in Container, Needs Tiling Containers",
+        ),
+        int(
+            &["sdr-white"],
+            "SDR White",
+            "Brightness of this window's SDR white on an HDR display, in cd/m², instead of the display's",
+            10,
+            1000,
+            300,
+        )
+        .optional(),
+        field(
+            &["sdr"],
+            "Read as sRGB",
+            "Shows the window as plain sRGB whatever its client tagged it. Only used on an HDR display",
+            Kind::Tri { unset: "Default" },
+        ),
         flag(
             &["floating"],
             "Floating",
@@ -968,4 +1193,212 @@ pub fn rule_fields() -> Vec<Field> {
             false,
         ),
     ]
+}
+
+/// Which block of `input { }` the rows are for.
+#[derive(Clone, Copy, PartialEq)]
+pub enum DeviceBlock {
+    Touchpad,
+    Mouse,
+    /// One `device "NAME"`: everything.
+    Device,
+}
+
+/// Rows for `input { touchpad }`, `input { mouse }` or one `input { device "NAME" }`,
+/// relative to that node. A row left on Device Default removes its line.
+pub fn device_fields(block: DeviceBlock) -> Vec<Field> {
+    const TAP_MAP: &[(&str, &str)] = &[
+        (
+            "left-right-middle",
+            "One Finger Left, Two Right, Three Middle",
+        ),
+        (
+            "left-middle-right",
+            "One Finger Left, Two Middle, Three Right",
+        ),
+    ];
+    const ACCEL: &[(&str, &str)] = &[("adaptive", "Adaptive"), ("flat", "Flat")];
+    const SCROLL: &[(&str, &str)] = &[
+        ("two-finger", "Two Fingers"),
+        ("edge", "Edge"),
+        ("on-button-down", "While Holding a Button"),
+        ("none", "Off"),
+    ];
+    const SCROLL_BUTTON: &[(&str, &str)] = &[
+        ("left", "Left"),
+        ("right", "Right"),
+        ("middle", "Middle"),
+        ("side", "Side"),
+        ("extra", "Extra"),
+        ("forward", "Forward"),
+        ("back", "Back"),
+    ];
+    const CLICK: &[(&str, &str)] = &[
+        ("button-areas", "Button Areas"),
+        ("clickfinger", "Number of Fingers"),
+    ];
+    let touchpad = block != DeviceBlock::Mouse;
+    let mut rows = Vec::new();
+    if touchpad {
+        rows.push(tri(
+            &["tap"],
+            "Tap to Click",
+            "On when not set, for a touchpad",
+        ));
+        rows.push(pick(
+            &["tap-button-map"],
+            "Tap Buttons",
+            "Which button one, two and three finger taps press",
+            TAP_MAP,
+            "Device Default",
+        ));
+        rows.push(tri(
+            &["drag"],
+            "Tap and Drag",
+            "Tap, then touch and move to drag",
+        ));
+        rows.push(tri(
+            &["disable-while-typing"],
+            "Disable While Typing",
+            "Ignore touches while typing",
+        ));
+        rows.push(pick(
+            &["click-method"],
+            "Click Method",
+            "How a press on the pad becomes a left, right or middle click",
+            CLICK,
+            "Device Default",
+        ));
+        rows.push(tri(
+            &["disable-on-external-mouse"],
+            "Disable With an External Mouse",
+            "Send nothing while a mouse is plugged in",
+        ));
+    }
+    rows.push(tri(
+        &["natural-scroll"],
+        "Natural Scrolling",
+        "Content follows the fingers",
+    ));
+    rows.push(
+        float(
+            &["accel-speed"],
+            "Pointer Speed",
+            "From -1 (slowest) to 1 (fastest)",
+            (-1.0, 1.0, 0.1, 2),
+            0.0,
+        )
+        .optional(),
+    );
+    rows.push(pick(
+        &["accel-profile"],
+        "Acceleration",
+        "Flat moves the pointer the same distance whatever the speed",
+        ACCEL,
+        "Device Default",
+    ));
+    rows.push(pick(
+        &["scroll-method"],
+        "Scroll Method",
+        "",
+        SCROLL,
+        "Device Default",
+    ));
+    rows.push(pick(
+        &["scroll-button"],
+        "Scroll Button",
+        "The button held for scrolling with While Holding a Button. A numeric code written by hand is kept until this is changed",
+        SCROLL_BUTTON,
+        "Device Default",
+    ));
+    rows.push(tri(
+        &["middle-emulation"],
+        "Middle Click Emulation",
+        "Both buttons together are a middle click",
+    ));
+    rows.push(tri(
+        &["left-handed"],
+        "Left-Handed",
+        "Swap the left and right buttons",
+    ));
+    rows.push(tri(&["off"], "Turn Off This Device", "Send nothing at all"));
+    rows
+}
+
+pub fn touchpad_groups() -> Vec<Group> {
+    vec![Group {
+        title: "Touchpad",
+        description: "Applies to every touchpad. A row on Device Default keeps what the touchpad does on its own",
+        fields: device_fields(DeviceBlock::Touchpad),
+        lists: Vec::new(),
+        gated: false,
+    }]
+}
+
+pub fn mouse_groups() -> Vec<Group> {
+    vec![Group {
+        title: "Mouse",
+        description: "Applies to every other pointer device: mice, trackballs and pointing sticks",
+        fields: device_fields(DeviceBlock::Mouse),
+        lists: Vec::new(),
+        gated: false,
+    }]
+}
+
+/// The `tiling-containers` switch.
+pub fn container_groups() -> Vec<Group> {
+    vec![group(
+        "Tiling Containers",
+        vec![flag(
+            &["tiling-containers"],
+            "Tiling Containers",
+            "Groups of windows that tile among themselves. Needed by container rules, Open in Container and the container shortcuts",
+            false,
+        )],
+    )]
+}
+
+/// Rows for one `container-rule { }`, relative to that node.
+pub fn container_rule_fields() -> Vec<Field> {
+    vec![
+        field(&["match"], "Match App ID", "", Kind::Text).prop("app-id"),
+        field(&["match"], "Match Title", "", Kind::Text).prop("title"),
+        field(&["match"], "Match Tag", "", Kind::Text).prop("tag"),
+        text(&["name"], "Container Name"),
+        text(&["layout"], "Saved Layout to Apply"),
+    ]
+}
+
+/// Rows for the cursor.
+pub fn cursor_groups() -> Vec<Group> {
+    vec![group(
+        "Cursor",
+        vec![
+            text(&["cursor", "theme"], "Theme"),
+            int(
+                &["cursor", "size"],
+                "Size",
+                "In pixels. Falls back to $XCURSOR_SIZE, then 24. An app that is already open keeps the size it read at its start",
+                1,
+                512,
+                24,
+            )
+            .optional(),
+            flag(
+                &["cursor", "hide-when-typing"],
+                "Hide While Typing",
+                "Back when the pointer moves",
+                false,
+            ),
+            int(
+                &["cursor", "hide-after-ms"],
+                "Hide After Resting",
+                "Milliseconds the pointer rests before it hides, 0 for never",
+                0,
+                600_000,
+                0,
+            ),
+        ],
+    )
+    .described("The theme is an XCursor folder name from ~/.icons or /usr/share/icons, and falls back to $XCURSOR_THEME, then default")]
 }

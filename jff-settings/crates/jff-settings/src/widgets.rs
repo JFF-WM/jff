@@ -169,7 +169,7 @@ fn mode_row(
         .and_then(|arg| arg.as_str().map(str::to_owned))
         .filter(|value| !value.is_empty());
 
-    // (value in the file, label); `None` is Automatic.
+    // (value in the file, label), `None` is Automatic.
     let mut items: Vec<(Option<String>, String)> = vec![(None, "Automatic".to_owned())];
     items.extend(modes.iter().map(|m| (Some(m.value()), m.label())));
     let selected = match &current {
@@ -340,16 +340,36 @@ pub fn build_row(
             min,
             max,
             step,
+            digits,
             default,
+            optional,
         } => {
+            let default = *default;
             let row = adw::SpinRow::with_range(*min, *max, *step);
             row.set_numeric(true);
             titled(&row, field);
-            row.set_digits(1);
-            let current = ctx.cfg.borrow().get_float(&refs(&path)).unwrap_or(*default);
+            row.set_digits(*digits);
+            let current = ctx.cfg.borrow().get_float(&refs(&path)).unwrap_or(default);
             row.set_value(current);
+            let silent = Rc::new(Cell::new(false));
+            if *optional {
+                let button = clear_button("Reset to Default");
+                row.add_suffix(&button);
+                let (ctx, path, row, silent) =
+                    (ctx.clone(), path.clone(), row.clone(), silent.clone());
+                button.connect_clicked(move |_| {
+                    clear(&mut ctx.cfg.borrow_mut(), &path, prop);
+                    silent.set(true);
+                    row.set_value(default);
+                    silent.set(false);
+                    (ctx.changed)();
+                });
+            }
             let ctx = ctx.clone();
             row.connect_value_notify(move |r| {
+                if silent.get() {
+                    return;
+                }
                 ctx.cfg.borrow_mut().set_float(&refs(&path), r.value());
                 (ctx.changed)();
             });
@@ -465,6 +485,37 @@ pub fn build_row(
             });
             (row.upcast(), true)
         }
+        Kind::Pick { options, unset } => {
+            let options: &'static [(&'static str, &'static str)] = *options;
+            let row = adw::ComboRow::new();
+            titled(&row, field);
+            let mut labels: Vec<&str> = vec![*unset];
+            labels.extend(options.iter().map(|(_, label)| *label));
+            row.set_model(Some(&gtk::StringList::new(&labels)));
+            let selected = ctx
+                .cfg
+                .borrow()
+                .get_str(&refs(&path))
+                .and_then(|current| {
+                    options
+                        .iter()
+                        .position(|(value, _)| value.eq_ignore_ascii_case(&current))
+                })
+                .map_or(0, |i| i as u32 + 1);
+            row.set_selected(selected);
+            let ctx = ctx.clone();
+            row.connect_selected_notify(move |r| {
+                let sel = r.selected() as usize;
+                let mut cfg = ctx.cfg.borrow_mut();
+                match sel.checked_sub(1).and_then(|i| options.get(i)) {
+                    Some((value, _)) => cfg.set_str(&refs(&path), value),
+                    None => cfg.remove(&refs(&path)),
+                }
+                drop(cfg);
+                (ctx.changed)();
+            });
+            (row.upcast(), true)
+        }
         Kind::Text => (text_row(field.title, path, prop, ctx), true),
         Kind::Mode => (mode_row(field, root, path, prop, ctx), true),
         Kind::Color { default, optional } => {
@@ -562,6 +613,73 @@ pub fn build_row(
             let w = write.clone();
             first.connect_value_changed(move |_| w());
             second.connect_value_changed(move |_| write());
+            (row.upcast(), true)
+        }
+        Kind::Triple {
+            min,
+            max,
+            step,
+            default,
+        } => {
+            let default = *default;
+            let row = adw::ActionRow::new();
+            titled(&row, field);
+            let spin = |value: f64| {
+                let s = gtk::SpinButton::with_range(*min, *max, *step);
+                s.set_digits(2);
+                s.set_valign(gtk::Align::Center);
+                s.set_value(value);
+                s
+            };
+            let current = match ctx.cfg.borrow().args(&refs(&path)).as_slice() {
+                [a, b, c] => {
+                    let num = |arg: &Arg| match arg {
+                        Arg::Float(f) => Some(*f),
+                        Arg::Int(i) => Some(*i as f64),
+                        _ => None,
+                    };
+                    match (num(a), num(b), num(c)) {
+                        (Some(a), Some(b), Some(c)) => [a, b, c],
+                        _ => default,
+                    }
+                }
+                _ => default,
+            };
+            let spins = [spin(current[0]), spin(current[1]), spin(current[2])];
+            let silent = Rc::new(Cell::new(false));
+            let clear_it = clear_button("Reset to Default");
+            {
+                let (ctx, path, spins, silent) =
+                    (ctx.clone(), path.clone(), spins.clone(), silent.clone());
+                clear_it.connect_clicked(move |_| {
+                    ctx.cfg.borrow_mut().remove(&refs(&path));
+                    silent.set(true);
+                    for (s, v) in spins.iter().zip(default) {
+                        s.set_value(v);
+                    }
+                    silent.set(false);
+                    (ctx.changed)();
+                });
+            }
+            row.add_suffix(&clear_it);
+            for s in &spins {
+                row.add_suffix(s);
+            }
+            let write = {
+                let (ctx, spins) = (ctx.clone(), spins.clone());
+                Rc::new(move || {
+                    if silent.get() {
+                        return;
+                    }
+                    let values = spins.each_ref().map(|s| Arg::Float(s.value()));
+                    ctx.cfg.borrow_mut().set_args(&refs(&path), &values);
+                    (ctx.changed)();
+                })
+            };
+            for s in &spins {
+                let w = write.clone();
+                s.connect_value_changed(move |_| w());
+            }
             (row.upcast(), true)
         }
     }

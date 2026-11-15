@@ -281,6 +281,223 @@ fn fill_outputs(list: &Dynamic, ctx: &Ctx) {
     }
 }
 
+// mouse and touchpad
+
+pub fn pointer_page(ctx: &Ctx) -> gtk::Widget {
+    let page = adw::PreferencesPage::new();
+    build_groups(
+        &page,
+        &pages::touchpad_groups(),
+        &["input".to_owned(), "touchpad".to_owned()],
+        ctx,
+    );
+    build_groups(
+        &page,
+        &pages::mouse_groups(),
+        &["input".to_owned(), "mouse".to_owned()],
+        ctx,
+    );
+
+    build_groups(&page, &pages::cursor_groups(), &[], ctx);
+
+    let list = Dynamic::new(
+        "Single Devices",
+        "A device here wins over the touchpad and mouse settings. jff logs the name of every pointer device at info level when it appears",
+    );
+    page.add(&list.group);
+
+    let add_group = adw::PreferencesGroup::new();
+    let add = entry("Device Name, for example Logitech G502");
+    {
+        let (ctx, list) = (ctx.clone(), list.clone());
+        add.connect_apply(move |r| {
+            let name = r.text().trim().to_owned();
+            if name.is_empty() {
+                return;
+            }
+            ctx.cfg
+                .borrow_mut()
+                .add(&["input"], "device", &[Arg::Str(name)]);
+            r.set_text("");
+            (ctx.changed)();
+            fill_devices(&list, &ctx);
+        });
+    }
+    add_group.set_title("Add a Device");
+    add_group.add(&add);
+    page.add(&add_group);
+
+    fill_devices(&list, ctx);
+    page.upcast()
+}
+
+fn fill_devices(list: &Dynamic, ctx: &Ctx) {
+    list.clear();
+    let count = ctx.cfg.borrow().count(&["input"], "device");
+    if count == 0 {
+        list.push(&empty_state(
+            "input-mouse-symbolic",
+            "No Single Devices",
+            "Add a device by its libinput name to give it settings of its own",
+        ));
+        return;
+    }
+    for i in 0..count {
+        let root = vec!["input".to_owned(), format!("device#{i}")];
+        let name = match ctx.cfg.borrow().args(&refs(&root)).first() {
+            Some(Arg::Str(name)) => name.clone(),
+            _ => String::new(),
+        };
+        let expander = adw::ExpanderRow::new();
+        expander.set_title(&gtk::glib::markup_escape_text(&name));
+
+        let name_row = entry("Device Name");
+        name_row.set_text(&name);
+        {
+            let (ctx, root, expander) = (ctx.clone(), root.clone(), expander.clone());
+            name_row.connect_apply(move |r| {
+                let text = r.text().trim().to_owned();
+                if text.is_empty() {
+                    return;
+                }
+                ctx.cfg
+                    .borrow_mut()
+                    .set_args(&refs(&root), &[Arg::Str(text.clone())]);
+                expander.set_title(&gtk::glib::markup_escape_text(&text));
+                (ctx.changed)();
+            });
+        }
+        expander.add_row(&name_row);
+        for field in pages::device_fields(pages::DeviceBlock::Device) {
+            expander.add_row(&build_row(&field, &root, ctx, None).0);
+        }
+        let remove_row = adw::ActionRow::new();
+        remove_row.set_title("Remove This Device");
+        remove_row.set_subtitle("It goes back to the touchpad or mouse settings");
+        let remove = trash_button("Remove");
+        {
+            let (ctx, root, list) = (ctx.clone(), root.clone(), list.clone());
+            remove.connect_clicked(move |_| {
+                ctx.cfg.borrow_mut().remove(&refs(&root));
+                (ctx.changed)();
+                let (ctx, list) = (ctx.clone(), list.clone());
+                later(move || fill_devices(&list, &ctx));
+            });
+        }
+        remove_row.add_suffix(&remove);
+        expander.add_row(&remove_row);
+        list.push(&expander);
+    }
+}
+
+// container rules
+
+pub fn containers_page(ctx: &Ctx) -> gtk::Widget {
+    let page = adw::PreferencesPage::new();
+    build_groups(&page, &pages::container_groups(), &[], ctx);
+    let list = Dynamic::new(
+        "Container Rules",
+        "The first rule that fits a window decides its container. Only the first match line of a rule is shown, any others are left alone",
+    );
+    let add_button = flat_button("list-add-symbolic", "Add Rule");
+    {
+        let (ctx, list) = (ctx.clone(), list.clone());
+        add_button.connect_clicked(move |_| {
+            ctx.cfg.borrow_mut().add(&[], "container-rule", &[]);
+            (ctx.changed)();
+            let (list, ctx) = (list.clone(), ctx.clone());
+            later(move || fill_container_rules(&list, &ctx));
+        });
+    }
+    list.group.set_header_suffix(Some(&add_button));
+    page.add(&list.group);
+    fill_container_rules(&list, ctx);
+    page.upcast()
+}
+
+fn fill_container_rules(list: &Dynamic, ctx: &Ctx) {
+    list.clear();
+    let count = ctx.cfg.borrow().count(&[], "container-rule");
+    if count == 0 {
+        list.push(&empty_state(
+            "view-dual-symbolic",
+            "No Container Rules",
+            "A rule puts matching windows into a named container, or applies a saved layout to it",
+        ));
+        return;
+    }
+    for i in 0..count {
+        let node = format!("container-rule#{i}");
+        let summary = {
+            let cfg = ctx.cfg.borrow();
+            let named = match cfg.get_str(&[node.as_str(), "name"]) {
+                Some(name) if !name.is_empty() => name,
+                _ => "Unnamed".to_owned(),
+            };
+            let matched = [("app-id", "App ID"), ("title", "Title"), ("tag", "Tag")]
+                .iter()
+                .find_map(
+                    |(key, label)| match cfg.get_prop(&[node.as_str(), "match"], key) {
+                        Some(Arg::Str(s)) => Some(format!("{label}: {s}")),
+                        _ => None,
+                    },
+                )
+                .unwrap_or_else(|| "Any Window".to_owned());
+            format!("{named}, {matched}")
+        };
+        let expander = adw::ExpanderRow::new();
+        expander.set_title(&gtk::glib::markup_escape_text(&summary));
+        expander.set_subtitle(&format!("Rule {}", i + 1));
+        let root = vec![node];
+        for field in pages::container_rule_fields() {
+            expander.add_row(&build_row(&field, &root, ctx, None).0);
+        }
+        let order_row = adw::ActionRow::new();
+        order_row.set_title("Order and Removal");
+        let up = flat_button("go-up-symbolic", "Move Up");
+        let down = flat_button("go-down-symbolic", "Move Down");
+        let remove = trash_button("Remove This Rule");
+        up.set_sensitive(i > 0);
+        down.set_sensitive(i + 1 < count);
+        let refill = {
+            let (ctx, list) = (ctx.clone(), list.clone());
+            move || {
+                (ctx.changed)();
+                let (ctx, list) = (ctx.clone(), list.clone());
+                later(move || fill_container_rules(&list, &ctx));
+            }
+        };
+        {
+            let (ctx, refill) = (ctx.clone(), refill.clone());
+            up.connect_clicked(move |_| {
+                ctx.cfg.borrow_mut().swap(&[], "container-rule", i, i - 1);
+                refill();
+            });
+        }
+        {
+            let (ctx, refill) = (ctx.clone(), refill.clone());
+            down.connect_clicked(move |_| {
+                ctx.cfg.borrow_mut().swap(&[], "container-rule", i, i + 1);
+                refill();
+            });
+        }
+        {
+            let ctx = ctx.clone();
+            remove.connect_clicked(move |_| {
+                ctx.cfg
+                    .borrow_mut()
+                    .remove(&[format!("container-rule#{i}").as_str()]);
+                refill();
+            });
+        }
+        order_row.add_suffix(&up);
+        order_row.add_suffix(&down);
+        order_row.add_suffix(&remove);
+        expander.add_row(&order_row);
+        list.push(&expander);
+    }
+}
+
 // window rules
 
 pub fn rules_page(ctx: &Ctx) -> gtk::Widget {

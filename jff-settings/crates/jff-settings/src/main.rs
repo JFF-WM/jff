@@ -27,8 +27,10 @@ fn icon(page_id: &str) -> &'static str {
         "appearance" => "preferences-desktop-appearance-symbolic",
         "effects" => "applications-graphics-symbolic",
         "multitasking" => "view-grid-symbolic",
+        "containers" => "view-dual-symbolic",
         "displays" => "video-display-symbolic",
         "keyboard" => "input-keyboard-symbolic",
+        "pointer" => "input-mouse-symbolic",
         "shortcuts" => "preferences-desktop-keyboard-shortcuts-symbolic",
         "rules" => "window-new-symbolic",
         "startup" => "system-run-symbolic",
@@ -146,6 +148,8 @@ fn build_ui(app: &adw::Application) {
             Body::Outputs(extra) => lists::outputs_page(extra, &ctx),
             Body::Rules => lists::rules_page(&ctx),
             Body::Binds => lists::binds_page(&ctx),
+            Body::Pointer => lists::pointer_page(&ctx),
+            Body::Containers => lists::containers_page(&ctx),
         };
         stack.add_named(&widget, Some(page.id));
     }

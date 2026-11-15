@@ -704,10 +704,12 @@ pub fn overview_elements(
         .into_iter()
         .chain(plan.dragged_with.iter().copied())
         .collect();
+    // While a thumbnail is carried the others are hidden until it is dropped.
+    let carrying = plan.dragged.is_some();
     let order = front
         .iter()
         .copied()
-        .chain((0..plan.thumbs.len()).filter(|i| !front.contains(i)));
+        .chain((0..plan.thumbs.len()).filter(|i| !carrying && !front.contains(i)));
     let wall_at = front.len();
     for (n, i) in order.enumerate() {
         if n == wall_at {
@@ -727,7 +729,7 @@ pub fn overview_elements(
         );
     }
     // Nothing came after the dragged thumbnail (or there are no thumbnails): the wall goes last.
-    if plan.thumbs.len() <= wall_at {
+    if carrying || plan.thumbs.len() <= wall_at {
         wall_elements(renderer, plan, origin, &mut out);
     }
 
@@ -739,6 +741,7 @@ pub fn overview_elements(
     let (outline_width, outline_color) = plan.outline;
     if let Some((window, thumb)) = plan
         .selected
+        .filter(|i| !carrying || front.contains(i))
         .and_then(|i| plan.thumbs.get(i))
         .filter(|_| outline_width > 0)
     {
