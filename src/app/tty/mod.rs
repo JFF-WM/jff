@@ -1228,6 +1228,9 @@ impl Tty {
             let tone = output_config
                 .and_then(|c| c.hdr_tone_map)
                 .unwrap_or_default();
+            let contrast = output_config
+                .and_then(|c| c.hdr_contrast)
+                .map_or(hdr_output::DEFAULT_CONTRAST, |m| m as f32 / 1000.0);
             let content_metadata = output_config
                 .and_then(|c| c.hdr_content_metadata)
                 .unwrap_or(true);
@@ -1257,6 +1260,7 @@ impl Tty {
                             f32::from(plan.max_luminance),
                             panel.as_ref(),
                         )
+                        .with_contrast(contrast)
                         .with_tone_map(tone)
                         .with_eotf(plan.eotf)
                         .with_dither(Some(

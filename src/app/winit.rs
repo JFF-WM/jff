@@ -50,12 +50,17 @@ pub struct WinitHdr {
     content_peak: Option<f32>,
 }
 
-/// The HDR settings of the winit output from the config: `hdr` in `output "jff-winit"`, with the same `sdr-white`, `hdr-peak`, `hdr-tone-map` and `hdr-content-metadata` as a monitor. The panel's gamut is not known, so nothing is mapped to it. The window is an SDR surface of the host: it shows the PQ code values as they are, which is what the signal of a real HDR monitor holds.
+/// The HDR settings of the winit output from the config: `hdr` in `output "jff-winit"`, with the same `sdr-white`, `hdr-peak`, `hdr-contrast`, `hdr-tone-map` and `hdr-content-metadata` as a monitor. The panel's gamut is not known, so nothing is mapped to it. The window is an SDR surface of the host: it shows the PQ code values as they are, which is what the signal of a real HDR monitor holds.
 fn hdr_settings(config: &Config, name: &str) -> Option<(WorkingSpace, FinalPass, bool)> {
     let output = config.output(name).filter(|c| c.hdr)?;
     let sdr_white = output.sdr_white.unwrap_or(hdr_output::DEFAULT_SDR_WHITE);
     let peak = output.hdr_peak.unwrap_or(SIMULATED_PEAK);
     let pass = FinalPass::new(sdr_white as f32, peak as f32, None)
+        .with_contrast(
+            output
+                .hdr_contrast
+                .map_or(hdr_output::DEFAULT_CONTRAST, |m| m as f32 / 1000.0),
+        )
         .with_tone_map(output.hdr_tone_map.unwrap_or_default())
         .with_eotf(OutputEotf::Pq)
         .with_dither(Some(WINDOW_BITS));

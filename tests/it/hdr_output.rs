@@ -5,10 +5,10 @@ use jff_wm::primitives::color::{
 };
 use jff_wm::primitives::gamut::{Conversion, Curve};
 use jff_wm::primitives::hdr_output::{
-    bt2390_source_peak, bt2390_tone_map, dither_noise, fitted_tone_map, frame_content_peak,
-    hlg_display_nits, hlg_inverse_oetf, low_headroom, pq_decode, pq_encode, tone_map, FinalPass,
-    ToneMap, BT2020_LUMA, BT2390_SOURCE_PEAK, DEFAULT_SDR_WHITE, HDR_PEAK_RANGE, PQ_PEAK,
-    SDR_WHITE_RANGE,
+    bt2390_source_peak, bt2390_tone_map, contrast_curve, dither_noise, fitted_tone_map,
+    frame_content_peak, hlg_display_nits, hlg_inverse_oetf, low_headroom, pq_decode, pq_encode,
+    tone_map, FinalPass, ToneMap, BT2020_LUMA, BT2390_SOURCE_PEAK, DEFAULT_SDR_WHITE,
+    HDR_PEAK_RANGE, PQ_PEAK, SDR_WHITE_RANGE,
 };
 
 const PEAK: f32 = 301.8;
@@ -953,4 +953,37 @@ fn the_capture_pass_does_not_dither() {
         plain.apply([0.4, 0.5, 0.6]),
         dithered.apply([0.4, 0.5, 0.6])
     );
+}
+
+#[test]
+fn contrast_one_changes_nothing() {
+    let plain = FinalPass::new(203.0, 1000.0, Some(&panel()));
+    let one = plain.with_contrast(1.0);
+    for v in [0.05, 0.5, 1.0, 2.0] {
+        close(one.apply([v; 3]), plain.apply([v; 3]), 1e-6);
+    }
+}
+
+#[test]
+fn contrast_keeps_sdr_white_and_pulls_darks_and_highlights_apart() {
+    assert!((contrast_curve(203.0, 203.0, 1.5) - 203.0).abs() < 1e-3);
+    let plain = FinalPass::new(203.0, 1000.0, None);
+    let pass = plain.with_contrast(1.5);
+    close(pass.apply([1.0; 3]), [pq(203.0); 3], 2e-3);
+    assert!(pass.apply([0.2; 3])[0] < plain.apply([0.2; 3])[0]);
+    assert!(pass.apply([2.0; 3])[0] > plain.apply([2.0; 3])[0]);
+}
+
+#[test]
+fn contrast_under_one_flattens_and_light_stays_under_the_peak() {
+    let plain = FinalPass::new(203.0, 400.0, None);
+    assert!(plain.with_contrast(0.5).apply([0.2; 3])[0] > plain.apply([0.2; 3])[0]);
+    assert!(plain.with_contrast(2.0).apply([50.0; 3])[0] <= pq(400.0) + 1e-4);
+}
+
+#[test]
+fn contrast_keeps_the_hue_of_a_color() {
+    let pass = FinalPass::new(203.0, 4000.0, None).with_contrast(1.4);
+    let [r, g, b] = pass.apply([0.4, 0.2, 0.1]);
+    assert!(r > g && g > b);
 }

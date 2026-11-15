@@ -38,10 +38,11 @@
 //! `hdr` inside an `output` signals that monitor as HDR10 (PQ, BT.2020) when its EDID and the connector allow it, and is off by default.
 //! `sdr-white` sets the luminance in cd/m² that SDR white is shown at on an HDR monitor (203 by default, 10 to 1000).
 //! `hdr-peak` replaces the peak luminance the EDID states (100 to 10000 cd/m²): the frame is mapped to it and it is what the monitor is told and what clients are told.
+//! `hdr-contrast` sets the contrast of an HDR monitor around SDR white (0.5 to 2.0, 1.0 by default): above 1.0 darks go down and highlights go up, under 1.0 the picture is flatter. SDR white stays where `sdr-white` puts it, and the roll-off under the peak still applies after it.
 //! `hdr-tone-map "knee"|"bt2390"` picks how the frame is rolled off under that peak (`"knee"` by default).
 //! `hdr-content-metadata` (on by default, `hdr-content-metadata false` turns it off) fits that roll-off to the content: when a visible PQ surface states how bright it gets (`max_cll`, else the mastering luminance a client sent through wp-color-management), content that fits under the peak is shown as it is, and brighter content is BT.2390-mapped with its own peak as the source, whatever `hdr-tone-map` is. Frames with no such surface keep using `hdr-tone-map`.
-//! `sdr-white`, `hdr-peak`, `hdr-tone-map` and `hdr-content-metadata` only apply to a monitor with `hdr`, `jff check-config` warns when they stand alone.
-//! `hdr` in `output "jff-winit"` simulates HDR when jff runs nested: the frame goes through the same working space and final pass (with `sdr-white`, `hdr-peak` (1000 by default), `hdr-tone-map` and `hdr-content-metadata`), clients are told the output is PQ, and `screenshot-fullscreen` saves the 16-bit PNG. The host window is SDR, so it shows the PQ code values themselves, dithered to 8 bits.
+//! `sdr-white`, `hdr-peak`, `hdr-contrast`, `hdr-tone-map` and `hdr-content-metadata` only apply to a monitor with `hdr`, `jff check-config` warns when they stand alone.
+//! `hdr` in `output "jff-winit"` simulates HDR when jff runs nested: the frame goes through the same working space and final pass (with `sdr-white`, `hdr-peak` (1000 by default), `hdr-contrast`, `hdr-tone-map` and `hdr-content-metadata`), clients are told the output is PQ, and `screenshot-fullscreen` saves the 16-bit PNG. The host window is SDR, so it shows the PQ code values themselves, dithered to 8 bits.
 //! `screenshot-fullscreen` on a monitor in HDR mode saves a 16-bit PNG in PQ and BT.2020 (a `cICP` chunk says so) with the monitor's tone curve, and leaves the clipboard alone. The area and window screenshots are still sRGB.
 //!
 //! Two things that bite when editing the file by hand:
@@ -64,7 +65,9 @@ use smithay::input::keyboard::{xkb, Keysym, ModifiersState, XkbConfig};
 use smithay::utils::Transform;
 
 use crate::desk::{Goto, Side};
-use crate::primitives::hdr_output::{self, ToneMap, HDR_PEAK_RANGE, SDR_WHITE_RANGE};
+use crate::primitives::hdr_output::{
+    self, ToneMap, CONTRAST_RANGE, HDR_PEAK_RANGE, SDR_WHITE_RANGE,
+};
 use crate::primitives::input_settings::{button_code, ACCEL_SPEED_RANGE};
 pub use crate::primitives::input_settings::{
     AccelProfile, ClickMethod, DeviceKind, DeviceSettings, ScrollMethod, TapButtonMap,
@@ -481,6 +484,8 @@ pub struct OutputConfig {
     pub sdr_white: Option<u32>,
     /// Peak luminance of an HDR monitor in cd/m², used instead of the one its EDID states.
     pub hdr_peak: Option<u32>,
+    /// Contrast of an HDR monitor around SDR white, in thousandths (1000 is none), as set by `hdr-contrast`.
+    pub hdr_contrast: Option<u32>,
     /// How an HDR monitor's frame is rolled off under its peak, the knee when not set.
     pub hdr_tone_map: Option<ToneMap>,
     /// Fit the tone mapping of an HDR monitor to the peak the visible content states (`max_cll` or the mastering luminance). On when not set.
@@ -496,6 +501,7 @@ impl OutputConfig {
             let stray: Vec<&str> = [
                 ("sdr-white", self.sdr_white.is_some()),
                 ("hdr-peak", self.hdr_peak.is_some()),
+                ("hdr-contrast", self.hdr_contrast.is_some()),
                 ("hdr-tone-map", self.hdr_tone_map.is_some()),
                 ("hdr-content-metadata", self.hdr_content_metadata.is_some()),
             ]
@@ -2890,6 +2896,17 @@ fn parse_output(node: &KdlNode) -> anyhow::Result<OutputConfig> {
             "hdr" => config.hdr = flag_value(child)?,
             "sdr-white" => config.sdr_white = Some(nits_arg(child, &SDR_WHITE_RANGE, 203)?),
             "hdr-peak" => config.hdr_peak = Some(nits_arg(child, &HDR_PEAK_RANGE, 400)?),
+            "hdr-contrast" => {
+                let value = float_arg(child)? as f32;
+                if !CONTRAST_RANGE.contains(&value) {
+                    bail!(
+                        "hdr-contrast takes a number from {} to {}: hdr-contrast 1.2",
+                        CONTRAST_RANGE.start(),
+                        CONTRAST_RANGE.end()
+                    );
+                }
+                config.hdr_contrast = Some((value * 1000.0).round() as u32);
+            }
             "hdr-content-metadata" => config.hdr_content_metadata = Some(flag_value(child)?),
             "hdr-tone-map" => {
                 config.hdr_tone_map = Some(match args.as_slice() {

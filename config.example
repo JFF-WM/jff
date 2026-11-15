@@ -301,6 +301,7 @@ cursor {
 //         hdr
 //         sdr-white 203                      // cd/m2 SDR white is shown at, 10 to 1000, 203 by default
 //         hdr-peak 1000                      // replaces the peak the EDID states, 100 to 10000
+//         hdr-contrast 1.2                   // contrast around SDR white, 0.5 to 2.0, 1.0 by default
 //         hdr-tone-map "bt2390"              // how the frame is rolled off under the peak: "knee" (default) or "bt2390"
 //         hdr-content-metadata #true         // fit the roll-off to the content's own peak (on by default)
 //     }

@@ -2412,3 +2412,35 @@ fn rejects_bad_window_rule_opacity() {
     assert!(Config::parse("window-rule { opacity; }").is_err());
     assert!(Config::parse("window-rule { opacity 0.5 0.6; }").is_err());
 }
+
+#[test]
+fn hdr_contrast_takes_a_number_in_range() {
+    let config = Config::parse(
+        r#"outputs {
+            output "DP-1" { hdr; hdr-contrast 1.25; }
+            output "DP-2" { hdr; hdr-contrast 2; }
+            output "DP-3" { hdr; }
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(config.output("DP-1").unwrap().hdr_contrast, Some(1250));
+    assert_eq!(config.output("DP-2").unwrap().hdr_contrast, Some(2000));
+    assert_eq!(config.output("DP-3").unwrap().hdr_contrast, None);
+}
+
+#[test]
+fn hdr_contrast_fails_out_of_range() {
+    for bad in ["0.1", "3", "\"high\"", "1 2"] {
+        let text = format!(r#"outputs {{ output "DP-1" {{ hdr-contrast {bad}; }} }}"#);
+        let message = format!("{:#}", Config::parse(&text).unwrap_err());
+        assert!(message.contains("hdr-contrast"), "{message}");
+    }
+}
+
+#[test]
+fn check_warns_about_a_contrast_without_hdr() {
+    let warnings =
+        Config::check_text(r#"outputs { output "DP-1" { hdr-contrast 1.2; } }"#).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("hdr-contrast") && warnings[0].contains("no `hdr`"));
+}
