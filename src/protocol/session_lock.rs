@@ -20,8 +20,10 @@
 //! leaves the session locked, as the protocol demands (the way out is a virtual terminal). A
 //! second client that asks to lock while the session is locked is told it can't.
 //!
-//! Confirmation. The locker is told "locked" on the event-loop iteration after the request, by
-//! which time the screen is being drawn with nothing but the lock.
+//! Confirmation. The locker is told "locked" once every monitor has presented a frame drawn with
+//! nothing but the lock (or black). A monitor that is off or gone is not waited for.
+//!
+//! Lock surfaces follow their monitor: a new mode sends the locker a new size.
 //!
 //! Opening the overview, an area screenshot, menus, and drags are ended when the lock starts.
 
@@ -54,6 +56,8 @@ pub struct SessionLock {
     locked: bool,
     /// The locker is waiting to be told the session is locked.
     confirmation: Option<SessionLocker>,
+    /// Monitors that have not presented a frame with nothing but the lock yet.
+    awaiting: Vec<Output>,
     /// The lock surfaces, and the monitor each one covers.
     surfaces: Vec<(LockSurface, Output)>,
 }
@@ -67,6 +71,7 @@ impl SessionLock {
             }),
             locked: false,
             confirmation: None,
+            awaiting: Vec::new(),
             surfaces: Vec::new(),
         }
     }
@@ -74,6 +79,11 @@ impl SessionLock {
     /// Whether the session is locked.
     pub fn is_locked(&self) -> bool {
         self.locked
+    }
+
+    /// A frame drawn with nothing but the lock reached `output`'s screen.
+    pub fn presented_locked(&mut self, output: &Output) {
+        self.awaiting.retain(|o| o != output);
     }
 
     /// The lock surfaces on `output` that are still there.
@@ -161,20 +171,47 @@ impl JffState {
             })
     }
 
-    /// Once per event-loop iteration: tells the locker it's locked, forgets dead lock surfaces.
+    /// Once per event-loop iteration: tells the locker it's locked when every monitor shows
+    /// the lock, forgets dead lock surfaces.
     pub fn service_session_lock(&mut self) {
-        let lock = &mut self.session_lock;
-        if !lock.locked {
+        if !self.session_lock.locked {
             return;
         }
-        let before = lock.surfaces.len();
-        lock.surfaces.retain(|(surface, _)| surface.alive());
-        let changed = lock.surfaces.len() != before;
-        if let Some(confirmation) = lock.confirmation.take() {
-            confirmation.lock();
+        let before = self.session_lock.surfaces.len();
+        self.session_lock
+            .surfaces
+            .retain(|(surface, _)| surface.alive());
+        let changed = self.session_lock.surfaces.len() != before;
+        // A monitor that is gone or switched off shows nothing, there is nothing to wait for.
+        let waiting: Vec<Output> = self
+            .session_lock
+            .awaiting
+            .iter()
+            .filter(|o| self.outputs.contains(o) && self.output_powered(o))
+            .cloned()
+            .collect();
+        self.session_lock.awaiting = waiting;
+        if self.session_lock.awaiting.is_empty() {
+            if let Some(confirmation) = self.session_lock.confirmation.take() {
+                confirmation.lock();
+            }
         }
         if changed {
             self.update_keyboard_focus();
+        }
+    }
+
+    /// Give every lock surface the size of its monitor, after a mode or layout change.
+    pub fn relayout_lock_surfaces(&mut self) {
+        for (surface, output) in &self.session_lock.surfaces {
+            if !surface.alive() {
+                continue;
+            }
+            let (_, _, width, height) = output_rect(output);
+            let size = (width.max(1) as u32, height.max(1) as u32).into();
+            surface.with_pending_state(|state| state.size = Some(size));
+            // Does nothing when the size is the one the locker already has.
+            surface.send_configure();
         }
     }
 }
@@ -205,6 +242,14 @@ impl SessionLockHandler for JffState {
         }
         self.session_lock.locked = true;
         self.session_lock.confirmation = Some(confirmation);
+        // The locker hears "locked" when each of these has shown a frame with only the lock.
+        self.session_lock.awaiting = self
+            .outputs
+            .iter()
+            .filter(|o| self.output_powered(o))
+            .cloned()
+            .collect();
+        self.queue_redraw_all();
         self.update_keyboard_focus();
         self.refresh_pointer_focus();
     }
@@ -216,6 +261,7 @@ impl SessionLockHandler for JffState {
         tracing::info!("session unlocked");
         self.session_lock.locked = false;
         self.session_lock.confirmation = None;
+        self.session_lock.awaiting.clear();
         self.session_lock.surfaces.clear();
         self.update_keyboard_focus();
         self.refresh_pointer_focus();

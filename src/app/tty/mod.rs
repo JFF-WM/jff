@@ -347,6 +347,8 @@ struct TtyOutput {
     covering: bool,
     /// Switched off by a client. We must not draw, a frame would light it again.
     powered_off: bool,
+    /// The frame in flight was drawn while the session was locked.
+    locked_frame: bool,
 }
 
 /// Where a monitor is in its draw cycle. A frame is drawn only when something asked for one
@@ -1164,6 +1166,7 @@ impl Tty {
             gamma_pending: false,
             gamma_applied: false,
             powered_off: false,
+            locked_frame: false,
         })
     }
 
@@ -2269,6 +2272,10 @@ impl JffState {
                             }
                         }
                     }
+                    // Nothing new to show while locked: the screen already is the lock.
+                    if is_empty && locked && !declined {
+                        self.session_lock.presented_locked(&lit.output);
+                    }
                     if !is_empty {
                         if let Some(dmabuf_feedback) = &lit.dmabuf_feedback {
                             send_surface_feedback(
@@ -2285,7 +2292,10 @@ impl JffState {
                             hdr_states.as_ref().unwrap_or(&res.states),
                         );
                         match lit.compositor.queue_frame(feedback) {
-                            Ok(()) => queued = true,
+                            Ok(()) => {
+                                queued = true;
+                                lit.locked_frame = locked;
+                            }
                             Err(err) => tracing::warn!("error queueing frame: {err}"),
                         }
                     }
@@ -2414,6 +2424,9 @@ impl JffState {
             Err(err) => tracing::warn!("error marking frame as submitted: {err}"),
         }
         let output = lit.output.clone();
+        if std::mem::take(&mut lit.locked_frame) {
+            self.session_lock.presented_locked(&output);
+        }
         // the frame is on screen, so clients waiting on a fifo barrier may commit again
         self.release_fifo_barriers(&output);
 

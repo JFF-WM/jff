@@ -451,6 +451,7 @@ impl JffState {
 
         // A container fills its monitor, so it follows the monitor's new size.
         self.refit_containers();
+        self.relayout_lock_surfaces();
         self.clamp_pointer();
         self.reconcile_window_workspaces();
         self.refresh_window_outputs();

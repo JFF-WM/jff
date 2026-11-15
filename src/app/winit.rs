@@ -507,6 +507,12 @@ impl JffState {
                         );
                     }
                 }
+                // Submitted, or nothing new to show: the window shows the lock either way.
+                if locked {
+                    if let Some(output) = self.outputs.first() {
+                        self.session_lock.presented_locked(output);
+                    }
+                }
             }
             Err(err) => tracing::warn!("error rendering output: {err:?}"),
         }
