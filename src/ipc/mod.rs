@@ -1750,15 +1750,113 @@ fn render(text: &str, pretty_print: bool) -> String {
     out
 }
 
+/// The commands for the help text, in groups: the command with its arguments, and what it does.
+const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Views",
+        &[
+            ("views", "list every view"),
+            ("focused", "the focused view"),
+            ("view-info [ID]", "details of a view"),
+            ("focus ID", "focus a view"),
+            ("close [ID]", "close a view"),
+            ("maximize [ID]", "maximize a view"),
+            ("unmaximize [ID]", "restore a maximized view"),
+            ("toggle-maximize [ID]", "toggle maximize"),
+            ("fullscreen [ID]", "make a view fullscreen"),
+            ("unfullscreen [ID]", "leave fullscreen"),
+            ("tag [NAME] [ID]", "tag a view, or show its tag"),
+            ("untag [ID]", "remove the tag of a view"),
+        ],
+    ),
+    (
+        "Workspaces and monitors",
+        &[
+            ("workspaces", "list the workspaces"),
+            ("workspace N|next|prev", "go to a workspace"),
+            ("move-to-workspace N [ID]", "send a view to workspace N"),
+            ("outputs", "list the monitors"),
+            ("focus-monitor MONITOR", "focus a monitor"),
+            ("move-to-monitor MONITOR [ID]", "send a view to a monitor"),
+            (
+                "move-workspace-to-monitor MONITOR",
+                "send the workspace to a monitor",
+            ),
+        ],
+    ),
+    (
+        "Containers and layouts",
+        &[
+            ("containers", "list the tiling containers"),
+            ("layout-save NAME [ID]", "save the layout of a container"),
+            ("layout-apply NAME [ID]", "apply a saved layout"),
+            ("layout-list", "list the saved layouts"),
+            ("layout-delete NAME", "delete a saved layout"),
+        ],
+    ),
+    (
+        "Screenshots",
+        &[
+            ("screenshot-area", "pick an area and capture it"),
+            ("screenshot-fullscreen", "capture the screen"),
+            ("screenshot-window", "capture the focused window"),
+        ],
+    ),
+    (
+        "Other",
+        &[
+            ("status", "the state of the compositor"),
+            ("spawn PROGRAM [ARGS]", "run a program"),
+            ("spawn-sh COMMAND LINE", "run a command line in the shell"),
+            ("move-cursor X Y", "move the pointer"),
+            ("click left|right|middle", "click a button"),
+            ("toggle-overview", "open or close the overview"),
+            ("stats", "frame statistics"),
+            ("toggle-stats", "show or hide the statistics"),
+        ],
+    ),
+];
+
+/// The help text of `jff msg`.
+fn usage() -> String {
+    let width = HELP_GROUPS
+        .iter()
+        .flat_map(|(_, commands)| commands.iter())
+        .map(|(command, _)| command.len())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::from(
+        "Usage: jff msg [--pretty|--compact] <command> [args]\n       \
+         jff msg [--pretty|--compact] watch [GROUP...]\n\n\
+         ID is a view id (see `views`), the focused view when left out.\n",
+    );
+    for (title, commands) in HELP_GROUPS {
+        out.push_str(&format!("\n{title}:\n"));
+        for (command, what) in *commands {
+            out.push_str(&format!("  {command:<width$}  {what}\n"));
+        }
+    }
+    out.push_str(&format!(
+        "\nwatch [GROUP...]: print events as they happen. Groups: {}\n\
+         MONITOR: {}\n",
+        Group::NAMES,
+        MonitorTarget::WORDS
+    ));
+    out
+}
+
 /// `jff msg <command...>`: send the command, print the reply. Returns the exit code.
 pub fn client(args: &[String]) -> anyhow::Result<i32> {
     let (style, args) = split_style(args);
+    if matches!(
+        args.first().map(String::as_str),
+        Some("help" | "--help" | "-h")
+    ) {
+        print!("{}", usage());
+        return Ok(0);
+    }
     if args.is_empty() {
-        eprintln!(
-            "usage: jff msg [--pretty|--compact] <command> [view id]\n       \
-             jff msg [--pretty|--compact] watch [{}]\ncommands: {COMMANDS}",
-            Group::NAMES.replace(", ", "|")
-        );
+        eprint!("{}", usage());
         return Ok(2);
     }
     let pretty_print = style.unwrap_or_else(|| io::stdout().is_terminal());
