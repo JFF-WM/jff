@@ -6,7 +6,7 @@
 //!
 //! Sources (`ext_image_capture_source_v1`): a client can capture a monitor, or a single window
 //! it got from `ext-foreign-toplevel-list` (see `ext_foreign_toplevel.rs`). A window source
-//! stands for the view whose identifier is `jff-<view id>`. Its picture is the window alone on
+//! stands for the window whose identifier is `jff-<window id>`. Its picture is the window alone on
 //! a transparent background, same as `JffState::capture_window` in `screenshot.rs`, wherever
 //! the window is (other workspace, covered by another window). The session ends when the
 //! window closes.
@@ -62,7 +62,7 @@ use smithay::wayland::shm::{with_buffer_contents, with_buffer_contents_mut};
 
 use crate::feature::outputs::frame_size;
 use crate::feature::screenshot::{Captured, HdrCaptured};
-use crate::ipc::ViewId;
+use crate::ipc::WindowId;
 use crate::primitives::hdr_capture::{pack_row_2101010, pq_picture};
 use crate::protocol::presentation::monotonic_now;
 use crate::state::{is_sandboxed, JffState};
@@ -275,7 +275,7 @@ enum Target {
     Window(Window),
 }
 
-/// Set on a source made for a window: the view id (see `ViewId`).
+/// Set on a source made for a window: the window id (see `WindowId`).
 struct ToplevelSourceId(u64);
 
 /// What a client has to allocate for pictures of this `size`: the two 8-bit formats, then
@@ -364,7 +364,7 @@ impl JffState {
         }
         let id = source.user_data().get::<ToplevelSourceId>()?.0;
         self.desk
-            .find_by(|w| w.user_data().get::<ViewId>() == Some(&ViewId(id)))
+            .find_by(|w| w.user_data().get::<WindowId>() == Some(&WindowId(id)))
             .map(|entry| Target::Window(entry.window.clone()))
     }
 
@@ -549,7 +549,7 @@ impl ToplevelCaptureSourceHandler for JffState {
         &mut self.image_copy.toplevel_capture_source
     }
 
-    // The identifier is `jff-<view id>`, see `ext_foreign_toplevel.rs`.
+    // The identifier is `jff-<window id>`, see `ext_foreign_toplevel.rs`.
     fn toplevel_source_created(
         &mut self,
         source: ImageCaptureSource,

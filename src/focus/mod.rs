@@ -387,7 +387,7 @@ impl JffState {
             return;
         }
         self.warped_focus = Some(window);
-        if self.dragging_view.is_some() {
+        if self.dragging_window.is_some() {
             tracing::debug!("warp-mouse-to-focus: a window is being dragged, pointer left alone");
             return;
         }

@@ -2,12 +2,12 @@
 
 use jff_wm::ipc::events::{
     diff, ContainerInfo, ContainerRef, Event, Group, GroupSet, LayerInfo, OutputColor, OutputInfo,
-    PopupInfo, Snapshot, View,
+    PopupInfo, Snapshot, WindowInfo,
 };
 use jff_wm::primitives::color::{ImageDescription, NamedPrimaries};
 
-fn view(id: u64) -> View {
-    View {
+fn window(id: u64) -> WindowInfo {
+    WindowInfo {
         id,
         app_id: Some("foot".to_string()),
         title: Some("~".to_string()),
@@ -39,9 +39,9 @@ fn output(name: &str, x: i32) -> OutputInfo {
     }
 }
 
-fn snapshot(views: Vec<View>) -> Snapshot {
+fn snapshot(windows: Vec<WindowInfo>) -> Snapshot {
     Snapshot {
-        views,
+        windows,
         workspace: 1,
         count: 9,
         focused: None,
@@ -52,10 +52,10 @@ fn snapshot(views: Vec<View>) -> Snapshot {
     }
 }
 
-fn popup(id: u64, view: u64) -> PopupInfo {
+fn popup(id: u64, window: u64) -> PopupInfo {
     PopupInfo {
         id,
-        view: Some(view),
+        window: Some(window),
         layer: None,
         layer_namespace: None,
         x: 100,
@@ -91,53 +91,53 @@ fn names(events: &[Event]) -> Vec<String> {
 
 #[test]
 fn nothing_changed_means_no_events() {
-    let mut a = snapshot(vec![view(1), view(2)]);
+    let mut a = snapshot(vec![window(1), window(2)]);
     a.focused = Some(2);
     assert_eq!(diff(&a, &a.clone()), vec![]);
     assert_eq!(diff(&Snapshot::default(), &Snapshot::default()), vec![]);
 }
 
 #[test]
-fn the_focused_flag_of_a_view_alone_makes_no_event() {
-    let old = snapshot(vec![view(1)]);
+fn the_focused_flag_of_a_window_alone_makes_no_event() {
+    let old = snapshot(vec![window(1)]);
     let mut new = old.clone();
-    new.views[0].focused = true;
+    new.windows[0].focused = true;
     assert_eq!(diff(&old, &new), vec![]);
 }
 
 #[test]
-fn opening_a_view() {
+fn opening_a_window() {
     let old = snapshot(vec![]);
-    let new = snapshot(vec![view(1)]);
-    assert_eq!(diff(&old, &new), vec![Event::ViewOpened(view(1))]);
+    let new = snapshot(vec![window(1)]);
+    assert_eq!(diff(&old, &new), vec![Event::WindowOpened(window(1))]);
 }
 
 #[test]
-fn closing_a_view() {
-    let old = snapshot(vec![view(1), view(2)]);
-    let new = snapshot(vec![view(2)]);
-    assert_eq!(diff(&old, &new), vec![Event::ViewClosed { id: 1 }]);
+fn closing_a_window() {
+    let old = snapshot(vec![window(1), window(2)]);
+    let new = snapshot(vec![window(2)]);
+    assert_eq!(diff(&old, &new), vec![Event::WindowClosed { id: 1 }]);
 }
 
 #[test]
 fn several_opened_and_closed_come_in_ascending_id_order() {
-    let old = snapshot(vec![view(9), view(4)]);
-    let new = snapshot(vec![view(8), view(6), view(7)]);
+    let old = snapshot(vec![window(9), window(4)]);
+    let new = snapshot(vec![window(8), window(6), window(7)]);
     assert_eq!(
         diff(&old, &new),
         vec![
-            Event::ViewOpened(view(6)),
-            Event::ViewOpened(view(7)),
-            Event::ViewOpened(view(8)),
-            Event::ViewClosed { id: 4 },
-            Event::ViewClosed { id: 9 },
+            Event::WindowOpened(window(6)),
+            Event::WindowOpened(window(7)),
+            Event::WindowOpened(window(8)),
+            Event::WindowClosed { id: 4 },
+            Event::WindowClosed { id: 9 },
         ]
     );
 }
 
 #[test]
 fn focus_change() {
-    let mut old = snapshot(vec![view(1), view(2)]);
+    let mut old = snapshot(vec![window(1), window(2)]);
     old.focused = Some(1);
     let mut new = old.clone();
     new.focused = Some(2);
@@ -167,13 +167,13 @@ fn focus_change() {
 }
 
 #[test]
-fn a_new_view_is_opened_before_it_gets_the_focus() {
+fn a_new_window_is_opened_before_it_gets_the_focus() {
     let old = snapshot(vec![]);
-    let mut new = snapshot(vec![view(1)]);
+    let mut new = snapshot(vec![window(1)]);
     new.focused = Some(1);
-    new.views[0].focused = true;
+    new.windows[0].focused = true;
     let events = diff(&old, &new);
-    assert_eq!(names(&events), ["view-opened", "focus"]);
+    assert_eq!(names(&events), ["window-opened", "focus"]);
     assert_eq!(
         events[1],
         Event::Focus {
@@ -184,13 +184,13 @@ fn a_new_view_is_opened_before_it_gets_the_focus() {
 }
 
 #[test]
-fn a_closed_view_goes_after_the_focus_that_moved_away_from_it() {
-    let mut old = snapshot(vec![view(1), view(2)]);
+fn a_closed_window_goes_after_the_focus_that_moved_away_from_it() {
+    let mut old = snapshot(vec![window(1), window(2)]);
     old.focused = Some(2);
-    let mut new = snapshot(vec![view(1)]);
+    let mut new = snapshot(vec![window(1)]);
     new.focused = Some(1);
     let events = diff(&old, &new);
-    assert_eq!(names(&events), ["focus", "view-closed"]);
+    assert_eq!(names(&events), ["focus", "window-closed"]);
     assert_eq!(
         events[0],
         Event::Focus {
@@ -198,28 +198,28 @@ fn a_closed_view_goes_after_the_focus_that_moved_away_from_it() {
             previous: Some(2)
         }
     );
-    assert_eq!(events[1], Event::ViewClosed { id: 2 });
+    assert_eq!(events[1], Event::WindowClosed { id: 2 });
 }
 
 #[test]
-fn opening_one_view_and_closing_another_in_one_step() {
-    let mut old = snapshot(vec![view(1)]);
+fn opening_one_window_and_closing_another_in_one_step() {
+    let mut old = snapshot(vec![window(1)]);
     old.focused = Some(1);
-    let mut new = snapshot(vec![view(2)]);
+    let mut new = snapshot(vec![window(2)]);
     new.focused = Some(2);
     assert_eq!(
         names(&diff(&old, &new)),
-        ["view-opened", "focus", "view-closed"]
+        ["window-opened", "focus", "window-closed"]
     );
 }
 
 #[test]
 fn title_and_app_id_changes() {
-    let old = snapshot(vec![view(1), view(2)]);
+    let old = snapshot(vec![window(1), window(2)]);
     let mut new = old.clone();
-    new.views[0].title = Some("~/Git/jff-wm".to_string());
-    new.views[1].app_id = None;
-    new.views[1].title = None;
+    new.windows[0].title = Some("~/Git/jff-wm".to_string());
+    new.windows[1].app_id = None;
+    new.windows[1].title = None;
     assert_eq!(
         diff(&old, &new),
         vec![
@@ -238,13 +238,13 @@ fn title_and_app_id_changes() {
 
 #[test]
 fn a_drag_starts_moves_and_ends() {
-    let old = snapshot(vec![view(1)]);
+    let old = snapshot(vec![window(1)]);
     let mut start = old.clone();
     start.dragging = Some(1);
-    start.views[0].x = 100;
+    start.windows[0].x = 100;
     let mut end = start.clone();
     end.dragging = None;
-    end.views[0].x = 120;
+    end.windows[0].x = 120;
     assert_eq!(
         diff(&old, &start),
         vec![
@@ -285,14 +285,14 @@ fn drag_events_are_flat_json() {
 
 #[test]
 fn geometry_is_one_event_however_much_changed() {
-    let old = snapshot(vec![view(1)]);
+    let old = snapshot(vec![window(1)]);
     let mut moved = old.clone();
-    moved.views[0].x = 100;
+    moved.windows[0].x = 100;
     let mut both = old.clone();
-    both.views[0].x = 100;
-    both.views[0].y = 90;
-    both.views[0].width = 640;
-    both.views[0].height = 480;
+    both.windows[0].x = 100;
+    both.windows[0].y = 90;
+    both.windows[0].width = 640;
+    both.windows[0].height = 480;
     assert_eq!(
         diff(&old, &moved),
         vec![Event::Geometry {
@@ -317,11 +317,11 @@ fn geometry_is_one_event_however_much_changed() {
 
 #[test]
 fn maximize_and_fullscreen() {
-    let old = snapshot(vec![view(3)]);
+    let old = snapshot(vec![window(3)]);
     let mut new = old.clone();
-    new.views[0].maximized = true;
-    new.views[0].x = 0;
-    new.views[0].y = 0;
+    new.windows[0].maximized = true;
+    new.windows[0].x = 0;
+    new.windows[0].y = 0;
     let events = diff(&old, &new);
     assert_eq!(names(&events), ["geometry", "maximized"]);
     assert_eq!(events[1], Event::Maximized { id: 3, on: true });
@@ -331,7 +331,7 @@ fn maximize_and_fullscreen() {
     );
 
     let mut full = old.clone();
-    full.views[0].fullscreen = true;
+    full.windows[0].fullscreen = true;
     assert_eq!(
         diff(&old, &full),
         vec![Event::Fullscreen { id: 3, on: true }]
@@ -343,13 +343,13 @@ fn maximize_and_fullscreen() {
 }
 
 #[test]
-fn urgent_is_an_event_and_a_member_of_the_view() {
+fn urgent_is_an_event_and_a_member_of_the_window() {
     let old = Snapshot {
-        views: vec![view(3)],
+        windows: vec![window(3)],
         ..Snapshot::default()
     };
     let mut urgent = old.clone();
-    urgent.views[0].urgent = true;
+    urgent.windows[0].urgent = true;
     assert_eq!(diff(&old, &urgent), vec![Event::Urgent { id: 3, on: true }]);
     assert_eq!(
         diff(&urgent, &old),
@@ -359,18 +359,18 @@ fn urgent_is_an_event_and_a_member_of_the_view() {
         Event::Urgent { id: 3, on: true }.to_json(),
         "{\"event\":\"urgent\",\"id\":3,\"on\":true}"
     );
-    assert!(urgent.views[0].to_json().contains("\"urgent\":true"));
-    assert!(old.views[0].to_json().contains("\"urgent\":false"));
+    assert!(urgent.windows[0].to_json().contains("\"urgent\":true"));
+    assert!(old.windows[0].to_json().contains("\"urgent\":false"));
 }
 
 #[test]
-fn a_view_changing_workspace() {
-    let old = snapshot(vec![view(1)]);
+fn a_window_changing_workspace() {
+    let old = snapshot(vec![window(1)]);
     let mut new = old.clone();
-    new.views[0].workspace = 4;
+    new.windows[0].workspace = 4;
     assert_eq!(
         diff(&old, &new),
-        vec![Event::ViewWorkspace {
+        vec![Event::WindowWorkspace {
             id: 1,
             workspace: 4
         }]
@@ -411,8 +411,8 @@ fn the_shown_workspace_and_the_count() {
 
 #[test]
 fn switching_workspace_reports_the_workspace_before_the_focus() {
-    let mut old = snapshot(vec![view(1), view(2)]);
-    old.views[1].workspace = 2;
+    let mut old = snapshot(vec![window(1), window(2)]);
+    old.windows[1].workspace = 2;
     old.focused = Some(1);
     let mut new = old.clone();
     new.workspace = 2;
@@ -607,19 +607,19 @@ fn overview_and_screenshot() {
 
 #[test]
 fn groups_are_parsed_and_collected() {
-    assert_eq!(Group::parse("views"), Some(Group::Views));
+    assert_eq!(Group::parse("windows"), Some(Group::Windows));
     assert_eq!(Group::parse("focus"), Some(Group::Focus));
     assert_eq!(Group::parse("workspaces"), Some(Group::Workspaces));
     assert_eq!(Group::parse("outputs"), Some(Group::Outputs));
     assert_eq!(Group::parse("modes"), Some(Group::Modes));
     assert_eq!(Group::parse("popups"), Some(Group::Popups));
     assert_eq!(Group::parse("layers"), Some(Group::Layers));
-    assert_eq!(Group::parse("view"), None);
-    assert_eq!(Group::parse("Views"), None);
+    assert_eq!(Group::parse("window"), None);
+    assert_eq!(Group::parse("Windows"), None);
 
     let all = GroupSet::from_groups(&[]);
     for group in [
-        Group::Views,
+        Group::Windows,
         Group::Focus,
         Group::Workspaces,
         Group::Outputs,
@@ -629,8 +629,8 @@ fn groups_are_parsed_and_collected() {
     ] {
         assert!(all.contains(group));
     }
-    let some = GroupSet::from_groups(&[Group::Views, Group::Modes, Group::Views]);
-    assert!(some.contains(Group::Views));
+    let some = GroupSet::from_groups(&[Group::Windows, Group::Modes, Group::Windows]);
+    assert!(some.contains(Group::Windows));
     assert!(some.contains(Group::Modes));
     assert!(!some.contains(Group::Focus));
     assert!(!some.contains(Group::Workspaces));
@@ -639,18 +639,18 @@ fn groups_are_parsed_and_collected() {
 
 #[test]
 fn every_event_belongs_to_its_group() {
-    let v = view(1);
+    let v = window(1);
     let o = output("DP-1", 0);
     let cases = [
-        (Event::ViewOpened(v.clone()), Group::Views),
-        (Event::ViewClosed { id: 1 }, Group::Views),
-        (Event::Title { id: 1, title: None }, Group::Views),
+        (Event::WindowOpened(v.clone()), Group::Windows),
+        (Event::WindowClosed { id: 1 }, Group::Windows),
+        (Event::Title { id: 1, title: None }, Group::Windows),
         (
             Event::AppId {
                 id: 1,
                 app_id: None,
             },
-            Group::Views,
+            Group::Windows,
         ),
         (
             Event::Geometry {
@@ -660,18 +660,18 @@ fn every_event_belongs_to_its_group() {
                 width: 1,
                 height: 1,
             },
-            Group::Views,
+            Group::Windows,
         ),
-        (Event::Drag { id: 1, on: true }, Group::Views),
-        (Event::Maximized { id: 1, on: true }, Group::Views),
-        (Event::Fullscreen { id: 1, on: true }, Group::Views),
-        (Event::Urgent { id: 1, on: true }, Group::Views),
+        (Event::Drag { id: 1, on: true }, Group::Windows),
+        (Event::Maximized { id: 1, on: true }, Group::Windows),
+        (Event::Fullscreen { id: 1, on: true }, Group::Windows),
+        (Event::Urgent { id: 1, on: true }, Group::Windows),
         (
-            Event::ViewWorkspace {
+            Event::WindowWorkspace {
                 id: 1,
                 workspace: 2,
             },
-            Group::Views,
+            Group::Windows,
         ),
         (
             Event::Focus {
@@ -704,8 +704,8 @@ fn every_event_belongs_to_its_group() {
 }
 
 #[test]
-fn a_view_is_written_like_the_documented_example() {
-    let mut v = view(1);
+fn a_window_is_written_like_the_documented_example() {
+    let mut v = window(1);
     v.focused = true;
     assert_eq!(
         v.to_json(),
@@ -723,8 +723,8 @@ fn a_view_is_written_like_the_documented_example() {
 }
 
 #[test]
-fn a_view_in_a_container_names_it() {
-    let mut v = view(1);
+fn a_window_in_a_container_names_it() {
+    let mut v = window(1);
     v.container = Some(ContainerRef {
         id: 3,
         name: Some("Terminals".to_string()),
@@ -736,22 +736,22 @@ fn a_view_in_a_container_names_it() {
     assert!(v
         .to_json()
         .ends_with("\"container\":{\"id\":4,\"name\":null}}"));
-    // it is spliced flat into view-opened as well
-    assert!(Event::ViewOpened(v)
+    // it is spliced flat into window-opened as well
+    assert!(Event::WindowOpened(v)
         .to_json()
         .ends_with("\"container\":{\"id\":4,\"name\":null}}"));
 }
 
 #[test]
-fn joining_leaving_or_renaming_a_container_is_a_view_container_event() {
+fn joining_leaving_or_renaming_a_container_is_a_window_container_event() {
     let named = |name: Option<&str>| {
         Some(ContainerRef {
             id: 2,
             name: name.map(str::to_string),
         })
     };
-    let mut plain = view(1);
-    let mut joined = view(1);
+    let mut plain = window(1);
+    let mut joined = window(1);
     joined.container = named(None);
     let events = diff(
         &snapshot(vec![plain.clone()]),
@@ -759,18 +759,18 @@ fn joining_leaving_or_renaming_a_container_is_a_view_container_event() {
     );
     assert_eq!(
         events,
-        [Event::ViewContainer {
+        [Event::WindowContainer {
             id: 1,
             container: named(None)
         }]
     );
     assert_eq!(
         events[0].to_json(),
-        "{\"event\":\"view-container\",\"id\":1,\"container\":{\"id\":2,\"name\":null}}"
+        "{\"event\":\"window-container\",\"id\":1,\"container\":{\"id\":2,\"name\":null}}"
     );
-    assert_eq!(events[0].group(), Group::Views);
+    assert_eq!(events[0].group(), Group::Windows);
 
-    let mut renamed = view(1);
+    let mut renamed = window(1);
     renamed.container = named(Some("Mail"));
     assert_eq!(
         diff(&snapshot(vec![joined.clone()]), &snapshot(vec![renamed])).len(),
@@ -784,34 +784,34 @@ fn joining_leaving_or_renaming_a_container_is_a_view_container_event() {
     );
     assert_eq!(
         left[0].to_json(),
-        "{\"event\":\"view-container\",\"id\":1,\"container\":null}"
+        "{\"event\":\"window-container\",\"id\":1,\"container\":null}"
     );
     // nothing changed, nothing said
     assert!(diff(&snapshot(vec![joined.clone()]), &snapshot(vec![joined])).is_empty());
 }
 
 #[test]
-fn a_container_is_listed_with_its_views_and_area() {
+fn a_container_is_listed_with_its_windows_and_area() {
     let info = ContainerInfo {
         id: 1,
         name: Some("Terminals".to_string()),
         workspace: 2,
         output: Some("DP-1".to_string()),
         area: Some((10, 20, 1900, 1040)),
-        views: vec![3, 4],
+        windows: vec![3, 4],
         focused: Some(4),
         maximized: None,
     };
     assert_eq!(
         info.to_json(),
         "{\"id\":1,\"name\":\"Terminals\",\"workspace\":2,\"output\":\"DP-1\",\"x\":10,\"y\":20,\
-         \"width\":1900,\"height\":1040,\"views\":[3,4],\"focused\":4,\"maximized\":null}"
+         \"width\":1900,\"height\":1040,\"windows\":[3,4],\"focused\":4,\"maximized\":null}"
     );
     let bare = ContainerInfo {
         name: None,
         output: None,
         area: None,
-        views: vec![],
+        windows: vec![],
         focused: None,
         maximized: Some(3),
         ..info
@@ -819,7 +819,7 @@ fn a_container_is_listed_with_its_views_and_area() {
     assert_eq!(
         bare.to_json(),
         "{\"id\":1,\"name\":null,\"workspace\":2,\"output\":null,\"x\":null,\"y\":null,\
-         \"width\":null,\"height\":null,\"views\":[],\"focused\":null,\"maximized\":3}"
+         \"width\":null,\"height\":null,\"windows\":[],\"focused\":null,\"maximized\":3}"
     );
 }
 
@@ -827,15 +827,15 @@ fn a_container_is_listed_with_its_views_and_area() {
 fn events_are_written_as_one_json_line_each() {
     let cases: Vec<(Event, &str)> = vec![
         (
-            Event::ViewOpened(view(5)),
-            "{\"event\":\"view-opened\",\"id\":5,\"app_id\":\"foot\",\"title\":\"~\",\
+            Event::WindowOpened(window(5)),
+            "{\"event\":\"window-opened\",\"id\":5,\"app_id\":\"foot\",\"title\":\"~\",\
                  \"x\":40,\"y\":40,\"width\":800,\"height\":600,\"maximized\":false,\
                  \"fullscreen\":false,\"focused\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\
                  \"container\":null}",
         ),
         (
-            Event::ViewClosed { id: 5 },
-            "{\"event\":\"view-closed\",\"id\":5}",
+            Event::WindowClosed { id: 5 },
+            "{\"event\":\"window-closed\",\"id\":5}",
         ),
         (
             Event::Focus {
@@ -888,11 +888,11 @@ fn events_are_written_as_one_json_line_each() {
             "{\"event\":\"fullscreen\",\"id\":5,\"on\":false}",
         ),
         (
-            Event::ViewWorkspace {
+            Event::WindowWorkspace {
                 id: 5,
                 workspace: 2,
             },
-            "{\"event\":\"view-workspace\",\"id\":5,\"workspace\":2}",
+            "{\"event\":\"window-workspace\",\"id\":5,\"workspace\":2}",
         ),
         (
             Event::Workspace {
@@ -975,10 +975,10 @@ fn awkward_titles_stay_valid_single_line_json() {
     assert!(json.contains("✓ héllo"));
     assert_eq!(string_member(&json, "title"), title);
 
-    let mut v = view(7);
+    let mut v = window(7);
     v.title = Some(title.to_string());
     v.app_id = Some(title.to_string());
-    let json = Event::ViewOpened(v).to_json();
+    let json = Event::WindowOpened(v).to_json();
     assert!(!json.contains('\n'));
     assert_eq!(string_member(&json, "title"), title);
     assert_eq!(string_member(&json, "app_id"), title);
@@ -993,20 +993,20 @@ fn awkward_titles_stay_valid_single_line_json() {
 
 #[test]
 fn the_snapshot_has_every_group_by_default() {
-    let mut s = snapshot(vec![view(1), view(2)]);
+    let mut s = snapshot(vec![window(1), window(2)]);
     s.workspace = 2;
     s.focused = Some(2);
-    s.views[1].focused = true;
+    s.windows[1].focused = true;
     s.outputs.push(output("HDMI-A-1", 1920));
     let json = s.to_json(GroupSet::ALL);
     assert_eq!(
         json,
         format!(
-            "{{\"event\":\"snapshot\",\"views\":[{},{}],\"workspace\":2,\"count\":9,\
+            "{{\"event\":\"snapshot\",\"windows\":[{},{}],\"workspace\":2,\"count\":9,\
                  \"focused\":2,\"outputs\":[{},{}],\"overview\":false,\"screenshot\":false,\
                  \"locked\":false,\"popups\":[],\"layers\":[]}}",
-            s.views[0].to_json(),
-            s.views[1].to_json(),
+            s.windows[0].to_json(),
+            s.windows[1].to_json(),
             s.outputs[0].to_json(),
             s.outputs[1].to_json(),
         )
@@ -1023,7 +1023,7 @@ fn an_empty_snapshot_is_valid() {
     };
     assert_eq!(
         s.to_json(GroupSet::ALL),
-        "{\"event\":\"snapshot\",\"views\":[],\"workspace\":1,\"count\":9,\
+        "{\"event\":\"snapshot\",\"windows\":[],\"workspace\":1,\"count\":9,\
              \"focused\":null,\"outputs\":[],\"overview\":false,\"screenshot\":false,\
              \"locked\":false,\"popups\":[],\"layers\":[]}"
     );
@@ -1031,7 +1031,7 @@ fn an_empty_snapshot_is_valid() {
 
 #[test]
 fn the_snapshot_only_has_the_asked_for_groups() {
-    let mut s = snapshot(vec![view(1)]);
+    let mut s = snapshot(vec![window(1)]);
     s.focused = Some(1);
     assert_eq!(
         s.to_json(GroupSet::from_groups(&[Group::Workspaces])),
@@ -1041,8 +1041,8 @@ fn the_snapshot_only_has_the_asked_for_groups() {
         s.to_json(GroupSet::from_groups(&[Group::Focus, Group::Modes])),
         "{\"event\":\"snapshot\",\"focused\":1,\"overview\":false,\"screenshot\":false,\"locked\":false}"
     );
-    let json = s.to_json(GroupSet::from_groups(&[Group::Views]));
-    assert!(json.starts_with("{\"event\":\"snapshot\",\"views\":[{\"id\":1,"));
+    let json = s.to_json(GroupSet::from_groups(&[Group::Windows]));
+    assert!(json.starts_with("{\"event\":\"snapshot\",\"windows\":[{\"id\":1,"));
     assert!(!json.contains("workspace\":1,\"count"));
     assert!(!json.contains("outputs"));
     assert!(!json.contains("overview"));
@@ -1050,29 +1050,29 @@ fn the_snapshot_only_has_the_asked_for_groups() {
 
 #[test]
 fn a_menu_opens_after_its_window_and_closes_before_it() {
-    let mut old = snapshot(vec![view(1)]);
+    let mut old = snapshot(vec![window(1)]);
     old.popups = vec![popup(7, 1)];
-    let mut new = snapshot(vec![view(1), view(2)]);
+    let mut new = snapshot(vec![window(1), window(2)]);
     new.popups = vec![popup(8, 2)];
     assert_eq!(
         names(&diff(&old, &new)),
-        ["view-opened", "popup-opened", "popup-closed"]
+        ["window-opened", "popup-opened", "popup-closed"]
     );
 
     let mut gone = snapshot(vec![]);
     gone.popups = vec![];
-    let mut had = snapshot(vec![view(1)]);
+    let mut had = snapshot(vec![window(1)]);
     had.popups = vec![popup(7, 1)];
-    assert_eq!(names(&diff(&had, &gone)), ["popup-closed", "view-closed"]);
+    assert_eq!(names(&diff(&had, &gone)), ["popup-closed", "window-closed"]);
 }
 
 #[test]
 fn panels_open_first_and_close_last() {
-    let old = snapshot(vec![view(1)]);
-    let mut new = snapshot(vec![view(1), view(2)]);
+    let old = snapshot(vec![window(1)]);
+    let mut new = snapshot(vec![window(1), window(2)]);
     new.layers = vec![layer(3)];
-    assert_eq!(names(&diff(&old, &new)), ["layer-opened", "view-opened"]);
-    assert_eq!(names(&diff(&new, &old)), ["view-closed", "layer-closed"]);
+    assert_eq!(names(&diff(&old, &new)), ["layer-opened", "window-opened"]);
+    assert_eq!(names(&diff(&new, &old)), ["window-closed", "layer-closed"]);
 }
 
 #[test]
@@ -1089,7 +1089,7 @@ fn locking_the_session_is_an_event() {
 fn popup_and_layer_events_are_flat_json() {
     assert_eq!(
         Event::PopupOpened(popup(7, 1)).to_json(),
-        "{\"event\":\"popup-opened\",\"id\":7,\"view\":1,\"layer\":null,\"x\":100,\"y\":200,\
+        "{\"event\":\"popup-opened\",\"id\":7,\"window\":1,\"layer\":null,\"x\":100,\"y\":200,\
          \"width\":150,\"height\":90}"
     );
     assert_eq!(

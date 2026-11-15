@@ -218,7 +218,7 @@ impl PointerGrab<JffState> for MoveGrab {
     }
 
     fn unset(&mut self, data: &mut JffState) {
-        data.dragging_view = None;
+        data.dragging_window = None;
         let with_zone = self.zone.is_some();
         if let Some(zone) = self.zone.take() {
             data.zone_drag_end(zone);

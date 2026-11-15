@@ -17,12 +17,12 @@ use jff_wm::primitives::layout::MonitorTarget;
 
 #[test]
 fn requests_are_parsed() {
-    assert_eq!(parse_request("views"), Ok(Request::Views));
+    assert_eq!(parse_request("windows"), Ok(Request::Windows));
     assert_eq!(parse_request("status"), Ok(Request::Status));
     assert_eq!(parse_request("outputs"), Ok(Request::Outputs));
     assert_eq!(parse_request("  focused \n"), Ok(Request::Focused));
-    assert_eq!(parse_request("view-info"), Ok(Request::Info(None)));
-    assert_eq!(parse_request("view-info 7"), Ok(Request::Info(Some(7))));
+    assert_eq!(parse_request("window-info"), Ok(Request::Info(None)));
+    assert_eq!(parse_request("window-info 7"), Ok(Request::Info(Some(7))));
     assert_eq!(parse_request("close 3"), Ok(Request::Close(Some(3))));
     assert_eq!(
         parse_request("toggle-maximize"),
@@ -90,8 +90,8 @@ fn watch_is_parsed() {
     assert_eq!(parse_request("watch"), Ok(Request::Watch(vec![])));
     assert_eq!(parse_request("  watch \n"), Ok(Request::Watch(vec![])));
     assert_eq!(
-        parse_request("watch views workspaces"),
-        Ok(Request::Watch(vec![Group::Views, Group::Workspaces]))
+        parse_request("watch windows workspaces"),
+        Ok(Request::Watch(vec![Group::Windows, Group::Workspaces]))
     );
     assert_eq!(
         parse_request("watch focus outputs modes"),
@@ -101,10 +101,10 @@ fn watch_is_parsed() {
             Group::Modes
         ]))
     );
-    let err = parse_request("watch views panels").unwrap_err();
+    let err = parse_request("watch windows panels").unwrap_err();
     assert!(err.contains("\"panels\""), "{err}");
     assert!(err.contains(Group::NAMES), "{err}");
-    assert!(parse_request("views focus").is_err());
+    assert!(parse_request("windows focus").is_err());
     assert!(parse_request("watch close").is_err());
     assert!(parse_request("watch 3").is_err());
     assert!(COMMANDS.contains("watch"));
@@ -159,7 +159,7 @@ fn bad_requests_are_refused() {
     assert!(parse_request("close abc").is_err());
     assert!(parse_request("close 1 2").is_err());
     assert!(parse_request("focus").is_err());
-    assert!(parse_request("views 1").is_err());
+    assert!(parse_request("windows 1").is_err());
     assert!(parse_request("status 1").is_err());
     assert!(parse_request("fullscreen 1 2").is_err());
 }
@@ -448,8 +448,8 @@ fn words(line: &str) -> Vec<String> {
 #[test]
 fn pretty_puts_one_member_per_line() {
     assert_eq!(
-        pretty("{\"ok\":true,\"views\":[],\"a\":{},\"b\":[1,{\"c\":null}]}"),
-        "{\n  \"ok\": true,\n  \"views\": [],\n  \"a\": {},\n  \"b\": [\n    1,\n    {\n      \"c\": null\n    }\n  ]\n}"
+        pretty("{\"ok\":true,\"windows\":[],\"a\":{},\"b\":[1,{\"c\":null}]}"),
+        "{\n  \"ok\": true,\n  \"windows\": [],\n  \"a\": {},\n  \"b\": [\n    1,\n    {\n      \"c\": null\n    }\n  ]\n}"
     );
 }
 
@@ -471,7 +471,7 @@ fn pretty_leaves_strings_alone() {
 #[test]
 fn pretty_does_not_change_the_json() {
     let compact =
-        "{\"event\":\"snapshot\",\"views\":[{\"id\":1,\"title\":\"x y\"}],\"locked\":false}";
+        "{\"event\":\"snapshot\",\"windows\":[{\"id\":1,\"title\":\"x y\"}],\"locked\":false}";
     let again: String = {
         // Take every whitespace outside of strings out again.
         let mut out = String::new();
@@ -500,10 +500,10 @@ fn pretty_does_not_change_the_json() {
 
 #[test]
 fn the_style_flags_come_before_the_command() {
-    let args = words("views");
+    let args = words("windows");
     assert_eq!(split_style(&args), (None, &args[..]));
 
-    let args = words("--pretty views");
+    let args = words("--pretty windows");
     assert_eq!(split_style(&args), (Some(true), &args[1..]));
 
     let args = words("-c status");

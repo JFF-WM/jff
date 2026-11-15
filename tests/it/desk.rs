@@ -274,7 +274,7 @@ fn assigning_skips_windows_without_an_answer() {
 }
 
 #[test]
-fn turning_per_output_on_keeps_the_view_and_off_follows_the_active_monitor() {
+fn turning_per_output_on_keeps_the_window_and_off_follows_the_active_monitor() {
     let mut d = Desk::default();
     d.add_on("a", "left");
     d.set_current(1);

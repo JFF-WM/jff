@@ -758,7 +758,7 @@ impl JffState {
                 sm.dirty = true;
             }
         }
-        if self.dragging_view.is_none() && self.resize.is_none() {
+        if self.dragging_window.is_none() && self.resize.is_none() {
             self.session_save_if_dirty();
         }
     }

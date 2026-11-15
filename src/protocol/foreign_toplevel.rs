@@ -4,7 +4,7 @@
 //!
 //! Like `jff msg watch`, changes come from comparing, not from calling an `emit` from every
 //! place that changes a window: once per event-loop iteration, `JffState::publish_foreign_toplevels`
-//! takes the view list (the one `jff msg views` shows), compares it with what clients were told,
+//! takes the window list (the one `jff msg windows` shows), compares it with what clients were told,
 //! and sends the difference. Nothing is computed while no client has bound the protocol.
 //!
 //! Not supported:
@@ -17,7 +17,7 @@
 //!   `urgent` member and event of `jff msg` and the `urgent` state of `ext-workspace-v1` carry it.
 //!
 //! Windows on every workspace are announced, not just the ones on the shown workspace. A window
-//! is announced once it has a size (same rule as `jff msg views`).
+//! is announced once it has a size (same rule as `jff msg windows`).
 
 use smithay::desktop::Window;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -30,8 +30,8 @@ use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 
-use crate::ipc::events::View;
-use crate::ipc::ViewId;
+use crate::ipc::events::WindowInfo;
+use crate::ipc::WindowId;
 use crate::state::JffState;
 
 /// Highest version jff speaks. 3 only adds the `parent` event, which we never send.
@@ -56,14 +56,14 @@ struct Info {
 }
 
 impl Info {
-    fn from_view(view: &View) -> Self {
+    fn from_window(window: &WindowInfo) -> Self {
         Self {
-            title: view.title.clone().unwrap_or_default(),
-            app_id: view.app_id.clone().unwrap_or_default(),
-            output: view.output.clone(),
-            maximized: view.maximized,
-            fullscreen: view.fullscreen,
-            activated: view.focused,
+            title: window.title.clone().unwrap_or_default(),
+            app_id: window.app_id.clone().unwrap_or_default(),
+            output: window.output.clone(),
+            maximized: window.maximized,
+            fullscreen: window.fullscreen,
+            activated: window.focused,
         }
     }
 
@@ -164,14 +164,14 @@ impl JffState {
             return;
         }
 
-        let views = self.view_list();
+        let windows = self.window_list();
         let outputs = self.outputs.clone();
         let display = self.display_handle.clone();
         let ft = &mut self.foreign_toplevel;
 
         // Windows that went away.
         ft.toplevels.retain(|toplevel| {
-            let alive = views.iter().any(|v| v.id == toplevel.id);
+            let alive = windows.iter().any(|v| v.id == toplevel.id);
             if !alive {
                 for (_, handle) in &toplevel.handles {
                     handle.closed();
@@ -180,9 +180,9 @@ impl JffState {
             alive
         });
 
-        for view in &views {
-            let info = Info::from_view(view);
-            match ft.toplevels.iter_mut().find(|t| t.id == view.id) {
+        for window in &windows {
+            let info = Info::from_window(window);
+            match ft.toplevels.iter_mut().find(|t| t.id == window.id) {
                 // Not new: send what changed.
                 Some(toplevel) => {
                     toplevel.handles.retain(|(_, handle)| handle.is_alive());
@@ -197,7 +197,7 @@ impl JffState {
                 // New: every manager gets a handle for it.
                 None => {
                     let mut toplevel = Toplevel {
-                        id: view.id,
+                        id: window.id,
                         last: info,
                         handles: Vec::new(),
                     };
@@ -210,10 +210,10 @@ impl JffState {
         }
     }
 
-    /// The window with the view id `id`.
-    fn window_by_view_id(&self, id: u64) -> Option<Window> {
+    /// The window with the window id `id`.
+    fn window_by_window_id(&self, id: u64) -> Option<Window> {
         self.desk
-            .find_by(|w| w.user_data().get::<ViewId>() == Some(&ViewId(id)))
+            .find_by(|w| w.user_data().get::<WindowId>() == Some(&WindowId(id)))
             .map(|entry| entry.window.clone())
     }
 }
@@ -305,7 +305,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, u64> for JffState {
             return;
         }
         // The window may be gone already (the client hasn't heard of it yet).
-        let Some(window) = state.window_by_view_id(*id) else {
+        let Some(window) = state.window_by_window_id(*id) else {
             return;
         };
         let Some(toplevel) = window.toplevel().cloned() else {

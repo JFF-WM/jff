@@ -334,7 +334,7 @@ pub struct JffState {
     /// State of the `wlr-layer-shell` protocol (panels, launchers, wallpapers).
     pub layer_shell_state: WlrLayerShellState,
     /// The id the next window gets (see `ipc.rs`).
-    pub next_view_id: u64,
+    pub next_window_id: u64,
     /// Clients of `jff msg watch` that get an event on every change (see `ipc.rs`).
     pub subscribers: Vec<crate::ipc::Subscriber>,
     /// The id the next watcher gets.
@@ -343,8 +343,8 @@ pub struct JffState {
     pub last_snapshot: Option<crate::ipc::events::Snapshot>,
     /// Events that are not a change of the snapshot (button presses), sent with the next diff.
     pub pending_events: Vec<crate::ipc::events::Event>,
-    /// Id of the view an interactive move grab is dragging, for the `drag` watch event.
-    pub dragging_view: Option<u64>,
+    /// Id of the window an interactive move grab is dragging, for the `drag` watch event.
+    pub dragging_window: Option<u64>,
 
     pub desk: Desk<Window>,
     /// Tracks popups (menus, tooltips) so they're drawn and receive input with their parent.
@@ -679,12 +679,12 @@ impl JffState {
             color_representation_manager,
             color_management,
             layer_shell_state,
-            next_view_id: 1,
+            next_window_id: 1,
             subscribers: Vec::new(),
             next_subscriber_id: 1,
             last_snapshot: None,
             pending_events: Vec::new(),
-            dragging_view: None,
+            dragging_window: None,
             desk: Desk::default(),
             popups: PopupManager::default(),
             resize: None,
@@ -1297,7 +1297,7 @@ impl XdgShellHandler for JffState {
         // app that asks for its window to be restored does so before that, and the restored
         // state has to be in the first configure.
         let window = Window::new_wayland_window(surface);
-        self.assign_view_id(&window);
+        self.assign_window_id(&window);
         // New windows open on the monitor the pointer is on, on the workspace it shows.
         let output = placement
             .and_then(|i| self.outputs.get(i))

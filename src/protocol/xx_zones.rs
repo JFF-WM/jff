@@ -37,7 +37,7 @@ use super::xx_zones_bindings::server::xx_zone_manager_v1::{self, XxZoneManagerV1
 use super::xx_zones_bindings::server::xx_zone_v1::{self, XxZoneV1};
 use crate::desk::{Pos, WindowMode};
 use crate::feature::outputs::output_rect;
-use crate::ipc::ViewId;
+use crate::ipc::WindowId;
 use crate::primitives::geom::Size;
 use crate::primitives::layout::{self, Rect};
 use crate::primitives::zone as geometry;
@@ -618,8 +618,8 @@ impl JffState {
 
     /// The user is dragging or resizing this window, or pressing a button on it.
     fn zone_member_interacting(&self, window: &Window, surface: &WlSurface) -> bool {
-        let view = window.user_data().get::<ViewId>().map(|id| id.0);
-        if view.is_some() && self.dragging_view == view {
+        let id = window.user_data().get::<WindowId>().map(|id| id.0);
+        if id.is_some() && self.dragging_window == id {
             return true;
         }
         if self

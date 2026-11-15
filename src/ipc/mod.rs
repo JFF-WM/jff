@@ -1,4 +1,4 @@
-//! Control socket: scripts and other programs ask jff about its views (windows) and tell it
+//! Control socket: scripts and other programs ask jff about its windows (windows) and tell it
 //! what to do. `jff msg <command>` is the CLI.
 //!
 //! The socket lives at `$XDG_RUNTIME_DIR/jff.<wayland display>.sock` and is exported to
@@ -7,28 +7,28 @@
 //! keeps the connection open and streams events.
 //!
 //! ```text
-//! views                      every view
-//! focused                    the view that has the keyboard
-//! view-info [ID]             one view (the focused one without an ID)
-//! close [ID]                 ask a view to close
-//! maximize [ID]              maximize a view
+//! windows                      every window
+//! focused                    the window that has the keyboard
+//! window-info [ID]             one window (the focused one without an ID)
+//! close [ID]                 ask a window to close
+//! maximize [ID]              maximize a window
 //! unmaximize [ID]            put it back
 //! toggle-maximize [ID]       maximize, or put back when it already is
-//! fullscreen [ID]            make a view fullscreen
+//! fullscreen [ID]            make a window fullscreen
 //! unfullscreen [ID]          leave fullscreen
-//! focus ID                   raise a view and give it the keyboard (switches workspace if needed)
+//! focus ID                   raise a window and give it the keyboard (switches workspace if needed)
 //! containers                 the tiling containers on the current workspace
-//! layout-save NAME [ID]      save the layout of a view's container as NAME (without ID: the focused view's, else the only container's)
+//! layout-save NAME [ID]      save the layout of a window's container as NAME (without ID: the focused window's, else the only container's)
 //! layout-apply NAME [ID]     lay that container out the way the saved layout NAME says
 //! layout-list                the saved container layouts
 //! layout-delete NAME         forget a saved layout
-//! tag [NAME [ID]]            give a view (the focused one without an ID) a tag of yours, or show its tag without arguments
-//! untag [ID]                 take the tag you gave a view away again
+//! tag [NAME [ID]]            give a window (the focused one without an ID) a tag of yours, or show its tag without arguments
+//! untag [ID]                 take the tag you gave a window away again
 //! workspaces                 the shown workspace and how many there are
 //! workspace N|next|prev      show a workspace (N counts from 1)
-//! move-to-workspace N [ID]   send a view (the focused one without an ID) to workspace N
+//! move-to-workspace N [ID]   send a window (the focused one without an ID) to workspace N
 //! focus-monitor TARGET       put the pointer and the keyboard on another monitor
-//! move-to-monitor TARGET [ID]  send a view (the focused one without an ID) to another monitor, the keyboard and the pointer follow
+//! move-to-monitor TARGET [ID]  send a window (the focused one without an ID) to another monitor, the keyboard and the pointer follow
 //! move-workspace-to-monitor TARGET  trade the workspace the pointer's monitor shows with the one TARGET shows (needs `workspaces { per-output }`)
 //! move-cursor X Y            put the pointer at X, Y (pixels in the shared space, like events)
 //! click left|right|middle    press and release that button where the pointer is
@@ -39,7 +39,7 @@
 //!                            each request without drawing anything, so the first reply can have
 //!                            `"stats":null`
 //! toggle-stats               show or hide the stats overlay (the `toggle-stats` action)
-//! status                     views and workspace state in one reply (for panels)
+//! status                     windows and workspace state in one reply (for panels)
 //! outputs                    every monitor: area, scanout, adaptive sync and colors
 //! screenshot-area            freeze the monitor under the pointer and pick a rectangle to save
 //! screenshot-fullscreen      save a picture of the monitor under the pointer
@@ -55,23 +55,23 @@
 //! running as the same user, which the socket's `0600` permissions already restrict it to.
 //!
 //! `jff msg` prints a reply as it came, one line, when its output is a pipe or a file, so
-//! `jff msg views | jq` and scripts get one JSON object per line. On a terminal it indents the
+//! `jff msg windows | jq` and scripts get one JSON object per line. On a terminal it indents the
 //! JSON for reading, and so does each event of `watch` (with an empty line after it).
 //! `jff msg --pretty COMMAND` indents in any case, `jff msg --compact COMMAND` never does, the
 //! flag comes before the command. The socket itself always speaks one line.
 //!
-//! Replies look like `{"ok":true,"view":{...}}`, `{"ok":true,"views":[...]}`, or
+//! Replies look like `{"ok":true,"window":{...}}`, `{"ok":true,"windows":[...]}`, or
 //! `{"ok":false,"error":"..."}`. Workspace commands reply
 //! `{"ok":true,"workspace":2,"count":9}` (the shown workspace, from 1). `status` replies
-//! `{"ok":true,"views":[...],"workspace":2,"count":9}`. `TARGET` of the three monitor commands is `left`,
-//! `right`, `up`, `down` (the monitor that lies that way from the one in use, from the view's
+//! `{"ok":true,"windows":[...],"workspace":2,"count":9}`. `TARGET` of the three monitor commands is `left`,
+//! `right`, `up`, `down` (the monitor that lies that way from the one in use, from the window's
 //! for `move-to-monitor`), `next`, `prev` (left to right, then top to bottom, wrapping) or the
 //! name of a monitor as `outputs` lists it. `focus-monitor` replies `{"ok":true,"output":"DP-2"}`,
-//! `move-to-monitor` `{"ok":true,"output":"DP-2","view":{...}}` (the view is on the workspace that
+//! `move-to-monitor` `{"ok":true,"output":"DP-2","window":{...}}` (the window is on the workspace that
 //! monitor shows), `move-workspace-to-monitor`
 //! `{"ok":true,"output":"DP-2","workspace":2,"count":9}` with the workspace now shown there. A target
 //! that is not there (the edge of the desktop, a name that is not connected) is an error reply.
-//! A view is
+//! A window is
 //! `{"id":1,"app_id":"foot","title":"~","x":40,"y":40,"width":800,"height":600,
 //!   "maximized":false,"fullscreen":false,"focused":true,"urgent":false,"output":"DP-1",
 //!   "workspace":1,"pid":4242,"container":null}`.
@@ -82,12 +82,12 @@
 //! process id of the client that owns the window (null when unknown), an X11 window reports
 //! xwayland-satellite's pid. `container` is `{"id":1,"name":"Terminals"}` for a window that is a
 //! member of a tiling container (`name` is null for a container without one), null for any
-//! other window. It is in `views`, `focused`, `view-info`, `status` and the `watch` snapshot.
+//! other window. It is in `windows`, `focused`, `window-info`, `status` and the `watch` snapshot.
 //!
 //! `containers` replies `{"ok":true,"workspace":2,"containers":[CONTAINER,...]}`, the
 //! containers on the shown workspace, oldest first. A container is
 //! `{"id":1,"name":null,"workspace":2,"output":"DP-1","x":0,"y":0,"width":1920,"height":1080,
-//!   "views":[3,4],"focused":4,"maximized":null}`: `views` are the view ids of its windows in tree
+//!   "windows":[3,4],"focused":4,"maximized":null}`: `windows` are the window ids of its windows in tree
 //! order, `focused` the one that has the focus inside it, `maximized` the one that fills it
 //! (null when none does), and `x`, `y`, `width` and `height` the rectangle it is laid out in
 //! (all null before it has been laid out).
@@ -112,9 +112,9 @@
 //!
 //! ```text
 //! {"event":"snapshot",
-//!  "views":[VIEW,...],                     every view, topmost first (a view is described above)
+//!  "windows":[VIEW,...],                     every window, topmost first (a window is described above)
 //!  "workspace":2,"count":9,                the shown workspace (from 1) and how many there are
-//!  "focused":3,                            id of the view that has the keyboard, or null
+//!  "focused":3,                            id of the window that has the keyboard, or null
 //!  "outputs":[{"name":"DP-1","x":0,"y":0,"width":1920,"height":1080,"scanout":false,
 //!              "adaptive_sync":false,"color":COLOR},...],
 //!  "overview":false,"screenshot":false,    overview / screenshot selection is open
@@ -124,24 +124,24 @@
 //! ```
 //!
 //! Following events are written flat, `{"event":"title","id":5,"title":"..."}`, in an order a
-//! client can apply: monitors added or changed, views opened, changes on views already there,
-//! the shown workspace, focus, views closed (after the `focus` that moved away from them),
-//! monitors removed, overview, screenshot selection, lock. Panels open before views and close
-//! after them, menus open after their view or panel and close before it.
+//! client can apply: monitors added or changed, windows opened, changes on windows already there,
+//! the shown workspace, focus, windows closed (after the `focus` that moved away from them),
+//! monitors removed, overview, screenshot selection, lock. Panels open before windows and close
+//! after them, menus open after their window or panel and close before it.
 //!
 //! ```text
 //! event            members                                   group
-//! view-opened      all members of a view                     views
-//! view-closed      id                                        views
-//! title            id, title (string or null)                views
-//! app-id           id, app_id (string or null)               views
-//! geometry         id, x, y, width, height                   views
-//! drag             id, on                                    views
-//! maximized        id, on                                    views
-//! fullscreen       id, on                                    views
-//! view-workspace   id, workspace                             views
-//! view-container   id, container (see `container` above)     views
-//! focus            id, previous (view ids, or null)          focus
+//! window-opened      all members of a window                     windows
+//! window-closed      id                                        windows
+//! title            id, title (string or null)                windows
+//! app-id           id, app_id (string or null)               windows
+//! geometry         id, x, y, width, height                   windows
+//! drag             id, on                                    windows
+//! maximized        id, on                                    windows
+//! fullscreen       id, on                                    windows
+//! window-workspace   id, workspace                             windows
+//! window-container   id, container (see `container` above)     windows
+//! focus            id, previous (window ids, or null)          focus
 //! workspace        workspace, count                          workspaces
 //! output-added     name, x, y, width, height, scanout, adaptive_sync, color   outputs
 //! output-changed   name, x, y, width, height, scanout, adaptive_sync, color   outputs
@@ -149,7 +149,7 @@
 //! overview         open                                      modes
 //! screenshot       open (the area selection)                 modes
 //! lock             on                                        modes
-//! popup-opened     id, view, layer, x, y, width, height      popups
+//! popup-opened     id, window, layer, x, y, width, height      popups
 //! popup-closed     id                                        popups
 //! layer-opened     id, namespace, layer, output, x, y,       layers
 //!                  width, height
@@ -157,13 +157,13 @@
 //! click            button, x, y, target, + see below         clicks
 //! ```
 //!
-//! A popup (menu, popover) belongs to a `view` or to a `layer` (the id of a panel), the other
+//! A popup (menu, popover) belongs to a `window` or to a `layer` (the id of a panel), the other
 //! one is null. Its `x`, `y` is its own top-left in the shared space, so a panel can tell where
 //! the menu it opened ended up. `layer` is `background`, `bottom`, `top` or `overlay`. Popup and
 //! layer ids are numbers of their own, never reused while jff runs.
 //!
 //! `click` is a mouse button press (`button` is the Linux code, 272 left, 273 right, 274 middle,
-//! `x`, `y` the pointer in the shared space). `target` is `view` (with `id`, `app_id`, `title`),
+//! `x`, `y` the pointer in the shared space). `target` is `window` (with `id`, `app_id`, `title`),
 //! `layer` (with `id`, `namespace`, `layer`, `output`, and `popup`, true when the press landed
 //! on a menu of that panel) or null for the empty desktop. `namespace` is what
 //! `blur { ignore-layer "…" }` matches. A popup also carries `layer_namespace`, the namespace
@@ -209,15 +209,15 @@
 //! itself. It comes before the first `geometry` of the drag and
 //! after the last one. A press and release inside one event-loop iteration makes no event.
 //!
-//! `geometry` is one move or resize event, however many of the four numbers changed, a view
+//! `geometry` is one move or resize event, however many of the four numbers changed, a window
 //! gets at most one per event-loop iteration, so a drag is coalesced. `focus` follows the
 //! keyboard, so it's `null` while a panel or launcher has the keyboard. The `focused` flag
-//! inside a view object is only a value at the time of that object: use the `focus` events to
+//! inside a window object is only a value at the time of that object: use the `focus` events to
 //! follow it.
 //!
-//! `watch` takes the groups to report (`views`, `focus`, `workspaces`, `outputs`, `modes` for
-//! overview, screenshot selection and lock, `popups`, `layers`). `watch views workspaces` sends
-//! only those events and a snapshot with only matching members (`views`, `workspace` and
+//! `watch` takes the groups to report (`windows`, `focus`, `workspaces`, `outputs`, `modes` for
+//! overview, screenshot selection and lock, `popups`, `layers`). `watch windows workspaces` sends
+//! only those events and a snapshot with only matching members (`windows`, `workspace` and
 //! `count`, `focused`, `outputs`, `overview`, `screenshot` and `locked`, `popups`, `layers`).
 //! No groups means all of them. An unknown group gets the usual
 //! `{"ok":false,...}` reply and the connection closes.
@@ -253,7 +253,7 @@ use crate::feature::outputs::output_rect;
 use crate::input::{spawn_command, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use crate::ipc::events::{
     ClickInfo, ClickTarget, ContainerInfo, ContainerRef, Event, Group, GroupSet, LayerInfo,
-    OutputColor, OutputInfo, PopupInfo, Snapshot, View,
+    OutputColor, OutputInfo, PopupInfo, Snapshot, WindowInfo,
 };
 use crate::primitives::json::{json_opt, json_str, pretty};
 use crate::primitives::layout::MonitorTarget;
@@ -270,9 +270,9 @@ pub const MAX_PENDING: usize = 256 * 1024;
 /// keeping the event loop busy reading what's ignored anyway).
 const MAX_WATCH_INPUT: usize = 64 * 1024;
 
-/// The number clients use to name a view. Attached to the window when it appears.
+/// The number clients use to name a window. Attached to the window when it appears.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ViewId(pub u64);
+pub struct WindowId(pub u64);
 
 /// Whether a window asked for attention (an activation token without input, see
 /// `XdgActivationHandler`) and hasn't had the keyboard since. Attached to the window.
@@ -313,7 +313,7 @@ pub enum ClickButton {
 /// What `tag` and `untag` ask for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TagOp {
-    /// `tag`: say what the tag of the view is.
+    /// `tag`: say what the tag of the window is.
     Show,
     /// `tag NAME`: give it this one.
     Set(String),
@@ -323,7 +323,7 @@ pub enum TagOp {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
-    Views,
+    Windows,
     Status,
     /// `outputs`: every monitor, as `watch` describes them.
     Outputs,
@@ -336,11 +336,11 @@ pub enum Request {
     Workspaces,
     /// `containers`: the tiling containers on the shown workspace.
     Containers,
-    /// `tag [NAME [ID]]` and `untag [ID]`: what to do with the user's tag of a view.
+    /// `tag [NAME [ID]]` and `untag [ID]`: what to do with the user's tag of a window.
     Tag(Option<u64>, TagOp),
-    /// `layout-save NAME [ID]`: keep the layout of the view's container.
+    /// `layout-save NAME [ID]`: keep the layout of the window's container.
     LayoutSave(String, Option<u64>),
-    /// `layout-apply NAME [ID]`: lay the view's container out as the saved layout says.
+    /// `layout-apply NAME [ID]`: lay the window's container out as the saved layout says.
     LayoutApply(String, Option<u64>),
     /// `layout-list`: the saved layouts.
     LayoutList,
@@ -351,7 +351,7 @@ pub enum Request {
     MoveToWorkspace(Option<u64>, usize),
     /// `focus-monitor TARGET`: the pointer and the keyboard go to that monitor.
     FocusMonitor(MonitorTarget),
-    /// `move-to-monitor TARGET [ID]`: send a view to that monitor.
+    /// `move-to-monitor TARGET [ID]`: send a window to that monitor.
     MoveToMonitor(Option<u64>, MonitorTarget),
     /// `move-workspace-to-monitor TARGET`: trade workspaces with that monitor.
     MoveWorkspaceToMonitor(MonitorTarget),
@@ -382,7 +382,7 @@ pub enum Request {
 }
 
 pub const COMMANDS: &str =
-    "views, status, outputs, focused, view-info, close, maximize, unmaximize, toggle-maximize, \
+    "windows, status, outputs, focused, window-info, close, maximize, unmaximize, toggle-maximize, \
      fullscreen, unfullscreen, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
      screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, stats, toggle-stats, watch";
 
@@ -405,7 +405,7 @@ fn layout_slots_json(template: &crate::primitives::layout_template::Template) ->
     format!("[{}]", slots.join(","))
 }
 
-/// `layout-save` or `layout-apply` (`command`) for the layout `name` and the view `id`.
+/// `layout-save` or `layout-apply` (`command`) for the layout `name` and the window `id`.
 fn layout_request(command: &str, name: &str, id: Option<u64>) -> Request {
     if command == "layout-save" {
         Request::LayoutSave(name.to_string(), id)
@@ -493,22 +493,22 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         ("tag", [name, id]) => {
             let id = id
                 .parse::<u64>()
-                .map_err(|_| format!("{id:?} is not a view id"))?;
+                .map_err(|_| format!("{id:?} is not a window id"))?;
             return Ok(Request::Tag(Some(id), TagOp::Set((*name).to_string())));
         }
-        ("tag", _) => return Err("tag takes a name and optionally a view id".to_string()),
+        ("tag", _) => return Err("tag takes a name and optionally a window id".to_string()),
         ("layout-save" | "layout-apply", [name]) => {
             return Ok(layout_request(command, name, None));
         }
         ("layout-save" | "layout-apply", [name, id]) => {
             let id = id
                 .parse::<u64>()
-                .map_err(|_| format!("{id:?} is not a view id"))?;
+                .map_err(|_| format!("{id:?} is not a window id"))?;
             return Ok(layout_request(command, name, Some(id)));
         }
         ("layout-save" | "layout-apply", _) => {
             return Err(format!(
-                "{command} takes a layout name and optionally a view id"
+                "{command} takes a layout name and optionally a window id"
             ));
         }
         ("layout-list", []) => return Ok(Request::LayoutList),
@@ -525,7 +525,7 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         ("move-to-workspace", [n, id]) => {
             let id = id
                 .parse::<u64>()
-                .map_err(|_| format!("{id:?} is not a view id"))?;
+                .map_err(|_| format!("{id:?} is not a window id"))?;
             return Ok(Request::MoveToWorkspace(
                 Some(id),
                 parse_workspace_number(n)?,
@@ -533,7 +533,7 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         }
         ("move-to-workspace", _) => {
             return Err(
-                "move-to-workspace needs a workspace number and optionally a view id".to_string(),
+                "move-to-workspace needs a workspace number and optionally a window id".to_string(),
             );
         }
         ("focus-monitor", [word]) => return Ok(Request::FocusMonitor(parse_monitor(word)?)),
@@ -549,12 +549,12 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         ("move-to-monitor", [word, id]) => {
             let id = id
                 .parse::<u64>()
-                .map_err(|_| format!("{id:?} is not a view id"))?;
+                .map_err(|_| format!("{id:?} is not a window id"))?;
             return Ok(Request::MoveToMonitor(Some(id), parse_monitor(word)?));
         }
         ("move-to-monitor", _) => {
             return Err(format!(
-                "move-to-monitor needs a monitor ({}) and optionally a view id",
+                "move-to-monitor needs a monitor ({}) and optionally a window id",
                 MonitorTarget::WORDS
             ));
         }
@@ -573,7 +573,7 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         None => None,
         Some(word) => Some(
             word.parse::<u64>()
-                .map_err(|_| format!("{word:?} is not a view id"))?,
+                .map_err(|_| format!("{word:?} is not a window id"))?,
         ),
     };
     if words.next().is_some() {
@@ -581,14 +581,14 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
     }
     let no_id = |request| match id {
         None => Ok(request),
-        Some(_) => Err(format!("{command} takes no view id")),
+        Some(_) => Err(format!("{command} takes no window id")),
     };
 
     match command {
-        "views" => no_id(Request::Views),
+        "windows" => no_id(Request::Windows),
         "focused" => no_id(Request::Focused),
         "containers" => no_id(Request::Containers),
-        "view-info" => Ok(Request::Info(id)),
+        "window-info" => Ok(Request::Info(id)),
         "untag" => Ok(Request::Tag(id, TagOp::Clear)),
         "close" => Ok(Request::Close(id)),
         "maximize" => Ok(Request::Maximize(id, Maximize::On)),
@@ -598,7 +598,7 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         "unfullscreen" => Ok(Request::Fullscreen(id, false)),
         "focus" => id
             .map(Request::Focus)
-            .ok_or_else(|| "focus needs a view id".to_string()),
+            .ok_or_else(|| "focus needs a window id".to_string()),
         other => Err(format!("unknown command {other:?}, commands: {COMMANDS}")),
     }
 }
@@ -611,10 +611,10 @@ fn error_reply(message: &str) -> String {
 
 impl JffState {
     /// Give a new window its id.
-    pub fn assign_view_id(&mut self, window: &Window) {
-        let id = self.next_view_id;
-        self.next_view_id += 1;
-        window.user_data().insert_if_missing(|| ViewId(id));
+    pub fn assign_window_id(&mut self, window: &Window) {
+        let id = self.next_window_id;
+        self.next_window_id += 1;
+        window.user_data().insert_if_missing(|| WindowId(id));
     }
 
     /// Carry out one request, return the reply line.
@@ -627,15 +627,18 @@ impl JffState {
 
     fn run_request(&mut self, request: Request) -> Result<String, String> {
         match request {
-            Request::Views => {
-                let views = self.views_json();
-                Ok(format!("{{\"ok\":true,\"views\":[{}]}}\n", views.join(",")))
+            Request::Windows => {
+                let windows = self.windows_json();
+                Ok(format!(
+                    "{{\"ok\":true,\"windows\":[{}]}}\n",
+                    windows.join(",")
+                ))
             }
             Request::Status => {
-                let views = self.views_json();
+                let windows = self.windows_json();
                 Ok(format!(
-                    "{{\"ok\":true,\"views\":[{}],\"workspace\":{},\"count\":{}}}\n",
-                    views.join(","),
+                    "{{\"ok\":true,\"windows\":[{}],\"workspace\":{},\"count\":{}}}\n",
+                    windows.join(","),
                     self.current_workspace() + 1,
                     self.workspace_count(),
                 ))
@@ -649,8 +652,10 @@ impl JffState {
                 ))
             }
             Request::Focused => Ok(match self.focused_window() {
-                Some(window) => format!("{{\"ok\":true,\"view\":{}}}\n", self.view_json(&window)),
-                None => "{\"ok\":true,\"view\":null}\n".to_string(),
+                Some(window) => {
+                    format!("{{\"ok\":true,\"window\":{}}}\n", self.window_json(&window))
+                }
+                None => "{\"ok\":true,\"window\":null}\n".to_string(),
             }),
             Request::Containers => Ok(format!(
                 "{{\"ok\":true,\"workspace\":{},\"containers\":[{}]}}\n",
@@ -706,8 +711,8 @@ impl JffState {
             Request::Info(id) => {
                 let window = self.target_window(id)?;
                 Ok(format!(
-                    "{{\"ok\":true,\"view\":{}}}\n",
-                    self.view_json(&window)
+                    "{{\"ok\":true,\"window\":{}}}\n",
+                    self.window_json(&window)
                 ))
             }
             Request::Tag(id, op) => {
@@ -715,7 +720,7 @@ impl JffState {
                 let surface = window
                     .toplevel()
                     .map(|toplevel| toplevel.wl_surface().clone())
-                    .ok_or("the view cannot be tagged")?;
+                    .ok_or("the window cannot be tagged")?;
                 match op {
                     TagOp::Show => {}
                     TagOp::Set(name) => {
@@ -723,17 +728,17 @@ impl JffState {
                     }
                     TagOp::Clear => crate::protocol::toplevel_tag::set_user_tag(&surface, None),
                 }
-                let view = window.user_data().get::<ViewId>().map_or(0, |id| id.0);
+                let window = window.user_data().get::<WindowId>().map_or(0, |id| id.0);
                 // `tag` is what rules see, `app_tag` is what the app set itself, if it did.
                 Ok(format!(
-                    "{{\"ok\":true,\"id\":{view},\"tag\":{},\"app_tag\":{}}}\n",
+                    "{{\"ok\":true,\"id\":{window},\"tag\":{},\"app_tag\":{}}}\n",
                     json_opt(crate::protocol::toplevel_tag::tag_of(&surface).as_deref()),
                     json_opt(crate::protocol::toplevel_tag::app_tag_of(&surface).as_deref()),
                 ))
             }
             Request::Close(id) => {
                 let window = self.target_window(id)?;
-                let toplevel = window.toplevel().ok_or("the view cannot be closed")?;
+                let toplevel = window.toplevel().ok_or("the window cannot be closed")?;
                 toplevel.send_close();
                 Ok("{\"ok\":true}\n".to_string())
             }
@@ -742,7 +747,7 @@ impl JffState {
                 let toplevel = window
                     .toplevel()
                     .cloned()
-                    .ok_or("the view cannot be maximized")?;
+                    .ok_or("the window cannot be maximized")?;
                 let now = self.desk.is_maximized(|w| *w == window);
                 let want = match how {
                     Maximize::On => true,
@@ -753,8 +758,8 @@ impl JffState {
                     self.set_maximized(&toplevel, want);
                 }
                 Ok(format!(
-                    "{{\"ok\":true,\"view\":{}}}\n",
-                    self.view_json(&window)
+                    "{{\"ok\":true,\"window\":{}}}\n",
+                    self.window_json(&window)
                 ))
             }
             Request::Fullscreen(id, want) => {
@@ -762,7 +767,7 @@ impl JffState {
                 let toplevel = window
                     .toplevel()
                     .cloned()
-                    .ok_or("the view cannot go fullscreen")?;
+                    .ok_or("the window cannot go fullscreen")?;
                 let now = toplevel.with_pending_state(|state| {
                     state.states.contains(xdg_toplevel::State::Fullscreen)
                 });
@@ -770,8 +775,8 @@ impl JffState {
                     self.set_filled(&toplevel, xdg_toplevel::State::Fullscreen, want);
                 }
                 Ok(format!(
-                    "{{\"ok\":true,\"view\":{}}}\n",
-                    self.view_json(&window)
+                    "{{\"ok\":true,\"window\":{}}}\n",
+                    self.window_json(&window)
                 ))
             }
             Request::Focus(id) => {
@@ -785,8 +790,8 @@ impl JffState {
                     self.focus_window(&window);
                 }
                 Ok(format!(
-                    "{{\"ok\":true,\"view\":{}}}\n",
-                    self.view_json(&window)
+                    "{{\"ok\":true,\"window\":{}}}\n",
+                    self.window_json(&window)
                 ))
             }
             Request::Workspaces => Ok(self.workspace_reply()),
@@ -808,8 +813,8 @@ impl JffState {
                 let window = self.target_window(id)?;
                 self.send_to_workspace(&window, number - 1);
                 Ok(format!(
-                    "{{\"ok\":true,\"view\":{}}}\n",
-                    self.view_json(&window)
+                    "{{\"ok\":true,\"window\":{}}}\n",
+                    self.window_json(&window)
                 ))
             }
             Request::FocusMonitor(target) => {
@@ -823,9 +828,9 @@ impl JffState {
                 let window = self.target_window(id)?;
                 let output = self.move_to_monitor(&window, &target)?;
                 Ok(format!(
-                    "{{\"ok\":true,\"output\":{},\"view\":{}}}\n",
+                    "{{\"ok\":true,\"output\":{},\"window\":{}}}\n",
                     json_str(&output),
-                    self.view_json(&window)
+                    self.window_json(&window)
                 ))
             }
             Request::MoveWorkspaceToMonitor(target) => {
@@ -914,9 +919,9 @@ impl JffState {
         }
     }
 
-    /// Every visible view, top-to-bottom stacking order. `views`, `status` and the `watch`
+    /// Every visible window, top-to-bottom stacking order. `windows`, `status` and the `watch`
     /// snapshot all come from here, so they can't disagree.
-    pub(crate) fn view_list(&self) -> Vec<View> {
+    pub(crate) fn window_list(&self) -> Vec<WindowInfo> {
         let focused = self.focused_window();
         self.desk
             .all_top_down()
@@ -924,13 +929,13 @@ impl JffState {
                 let size = entry.window.geometry().size;
                 size.w > 0 && size.h > 0
             })
-            .map(|entry| self.view_data(&entry.window, focused.as_ref()))
+            .map(|entry| self.window_data(&entry.window, focused.as_ref()))
             .collect()
     }
 
     /// The tiling containers on the shown workspace, oldest first, as `containers` lists them.
     fn container_list(&self) -> Vec<ContainerInfo> {
-        let view_id = |window: &Window| window.user_data().get::<ViewId>().map(|id| id.0);
+        let window_id = |window: &Window| window.user_data().get::<WindowId>().map(|id| id.0);
         self.desk
             .containers_on(self.current_workspace())
             .into_iter()
@@ -938,7 +943,7 @@ impl JffState {
                 let of = |id| {
                     self.desk
                         .find_by_id(id)
-                        .and_then(|entry| view_id(&entry.window))
+                        .and_then(|entry| window_id(&entry.window))
                 };
                 ContainerInfo {
                     id: container.id().get(),
@@ -946,11 +951,11 @@ impl JffState {
                     workspace: container.workspace() + 1,
                     output: Some(container.output().to_owned()).filter(|name| !name.is_empty()),
                     area: container.area(),
-                    views: self
+                    windows: self
                         .desk
                         .members(container.id())
                         .into_iter()
-                        .filter_map(|entry| view_id(&entry.window))
+                        .filter_map(|entry| window_id(&entry.window))
                         .collect(),
                     focused: of(container.focused()),
                     maximized: container.zoomed().and_then(of),
@@ -959,7 +964,7 @@ impl JffState {
             .collect()
     }
 
-    /// The container `window` is a member of, as a view says it.
+    /// The container `window` is a member of, as a window says it.
     fn container_ref(&self, window: &Window) -> Option<ContainerRef> {
         let container = self
             .desk
@@ -971,9 +976,9 @@ impl JffState {
         })
     }
 
-    /// Every visible view, as JSON objects, top-to-bottom stacking order.
-    fn views_json(&self) -> Vec<String> {
-        self.view_list().iter().map(View::to_json).collect()
+    /// Every visible window, as JSON objects, top-to-bottom stacking order.
+    fn windows_json(&self) -> Vec<String> {
+        self.window_list().iter().map(WindowInfo::to_json).collect()
     }
 
     fn workspace_reply(&self) -> String {
@@ -989,16 +994,16 @@ impl JffState {
         match id {
             Some(id) => self
                 .desk
-                .find_by(|w| w.user_data().get::<ViewId>() == Some(&ViewId(id)))
+                .find_by(|w| w.user_data().get::<WindowId>() == Some(&WindowId(id)))
                 .map(|entry| entry.window.clone())
-                .ok_or_else(|| format!("no view with id {id}")),
+                .ok_or_else(|| format!("no window with id {id}")),
             None => self
                 .focused_window()
-                .ok_or_else(|| "no focused view".to_string()),
+                .ok_or_else(|| "no focused window".to_string()),
         }
     }
 
-    /// The window a layout request is about: the view `id`, else the focused one when it is in a container, else the focused window of the only container on the shown workspace.
+    /// The window a layout request is about: the window `id`, else the focused one when it is in a container, else the focused window of the only container on the shown workspace.
     fn layout_target(&self, id: Option<u64>) -> Result<Window, String> {
         if id.is_some() {
             return self.target_window(id);
@@ -1018,7 +1023,7 @@ impl JffState {
                 .map(|entry| entry.window.clone())
                 .ok_or_else(|| "the container has no windows".to_string()),
             [] => Err("there is no tiling container on this workspace".to_string()),
-            _ => Err("the focused view is not in a container and there are several: pass the id of a view of the one you mean".to_string()),
+            _ => Err("the focused window is not in a container and there are several: pass the id of a window of the one you mean".to_string()),
         }
     }
 
@@ -1031,16 +1036,16 @@ impl JffState {
             .map(|entry| entry.window.clone())
     }
 
-    /// A view as a JSON object.
-    fn view_json(&self, window: &Window) -> String {
-        self.view_data(window, self.focused_window().as_ref())
+    /// A window as a JSON object.
+    fn window_json(&self, window: &Window) -> String {
+        self.window_data(window, self.focused_window().as_ref())
             .to_json()
     }
 
-    /// What's known about a view. `focused` is the window that has the keyboard (asked once by
-    /// callers that describe many views).
-    fn view_data(&self, window: &Window, focused: Option<&Window>) -> View {
-        let id = window.user_data().get::<ViewId>().map_or(0, |id| id.0);
+    /// What's known about a window. `focused` is the window that has the keyboard (asked once by
+    /// callers that describe many windows).
+    fn window_data(&self, window: &Window, focused: Option<&Window>) -> WindowInfo {
+        let id = window.user_data().get::<WindowId>().map_or(0, |id| id.0);
         let pos = self.desk.pos_of(|w| w == window).unwrap_or_default();
         let size = window.geometry().size;
         let maximized = self.desk.is_maximized(|w| w == window);
@@ -1070,7 +1075,7 @@ impl JffState {
             .find(|o| output_rect(o) == monitor)
             .map(|o| o.name());
 
-        View {
+        WindowInfo {
             id,
             app_id,
             title,
@@ -1160,13 +1165,13 @@ impl JffState {
     /// Everything `watch` reports, right now. The focus is the keyboard's (`focused_window()`),
     /// not the `focused_window` field, which only says what the user picked last.
     pub fn take_snapshot(&self) -> Snapshot {
-        let views = self.view_list();
-        // A window that has the keyboard but isn't in `views` yet (no size) isn't announced
-        // either, so a `focus` event never names a view the client hasn't been told about.
-        let focused = views.iter().find(|v| v.focused).map(|v| v.id);
+        let windows = self.window_list();
+        // A window that has the keyboard but isn't in `windows` yet (no size) isn't announced
+        // either, so a `focus` event never names a window the client hasn't been told about.
+        let focused = windows.iter().find(|v| v.focused).map(|v| v.id);
         let outputs = self.output_list();
         Snapshot {
-            views,
+            windows,
             workspace: self.current_workspace() + 1,
             count: self.workspace_count(),
             focused,
@@ -1176,7 +1181,9 @@ impl JffState {
             locked: self.session_locked(),
             popups: self.popup_list(),
             layers: self.layer_list(),
-            dragging: self.dragging_view.or_else(|| self.overview_dragged_view()),
+            dragging: self
+                .dragging_window
+                .or_else(|| self.overview_dragged_view()),
         }
     }
 
@@ -1184,31 +1191,34 @@ impl JffState {
     /// shared space.
     fn popup_list(&self) -> Vec<PopupInfo> {
         let mut out = Vec::new();
-        let mut add =
-            |root: &WlSurface, origin: (i32, i32), view, layer, layer_namespace: Option<String>| {
-                for (popup, offset) in PopupManager::popups_for_surface(root) {
-                    if !is_mapped(popup.wl_surface()) {
-                        continue;
-                    }
-                    let size = popup.geometry().size;
-                    out.push(PopupInfo {
-                        id: surface_id(popup.wl_surface()),
-                        view,
-                        layer,
-                        layer_namespace: layer_namespace.clone(),
-                        x: origin.0 + offset.x,
-                        y: origin.1 + offset.y,
-                        width: size.w,
-                        height: size.h,
-                    });
+        let mut add = |root: &WlSurface,
+                       origin: (i32, i32),
+                       window,
+                       layer,
+                       layer_namespace: Option<String>| {
+            for (popup, offset) in PopupManager::popups_for_surface(root) {
+                if !is_mapped(popup.wl_surface()) {
+                    continue;
                 }
-            };
+                let size = popup.geometry().size;
+                out.push(PopupInfo {
+                    id: surface_id(popup.wl_surface()),
+                    window,
+                    layer,
+                    layer_namespace: layer_namespace.clone(),
+                    x: origin.0 + offset.x,
+                    y: origin.1 + offset.y,
+                    width: size.w,
+                    height: size.h,
+                });
+            }
+        };
         for entry in self.desk.all_top_down() {
             let Some(toplevel) = entry.window.toplevel() else {
                 continue;
             };
-            let view = entry.window.user_data().get::<ViewId>().map(|id| id.0);
-            add(toplevel.wl_surface(), entry.pos, view, None, None);
+            let window = entry.window.user_data().get::<WindowId>().map(|id| id.0);
+            add(toplevel.wl_surface(), entry.pos, window, None, None);
         }
         for output in &self.outputs {
             let (ox, oy, _, _) = output_rect(output);
@@ -1433,8 +1443,8 @@ impl JffState {
             return;
         }
         let target = match under {
-            Some(Under::Window(window, _, _)) => ClickTarget::View {
-                id: window.user_data().get::<ViewId>().map(|id| id.0),
+            Some(Under::Window(window, _, _)) => ClickTarget::Window {
+                id: window.user_data().get::<WindowId>().map(|id| id.0),
                 app_id: window.toplevel().and_then(|t| {
                     with_states(t.wl_surface(), |states| {
                         states
@@ -1753,20 +1763,20 @@ fn render(text: &str, pretty_print: bool) -> String {
 /// The commands for the help text, in groups: the command with its arguments, and what it does.
 const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
     (
-        "Views",
+        "Windows",
         &[
-            ("views", "list every view"),
-            ("focused", "the focused view"),
-            ("view-info [ID]", "details of a view"),
-            ("focus ID", "focus a view"),
-            ("close [ID]", "close a view"),
-            ("maximize [ID]", "maximize a view"),
-            ("unmaximize [ID]", "restore a maximized view"),
+            ("windows", "list every window"),
+            ("focused", "the focused window"),
+            ("window-info [ID]", "details of a window"),
+            ("focus ID", "focus a window"),
+            ("close [ID]", "close a window"),
+            ("maximize [ID]", "maximize a window"),
+            ("unmaximize [ID]", "restore a maximized window"),
             ("toggle-maximize [ID]", "toggle maximize"),
-            ("fullscreen [ID]", "make a view fullscreen"),
+            ("fullscreen [ID]", "make a window fullscreen"),
             ("unfullscreen [ID]", "leave fullscreen"),
-            ("tag [NAME] [ID]", "tag a view, or show its tag"),
-            ("untag [ID]", "remove the tag of a view"),
+            ("tag [NAME] [ID]", "tag a window, or show its tag"),
+            ("untag [ID]", "remove the tag of a window"),
         ],
     ),
     (
@@ -1774,10 +1784,10 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("workspaces", "list the workspaces"),
             ("workspace N|next|prev", "go to a workspace"),
-            ("move-to-workspace N [ID]", "send a view to workspace N"),
+            ("move-to-workspace N [ID]", "send a window to workspace N"),
             ("outputs", "list the monitors"),
             ("focus-monitor MONITOR", "focus a monitor"),
-            ("move-to-monitor MONITOR [ID]", "send a view to a monitor"),
+            ("move-to-monitor MONITOR [ID]", "send a window to a monitor"),
             (
                 "move-workspace-to-monitor MONITOR",
                 "send the workspace to a monitor",
@@ -1828,7 +1838,7 @@ fn usage() -> String {
     let mut out = String::from(
         "Usage: jff msg [--pretty|--compact] <command> [args]\n       \
          jff msg [--pretty|--compact] watch [GROUP...]\n\n\
-         ID is a view id (see `views`), the focused view when left out.\n",
+         ID is a window id (see `windows`), the focused window when left out.\n",
     );
     for (title, commands) in HELP_GROUPS {
         out.push_str(&format!("\n{title}:\n"));

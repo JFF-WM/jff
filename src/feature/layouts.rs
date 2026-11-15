@@ -138,7 +138,7 @@ impl JffState {
                 self.layouts.remember(key, snapshot);
             }
         }
-        if self.dragging_view.is_none() && self.resize.is_none() {
+        if self.dragging_window.is_none() && self.resize.is_none() {
             self.layouts.save_if_dirty();
         }
     }

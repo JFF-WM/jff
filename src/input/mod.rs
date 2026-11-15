@@ -34,7 +34,7 @@ use crate::feature::screenshot::{report_failure, screenshot_key, ScreenshotKey};
 use crate::input::grabs::r#move::{shrunk_geometry, MoveGrab};
 use crate::input::grabs::resize::ResizeGrab;
 use crate::input::grabs::tile_move::TileMoveEnd;
-use crate::ipc::ViewId;
+use crate::ipc::WindowId;
 use crate::primitives::geom;
 use crate::primitives::layout;
 use crate::protocol::layer_shell::Under;
@@ -1045,7 +1045,7 @@ impl JffState {
             self.zone_drag_begin(&zone);
             grab = grab.with_zone(zone);
         }
-        self.dragging_view = window.user_data().get::<ViewId>().map(|id| id.0);
+        self.dragging_window = window.user_data().get::<WindowId>().map(|id| id.0);
         pointer.set_grab(self, grab, serial, Focus::Clear);
         true
     }

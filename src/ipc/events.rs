@@ -14,11 +14,11 @@ use crate::primitives::json::{json_opt, json_str};
 
 // ---- groups -----------------------------------------------------------------------------------
 
-/// A kind of event a client can ask for: `watch views workspaces` only sends those.
+/// A kind of event a client can ask for: `watch windows workspaces` only sends those.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
     /// Windows appearing, going away, or changing title, app id, size, position, state.
-    Views,
+    Windows,
     /// The window the user works in changed.
     Focus,
     /// The shown workspace, or the workspace count, changed.
@@ -38,11 +38,11 @@ pub enum Group {
 impl Group {
     /// Group names as typed on the command line, for error messages.
     pub const NAMES: &'static str =
-        "views, focus, workspaces, outputs, modes, popups, layers, clicks";
+        "windows, focus, workspaces, outputs, modes, popups, layers, clicks";
 
     pub fn parse(word: &str) -> Option<Group> {
         match word {
-            "views" => Some(Group::Views),
+            "windows" => Some(Group::Windows),
             "focus" => Some(Group::Focus),
             "workspaces" => Some(Group::Workspaces),
             "outputs" => Some(Group::Outputs),
@@ -81,9 +81,9 @@ impl GroupSet {
 
 // ---- the state a panel can see ----------------------------------------------------------------
 
-/// One window, as `view_json` shows it.
+/// One window, as `window_json` shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct View {
+pub struct WindowInfo {
     pub id: u64,
     pub app_id: Option<String>,
     pub title: Option<String>,
@@ -109,7 +109,7 @@ pub struct View {
     pub container: Option<ContainerRef>,
 }
 
-/// The tiling container a view is a member of: what a view says about it.
+/// The tiling container a window is a member of: what a window says about it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContainerRef {
     pub id: u64,
@@ -126,7 +126,7 @@ impl ContainerRef {
     }
 }
 
-/// The JSON of a view's container: the object, or null.
+/// The JSON of a window's container: the object, or null.
 fn json_container(container: Option<&ContainerRef>) -> String {
     container.map_or_else(|| "null".to_string(), ContainerRef::to_json)
 }
@@ -141,11 +141,11 @@ pub struct ContainerInfo {
     pub output: Option<String>,
     /// The rectangle its windows are laid out in, `None` until it has been laid out.
     pub area: Option<(i32, i32, i32, i32)>,
-    /// The view ids of its windows, in tree order.
-    pub views: Vec<u64>,
-    /// The view that has the focus inside it.
+    /// The window ids of its windows, in tree order.
+    pub windows: Vec<u64>,
+    /// The window that has the focus inside it.
     pub focused: Option<u64>,
-    /// The view that is maximized inside it, if one is.
+    /// The window that is maximized inside it, if one is.
     pub maximized: Option<u64>,
 }
 
@@ -160,22 +160,22 @@ impl ContainerInfo {
                 "null".to_string(),
             ),
         };
-        let views: Vec<String> = self.views.iter().map(u64::to_string).collect();
+        let windows: Vec<String> = self.windows.iter().map(u64::to_string).collect();
         format!(
             "{{\"id\":{},\"name\":{},\"workspace\":{},\"output\":{},\"x\":{x},\"y\":{y},\
-             \"width\":{width},\"height\":{height},\"views\":[{}],\"focused\":{},\"maximized\":{}}}",
+             \"width\":{width},\"height\":{height},\"windows\":[{}],\"focused\":{},\"maximized\":{}}}",
             self.id,
             json_opt(self.name.as_deref()),
             self.workspace,
             json_opt(self.output.as_deref()),
-            views.join(","),
+            windows.join(","),
             json_id(self.focused),
             json_id(self.maximized),
         )
     }
 }
 
-impl View {
+impl WindowInfo {
     /// The JSON object members, without braces (events splice them in flat).
     fn members(&self) -> String {
         format!(
@@ -313,8 +313,8 @@ impl Default for OutputColor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PopupInfo {
     pub id: u64,
-    /// The view it belongs to, if it belongs to a window.
-    pub view: Option<u64>,
+    /// The window it belongs to, if it belongs to a window.
+    pub window: Option<u64>,
     /// The layer surface it belongs to, if it belongs to a panel.
     pub layer: Option<u64>,
     /// Namespace of that layer surface (the same `namespace` `layers` shows), if any.
@@ -328,9 +328,9 @@ pub struct PopupInfo {
 impl PopupInfo {
     fn members(&self) -> String {
         let mut out = format!(
-            "\"id\":{},\"view\":{},\"layer\":{}",
+            "\"id\":{},\"window\":{},\"layer\":{}",
             self.id,
-            json_id(self.view),
+            json_id(self.window),
             json_id(self.layer),
         );
         if let Some(namespace) = &self.layer_namespace {
@@ -351,8 +351,8 @@ impl PopupInfo {
 /// What a mouse button press landed on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClickTarget {
-    /// A window (`id` is the view id).
-    View {
+    /// A window (`id` is the window id).
+    Window {
         id: Option<u64>,
         app_id: Option<String>,
         title: Option<String>,
@@ -385,8 +385,8 @@ impl ClickInfo {
             self.button, self.x, self.y
         );
         match &self.target {
-            ClickTarget::View { id, app_id, title } => format!(
-                "{head},\"target\":\"view\",\"id\":{},\"app_id\":{},\"title\":{}",
+            ClickTarget::Window { id, app_id, title } => format!(
+                "{head},\"target\":\"window\",\"id\":{},\"app_id\":{},\"title\":{}",
                 json_id(*id),
                 json_opt(app_id.as_deref()),
                 json_opt(title.as_deref())
@@ -445,12 +445,12 @@ impl LayerInfo {
 /// Everything `watch` reports, at one moment.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
-    /// Top-to-bottom stacking order, like the `views` command.
-    pub views: Vec<View>,
+    /// Top-to-bottom stacking order, like the `windows` command.
+    pub windows: Vec<WindowInfo>,
     /// The shown workspace, counting from 1.
     pub workspace: usize,
     pub count: usize,
-    /// The view that has the keyboard. Always one of `views`.
+    /// The window that has the keyboard. Always one of `windows`.
     pub focused: Option<u64>,
     pub outputs: Vec<OutputInfo>,
     pub overview: bool,
@@ -460,7 +460,7 @@ pub struct Snapshot {
     pub popups: Vec<PopupInfo>,
     /// Mapped layer-shell surfaces.
     pub layers: Vec<LayerInfo>,
-    /// The view the user is moving with the pointer right now (a titlebar drag, or a thumbnail
+    /// The window the user is moving with the pointer right now (a titlebar drag, or a thumbnail
     /// carried in the overview). `diff` turns
     /// changes of it into `drag` events, the snapshot itself doesn't carry it.
     pub dragging: Option<u64>,
@@ -470,9 +470,9 @@ impl Snapshot {
     /// The `snapshot` event, with only the members of `groups`.
     pub fn to_json(&self, groups: GroupSet) -> String {
         let mut out = String::from("{\"event\":\"snapshot\"");
-        if groups.contains(Group::Views) {
-            let views: Vec<String> = self.views.iter().map(View::to_json).collect();
-            out.push_str(&format!(",\"views\":[{}]", views.join(",")));
+        if groups.contains(Group::Windows) {
+            let windows: Vec<String> = self.windows.iter().map(WindowInfo::to_json).collect();
+            out.push_str(&format!(",\"windows\":[{}]", windows.join(",")));
         }
         if groups.contains(Group::Workspaces) {
             out.push_str(&format!(
@@ -510,8 +510,8 @@ impl Snapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    ViewOpened(View),
-    ViewClosed {
+    WindowOpened(WindowInfo),
+    WindowClosed {
         id: u64,
     },
     Focus {
@@ -551,12 +551,12 @@ pub enum Event {
         id: u64,
         on: bool,
     },
-    ViewWorkspace {
+    WindowWorkspace {
         id: u64,
         workspace: usize,
     },
     /// The window joined a container, left it, or its container was renamed.
-    ViewContainer {
+    WindowContainer {
         id: u64,
         container: Option<ContainerRef>,
     },
@@ -598,8 +598,8 @@ impl Event {
     /// The group a client has to ask for to get this event.
     pub fn group(&self) -> Group {
         match self {
-            Event::ViewOpened(_)
-            | Event::ViewClosed { .. }
+            Event::WindowOpened(_)
+            | Event::WindowClosed { .. }
             | Event::Title { .. }
             | Event::AppId { .. }
             | Event::Geometry { .. }
@@ -607,8 +607,8 @@ impl Event {
             | Event::Maximized { .. }
             | Event::Fullscreen { .. }
             | Event::Urgent { .. }
-            | Event::ViewWorkspace { .. }
-            | Event::ViewContainer { .. } => Group::Views,
+            | Event::WindowWorkspace { .. }
+            | Event::WindowContainer { .. } => Group::Windows,
             Event::Focus { .. } => Group::Focus,
             Event::Workspace { .. } => Group::Workspaces,
             Event::OutputAdded(_) | Event::OutputRemoved { .. } | Event::OutputChanged(_) => {
@@ -624,10 +624,10 @@ impl Event {
     /// The event as one line of JSON, no trailing newline.
     pub fn to_json(&self) -> String {
         match self {
-            Event::ViewOpened(view) => {
-                format!("{{\"event\":\"view-opened\",{}}}", view.members())
+            Event::WindowOpened(window) => {
+                format!("{{\"event\":\"window-opened\",{}}}", window.members())
             }
-            Event::ViewClosed { id } => format!("{{\"event\":\"view-closed\",\"id\":{id}}}"),
+            Event::WindowClosed { id } => format!("{{\"event\":\"window-closed\",\"id\":{id}}}"),
             Event::Focus { id, previous } => format!(
                 "{{\"event\":\"focus\",\"id\":{},\"previous\":{}}}",
                 json_id(*id),
@@ -663,12 +663,12 @@ impl Event {
             Event::Urgent { id, on } => {
                 format!("{{\"event\":\"urgent\",\"id\":{id},\"on\":{on}}}")
             }
-            Event::ViewWorkspace { id, workspace } => {
-                format!("{{\"event\":\"view-workspace\",\"id\":{id},\"workspace\":{workspace}}}")
+            Event::WindowWorkspace { id, workspace } => {
+                format!("{{\"event\":\"window-workspace\",\"id\":{id},\"workspace\":{workspace}}}")
             }
-            Event::ViewContainer { id, container } => {
+            Event::WindowContainer { id, container } => {
                 format!(
-                    "{{\"event\":\"view-container\",\"id\":{id},\"container\":{}}}",
+                    "{{\"event\":\"window-container\",\"id\":{id},\"container\":{}}}",
                     json_container(container.as_ref())
                 )
             }
@@ -738,21 +738,21 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
             .map(|l| Event::LayerOpened(l.clone())),
     );
 
-    let old_views: HashMap<u64, &View> = old.views.iter().map(|v| (v.id, v)).collect();
-    let new_views: HashMap<u64, &View> = new.views.iter().map(|v| (v.id, v)).collect();
+    let old_windows: HashMap<u64, &WindowInfo> = old.windows.iter().map(|v| (v.id, v)).collect();
+    let new_windows: HashMap<u64, &WindowInfo> = new.windows.iter().map(|v| (v.id, v)).collect();
 
-    let mut opened: Vec<&View> = new
-        .views
+    let mut opened: Vec<&WindowInfo> = new
+        .windows
         .iter()
-        .filter(|v| !old_views.contains_key(&v.id))
+        .filter(|v| !old_windows.contains_key(&v.id))
         .collect();
     opened.sort_by_key(|v| v.id);
-    events.extend(opened.into_iter().map(|v| Event::ViewOpened(v.clone())));
+    events.extend(opened.into_iter().map(|v| Event::WindowOpened(v.clone())));
 
-    let mut kept: Vec<(&View, &View)> = new
-        .views
+    let mut kept: Vec<(&WindowInfo, &WindowInfo)> = new
+        .windows
         .iter()
-        .filter_map(|after| old_views.get(&after.id).map(|before| (*before, after)))
+        .filter_map(|after| old_windows.get(&after.id).map(|before| (*before, after)))
         .collect();
     kept.sort_by_key(|(_, after)| after.id);
     let old_popups: HashSet<u64> = old.popups.iter().map(|p| p.id).collect();
@@ -815,13 +815,13 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
             });
         }
         if before.workspace != after.workspace {
-            events.push(Event::ViewWorkspace {
+            events.push(Event::WindowWorkspace {
                 id,
                 workspace: after.workspace,
             });
         }
         if before.container != after.container {
-            events.push(Event::ViewContainer {
+            events.push(Event::WindowContainer {
                 id,
                 container: after.container.clone(),
             });
@@ -859,13 +859,13 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
     );
 
     let mut closed: Vec<u64> = old
-        .views
+        .windows
         .iter()
         .map(|v| v.id)
-        .filter(|id| !new_views.contains_key(id))
+        .filter(|id| !new_windows.contains_key(id))
         .collect();
     closed.sort_unstable();
-    events.extend(closed.into_iter().map(|id| Event::ViewClosed { id }));
+    events.extend(closed.into_iter().map(|id| Event::WindowClosed { id }));
 
     let mut layers_closed: Vec<u64> = old
         .layers

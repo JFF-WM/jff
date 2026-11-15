@@ -1307,13 +1307,13 @@ impl JffState {
         self.overview.as_ref().is_some_and(|ov| ov.drag.is_some())
     }
 
-    /// View id of the window whose thumbnail is being dragged in the overview (for the `drag`
+    /// Window id of the window whose thumbnail is being dragged in the overview (for the `drag`
     /// watch event). Only set once the pointer moved past the click threshold.
     pub fn overview_dragged_view(&self) -> Option<u64> {
         let drag = self.overview.as_ref()?.drag.as_ref()?;
         drag.window
             .user_data()
-            .get::<crate::ipc::ViewId>()
+            .get::<crate::ipc::WindowId>()
             .map(|id| id.0)
     }
 
