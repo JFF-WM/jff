@@ -102,6 +102,15 @@ impl CursorManager {
         self.status = status;
     }
 
+    /// The surface a client drew its cursor with, when that is the cursor now. Counts while the
+    /// cursor is hidden for touch too: the client still waits for its frame callbacks.
+    pub fn client_surface(&self) -> Option<&WlSurface> {
+        match &self.status {
+            CursorImageStatus::Surface(surface) if surface.alive() => Some(surface),
+            _ => None,
+        }
+    }
+
     /// Hide the cursor while a touchscreen is in use, show it again when a mouse, touchpad or
     /// pen moves. The client's own choice of cursor (`set_status`) is left as it is.
     pub fn set_touch_hidden(&mut self, hidden: bool) {

@@ -6,7 +6,12 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use smithay::output::Output;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::IsAlive;
 
+use crate::app::tty::CURSOR_MARGIN;
+use crate::feature::outputs::output_rect;
+use crate::primitives::layout;
 use crate::state::JffState;
 
 /// Number of the output's current frame cycle, stored on the output. It moves on when a frame
@@ -51,6 +56,35 @@ pub fn advance_frame_sequence(output: &Output) {
 }
 
 impl JffState {
+    /// Surfaces drawn on `output` that are neither windows nor layer surfaces: the lock surface,
+    /// the cursor a client drew, the drag icon and the candidate windows of an input method.
+    /// They wait for frame callbacks like any other surface, or an animated one stalls.
+    pub fn extra_surfaces(&self, output: &Output) -> Vec<WlSurface> {
+        let rect = output_rect(output);
+        let mut surfaces: Vec<WlSurface> = self.session_lock.surfaces_on(output).cloned().collect();
+        // The cursor and the drag icon are drawn on every monitor the pointer is near.
+        let near = self.seat.get_pointer().is_some_and(|pointer| {
+            let at = pointer.current_location();
+            layout::contains(layout::grow(rect, CURSOR_MARGIN), (at.x, at.y))
+        });
+        if near {
+            surfaces.extend(self.cursor.client_surface().cloned());
+            surfaces.extend(self.dnd_icon.iter().filter(|icon| icon.alive()).cloned());
+        }
+        // Not drawn while the session is locked.
+        if !self.session_locked() {
+            let placed = crate::protocol::text_input::place_input_popups(
+                &self.text_input,
+                &self.desk,
+                &self.outputs,
+            );
+            surfaces.extend(crate::protocol::text_input::input_popup_surfaces(
+                &placed, rect,
+            ));
+        }
+        surfaces
+    }
+
     /// Something on screen changes by itself, without any event to ask for the frame: the
     /// monitor keeps redrawing at the refresh rate while this is true.
     ///

@@ -3,6 +3,9 @@
 //!
 //! Smithay does the protocol, this file says what "locked" means.
 //!
+//! The lock surface gets frame callbacks like a window, see `JffState::extra_surfaces`, or a locker
+//! that animates (gtklock) would stop after its first frame.
+//!
 //! Nothing else is shown. On every monitor jff draws the locker's lock surface (and the cursor)
 //! on a black background: no window, no panel, no popup, no overview, no input-method popup. A
 //! monitor without a lock surface yet is black.
@@ -71,6 +74,14 @@ impl SessionLock {
     /// Whether the session is locked.
     pub fn is_locked(&self) -> bool {
         self.locked
+    }
+
+    /// The lock surfaces on `output` that are still there.
+    pub fn surfaces_on<'a>(&'a self, output: &'a Output) -> impl Iterator<Item = &'a WlSurface> {
+        self.surfaces
+            .iter()
+            .filter(move |(surface, on)| on == output && surface.alive())
+            .map(|(surface, _)| surface.wl_surface())
     }
 }
 

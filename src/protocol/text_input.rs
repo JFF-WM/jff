@@ -161,6 +161,21 @@ pub fn place_input_popups(
     placed
 }
 
+/// The desktop area a placed candidate window covers.
+fn popup_area(popup: &PlacedPopup) -> Rect {
+    let size = smithay::desktop::utils::bbox_from_surface_tree(&popup.surface, (0, 0)).size;
+    (popup.pos.x, popup.pos.y, size.w, size.h)
+}
+
+/// The surfaces of the candidate windows that are drawn on the monitor at `rect`.
+pub fn input_popup_surfaces(placed: &[PlacedPopup], rect: Rect) -> Vec<WlSurface> {
+    placed
+        .iter()
+        .filter(|popup| crate::primitives::layout::intersects(popup_area(popup), rect))
+        .map(|popup| popup.surface.clone())
+        .collect()
+}
+
 /// Render elements of the candidate windows on the monitor at `rect`, front to back.
 pub fn input_popup_elements(
     renderer: &mut GlesRenderer,
@@ -171,9 +186,7 @@ pub fn input_popup_elements(
     let origin: Point<i32, Logical> = (rect.0, rect.1).into();
     let mut out = Vec::new();
     for popup in placed.iter().rev() {
-        let size = smithay::desktop::utils::bbox_from_surface_tree(&popup.surface, (0, 0)).size;
-        let area = (popup.pos.x, popup.pos.y, size.w, size.h);
-        if !crate::primitives::layout::intersects(area, rect) {
+        if !crate::primitives::layout::intersects(popup_area(popup), rect) {
             continue;
         }
         let loc: Point<i32, Physical> = (popup.pos - origin).to_physical_precise_round(scale);

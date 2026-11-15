@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent, WinitEventLoop};
+use smithay::desktop::utils::send_frames_surface_tree;
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Physical, Point, Scale, Transform};
@@ -559,6 +560,9 @@ impl JffState {
         // layers get callbacks regardless of windows
         for layer in smithay::desktop::layer_map_for_output(output).layers() {
             layer.send_frame(output, time, Some(Duration::ZERO), should_send);
+        }
+        for surface in self.extra_surfaces(output) {
+            send_frames_surface_tree(&surface, output, time, Some(Duration::ZERO), should_send);
         }
     }
 }

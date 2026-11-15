@@ -98,7 +98,7 @@ const COLOR_FORMATS_HDR: [Fourcc; 4] = [
 ];
 
 /// How far outside a monitor a cursor can still be partly visible on it.
-const CURSOR_MARGIN: i32 = 256;
+pub(crate) const CURSOR_MARGIN: i32 = 256;
 
 /// The per-frame user data is the presentation feedback, answered at vblank.
 type GbmDrmCompositor = DrmCompositor<
