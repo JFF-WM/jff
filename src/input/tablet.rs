@@ -25,6 +25,7 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Size, SERIAL_COUNTER};
 
 use super::BTN_LEFT;
+use crate::feature::outputs::output_rect;
 use crate::state::JffState;
 
 impl JffState {
@@ -55,8 +56,14 @@ impl JffState {
         event: &E,
     ) -> Point<f64, Logical> {
         let r = self.rect_at_pointer();
-        let size: Size<i32, Logical> = (r.2, r.3).into();
-        let pos = event.position_transformed(size) + Point::from((r.0 as f64, r.1 as f64));
+        let local = match self.outputs.iter().find(|o| output_rect(o) == r) {
+            Some(output) => self.absolute_on_output::<B, _>(output, event),
+            None => {
+                let size: Size<i32, Logical> = (r.2, r.3).into();
+                event.position_transformed(size)
+            }
+        };
+        let pos = local + Point::from((r.0 as f64, r.1 as f64));
         crate::primitives::layout::clamp_to_rects((pos.x, pos.y), &self.pointer_bounds()).into()
     }
 

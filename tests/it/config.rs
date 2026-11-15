@@ -2230,3 +2230,40 @@ container-rule { match app-id="kitty"; name "Terms"; }"#,
     assert!(Config::parse(r#"container-rule { layout; }"#).is_err());
     assert!(Config::parse(r#"container-rule { layout "a" "b"; }"#).is_err());
 }
+
+#[test]
+fn an_output_transform_is_parsed_by_its_wl_output_name() {
+    use jff_wm::config::OutputTransform;
+    for (name, want) in [
+        ("normal", OutputTransform::Normal),
+        ("90", OutputTransform::Rotate90),
+        ("180", OutputTransform::Rotate180),
+        ("270", OutputTransform::Rotate270),
+        ("flipped", OutputTransform::Flipped),
+        ("flipped-90", OutputTransform::Flipped90),
+        ("flipped-180", OutputTransform::Flipped180),
+        ("flipped-270", OutputTransform::Flipped270),
+    ] {
+        let text = format!(r#"outputs {{ output "DP-1" {{ transform "{name}"; }} }}"#);
+        let config = Config::parse(&text).unwrap();
+        assert_eq!(config.output("DP-1").unwrap().transform, want, "{name}");
+    }
+}
+
+#[test]
+fn an_output_without_a_transform_is_not_turned() {
+    use jff_wm::config::OutputTransform;
+    let config = Config::parse(r#"outputs { output "DP-1" { position 0 0; } }"#).unwrap();
+    assert_eq!(
+        config.output("DP-1").unwrap().transform,
+        OutputTransform::Normal
+    );
+}
+
+#[test]
+fn rejects_bad_output_transforms() {
+    assert!(Config::parse(r#"outputs { output "DP-1" { transform; } }"#).is_err());
+    assert!(Config::parse(r#"outputs { output "DP-1" { transform "45"; } }"#).is_err());
+    assert!(Config::parse(r#"outputs { output "DP-1" { transform 90; } }"#).is_err());
+    assert!(Config::parse(r#"outputs { output "DP-1" { transform "90" "180"; } }"#).is_err());
+}

@@ -2,8 +2,8 @@
 //! change their mode, position, and on/off state while jff runs.
 //!
 //! Changes go through the in-memory `Config`, exactly as if they'd been written in the `outputs`
-//! block of the config file, so they last until the config is reloaded. Scale, transform, and
-//! adaptive sync aren't supported: a configuration asking for them is reported as failed.
+//! block of the config file, so they last until the config is reloaded. Scale and adaptive sync
+//! aren't supported: a configuration asking for them is reported as failed.
 //!
 //! Units: the protocol speaks mHz for refresh rates, the config speaks whole Hz. Conversion
 //! happens at the edge (see `mhz_to_hz`).
@@ -24,7 +24,7 @@ use smithay::reexports::wayland_server::{
 };
 
 use crate::app::Backend;
-use crate::config::ModeRequest;
+use crate::config::{ModeRequest, OutputTransform};
 use crate::feature::outputs::{mhz_to_hz, Monitor, MonitorMode};
 use crate::state::JffState;
 
@@ -67,6 +67,7 @@ struct HeadState {
     /// Index into `monitor.modes`.
     current: Option<usize>,
     position: (i32, i32),
+    transform: Transform,
 }
 
 /// User data of a mode object.
@@ -84,7 +85,8 @@ pub struct HeadRequest {
     enabled: bool,
     mode: Option<ModeRequest>,
     position: Option<(i32, i32)>,
-    /// Something jff can't do (scale, transform) was asked for.
+    transform: Option<Transform>,
+    /// Something jff can't do (scale) was asked for.
     unsupported: bool,
 }
 
@@ -158,7 +160,7 @@ fn announce(
                 head.current_mode(current);
             }
             head.position(state.position.0, state.position.1);
-            head.transform(Transform::Normal);
+            head.transform(state.transform);
             head.scale(1.0);
         }
         announced.push((head, modes));
@@ -213,10 +215,12 @@ impl JffState {
                         (loc.x, loc.y)
                     })
                     .unwrap_or((0, 0));
+                let transform = output.map_or(Transform::Normal, |o| o.current_transform().into());
                 HeadState {
                     enabled: output.is_some(),
                     current,
                     position,
+                    transform,
                     monitor,
                 }
             })
@@ -291,6 +295,9 @@ impl JffState {
                     }
                     if let Some(position) = request.position {
                         config.position = Some(position);
+                    }
+                    if let Some(transform) = request.transform {
+                        config.transform = OutputTransform::from_smithay(transform.into());
                     }
                 }
             });
@@ -525,8 +532,9 @@ impl Dispatch<ZwlrOutputConfigurationHeadV1, HeadConfigData> for JffState {
                 head.position = Some((x, y));
             }
             zwlr_output_configuration_head_v1::Request::SetTransform { transform } => {
-                if !matches!(transform, WEnum::Value(Transform::Normal)) {
-                    head.unsupported = true;
+                match transform {
+                    WEnum::Value(transform) => head.transform = Some(transform),
+                    WEnum::Unknown(_) => head.unsupported = true,
                 }
             }
             zwlr_output_configuration_head_v1::Request::SetScale { scale } => {

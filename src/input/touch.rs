@@ -24,7 +24,7 @@ use smithay::input::pointer::{GrabStartData, MotionEvent as PointerMotionEvent};
 use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{Logical, Point, Serial, Size, SERIAL_COUNTER};
+use smithay::utils::{Logical, Point, Serial, SERIAL_COUNTER};
 
 use super::BTN_LEFT;
 use crate::primitives::layout;
@@ -39,9 +39,10 @@ impl JffState {
     ) -> Option<Point<f64, Logical>> {
         let names: Vec<String> = self.outputs.iter().map(|output| output.name()).collect();
         let rects = self.output_rects();
-        let rect = rects.get(touch_output(&names)?)?;
-        let size: Size<i32, Logical> = (rect.2, rect.3).into();
-        let pos = event.position_transformed(size) + Point::from((rect.0 as f64, rect.1 as f64));
+        let index = touch_output(&names)?;
+        let rect = rects.get(index)?;
+        let pos = self.absolute_on_output::<B, _>(self.outputs.get(index)?, event)
+            + Point::from((rect.0 as f64, rect.1 as f64));
         Some(layout::clamp_to_rects((pos.x, pos.y), &self.pointer_bounds()).into())
     }
 

@@ -57,6 +57,7 @@ use smithay::wayland::image_copy_capture::{
 };
 use smithay::wayland::shm::{with_buffer_contents, with_buffer_contents_mut};
 
+use crate::feature::outputs::frame_size;
 use crate::feature::screenshot::{Captured, HdrCaptured};
 use crate::ipc::ViewId;
 use crate::primitives::hdr_capture::{pack_row_2101010, pq_picture};
@@ -254,7 +255,9 @@ impl JffState {
     fn target_constraints(&self, target: &Target) -> Option<BufferConstraints> {
         match target {
             Target::Output(output) => {
-                let mode = output.current_mode()?;
+                // The monitor's picture is drawn upright, so a turned monitor is as tall as it is
+                // wide the other way round.
+                let size = frame_size(output)?;
                 // The 10-bit formats only while the monitor is shown as HDR: otherwise there
                 // is no PQ picture to give.
                 let extra = if self.hdr_capture(output).is_some() {
@@ -262,7 +265,7 @@ impl JffState {
                 } else {
                     &[]
                 };
-                Some(shm_constraints((mode.size.w, mode.size.h), extra))
+                Some(shm_constraints(size, extra))
             }
             Target::Window(window) => {
                 let (_, size) = self.window_capture_size(window).ok()?;

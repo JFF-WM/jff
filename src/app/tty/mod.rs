@@ -61,7 +61,7 @@ use smithay::reexports::wayland_server::DisplayHandle;
 
 use crate::app::pacing::advance_frame_sequence;
 use crate::app::{Backend, BACKGROUND};
-use crate::config::{Config, ModeRequest, Vrr};
+use crate::config::{Config, ModeRequest, OutputTransform, Vrr};
 use crate::desk::Desk;
 use crate::feature::outputs::{output_rect, Monitor, MonitorMode};
 use crate::feature::overview_mode::{overview_drag_elements, overview_elements};
@@ -446,6 +446,13 @@ pub struct Tty {
 /// Connector name as clients see it, e.g. `DP-1`.
 fn connector_name(info: &connector::Info) -> String {
     format!("{}-{}", info.interface().as_str(), info.interface_id())
+}
+
+/// How the config wants the picture of monitor `name` turned onto its panel.
+fn output_transform(config: &Config, name: &str) -> Transform {
+    config
+        .output(name)
+        .map_or(Transform::Normal, |c| c.transform.to_smithay())
 }
 
 /// The requested mode if the monitor has it, else its preferred one.
@@ -970,6 +977,24 @@ impl Tty {
 
         self.monitors = monitors;
 
+        // A new `transform` needs no new mode: the monitor keeps showing, turned the other
+        // way from the next frame on. The output's compositor takes the turn from the output,
+        // and starts its buffers over, since what was drawn is the wrong way round now.
+        for lit in self.outputs.values_mut() {
+            let wanted = output_transform(config, &lit.output.name());
+            if lit.output.current_transform() != wanted {
+                tracing::info!(
+                    "monitor {}: transform {}",
+                    lit.output.name(),
+                    OutputTransform::from_smithay(wanted).name()
+                );
+                lit.output
+                    .change_current_state(None, Some(wanted), None, None);
+                lit.compositor.reset_buffers();
+                lit.queue_redraw();
+            }
+        }
+
         let stale: Vec<crtc::Handle> = self
             .outputs
             .keys()
@@ -992,7 +1017,8 @@ impl Tty {
                 continue;
             };
             let hdr_wanted = config.output(&name).is_some_and(|c| c.hdr);
-            match self.light_up(&info, &name, crtc, mode, hdr_wanted) {
+            let transform = output_transform(config, &name);
+            match self.light_up(&info, &name, crtc, mode, transform, hdr_wanted) {
                 Ok(lit) => {
                     used.insert(crtc);
                     added.push(lit.output.clone());
@@ -1011,6 +1037,7 @@ impl Tty {
         name: &str,
         crtc: crtc::Handle,
         drm_mode: DrmMode,
+        transform: Transform,
         hdr_wanted: bool,
     ) -> anyhow::Result<TtyOutput> {
         tracing::info!(
@@ -1032,12 +1059,7 @@ impl Tty {
             },
         );
         let wl_mode = Mode::from(drm_mode.clone());
-        output.change_current_state(
-            Some(wl_mode),
-            Some(Transform::Normal),
-            None,
-            Some((0, 0).into()),
-        );
+        output.change_current_state(Some(wl_mode), Some(transform), None, Some((0, 0).into()));
         output.set_preferred(wl_mode);
 
         let surface = self

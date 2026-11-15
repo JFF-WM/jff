@@ -56,7 +56,7 @@ use smithay::utils::{
 };
 
 use crate::app::{Backend, BACKGROUND};
-use crate::feature::outputs::output_rect;
+use crate::feature::outputs::{frame_size, output_rect};
 use crate::feature::screenshot::area::{
     crop_channels, crop_rgba, flip_rows, physical_rect, screenshot_dir, Selector,
 };
@@ -484,9 +484,7 @@ impl JffState {
         if self.session_locked() {
             return Err("the session is locked".to_string());
         }
-        let mode = output
-            .current_mode()
-            .ok_or("the monitor has no mode (it is off)")?;
+        let size = frame_size(output).ok_or("the monitor has no mode (it is off)")?;
         let scale_factor = output.current_scale().fractional_scale();
         let scale = Scale::from(scale_factor);
         let rect = output_rect(output);
@@ -597,7 +595,7 @@ impl JffState {
 
         Ok(OutputFrame {
             elements,
-            size: (mode.size.w, mode.size.h),
+            size,
             scale: scale_factor,
             _color_scope: color_scope,
         })
@@ -775,9 +773,7 @@ impl JffState {
             .window_monitor(window)
             .ok_or("the window is on no monitor")?;
         let on = output_rect(&output);
-        let mode = output
-            .current_mode()
-            .ok_or("the monitor has no mode (it is off)")?;
+        let monitor = frame_size(&output).ok_or("the monitor has no mode (it is off)")?;
         let origin: Point<i32, Logical> = (on.0, on.1).into();
         let window_origin: Point<i32, Logical> = Point::from(pos) - geo.loc;
 
@@ -825,7 +821,7 @@ impl JffState {
 
         Ok(ShownFrame {
             elements,
-            monitor: (mode.size.w, mode.size.h),
+            monitor,
             scale: scale_factor,
             area: physical_rect(
                 (pos.0, pos.1, geo.size.w, geo.size.h),

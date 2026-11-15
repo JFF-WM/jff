@@ -49,6 +49,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{bail, Context};
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use smithay::input::keyboard::{xkb, Keysym, ModifiersState, XkbConfig};
+use smithay::utils::Transform;
 
 use crate::desk::{Goto, Side};
 use crate::primitives::hdr_output::{self, ToneMap, HDR_PEAK_RANGE, SDR_WHITE_RANGE};
@@ -322,6 +323,89 @@ pub struct ColorManagementConfig {
     pub convert_srgb: bool,
 }
 
+/// How a monitor's picture is turned onto its panel, named as `wl_output` names it: `90` is a
+/// quarter turn counter-clockwise, `flipped` a mirror image. It is for a panel that is mounted
+/// turned (or a monitor stood on its side): windows are laid out upright and the frame is
+/// turned on its way to the screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputTransform {
+    #[default]
+    Normal,
+    Rotate90,
+    Rotate180,
+    Rotate270,
+    Flipped,
+    Flipped90,
+    Flipped180,
+    Flipped270,
+}
+
+impl OutputTransform {
+    /// The names the config takes, in the order of the variants.
+    pub const NAMES: [&'static str; 8] = [
+        "normal",
+        "90",
+        "180",
+        "270",
+        "flipped",
+        "flipped-90",
+        "flipped-180",
+        "flipped-270",
+    ];
+
+    const ALL: [OutputTransform; 8] = [
+        OutputTransform::Normal,
+        OutputTransform::Rotate90,
+        OutputTransform::Rotate180,
+        OutputTransform::Rotate270,
+        OutputTransform::Flipped,
+        OutputTransform::Flipped90,
+        OutputTransform::Flipped180,
+        OutputTransform::Flipped270,
+    ];
+
+    /// The transform called `name` in the config.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::NAMES
+            .iter()
+            .position(|n| *n == name)
+            .map(|i| Self::ALL[i])
+    }
+
+    /// The name this transform has in the config.
+    pub fn name(self) -> &'static str {
+        Self::NAMES[Self::ALL.iter().position(|t| *t == self).unwrap_or(0)]
+    }
+
+    /// The same turn as Smithay's.
+    pub fn to_smithay(self) -> Transform {
+        match self {
+            Self::Normal => Transform::Normal,
+            Self::Rotate90 => Transform::_90,
+            Self::Rotate180 => Transform::_180,
+            Self::Rotate270 => Transform::_270,
+            Self::Flipped => Transform::Flipped,
+            Self::Flipped90 => Transform::Flipped90,
+            Self::Flipped180 => Transform::Flipped180,
+            Self::Flipped270 => Transform::Flipped270,
+        }
+    }
+
+    /// The same turn as `transform`.
+    pub fn from_smithay(transform: Transform) -> Self {
+        match transform {
+            Transform::Normal => Self::Normal,
+            Transform::_90 => Self::Rotate90,
+            Transform::_180 => Self::Rotate180,
+            Transform::_270 => Self::Rotate270,
+            Transform::Flipped => Self::Flipped,
+            Transform::Flipped90 => Self::Flipped90,
+            Transform::Flipped180 => Self::Flipped180,
+            Transform::Flipped270 => Self::Flipped270,
+        }
+    }
+}
+
 /// What the user asked for one monitor.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OutputConfig {
@@ -332,6 +416,8 @@ pub struct OutputConfig {
     /// Top-left corner in the shared desktop space.
     pub position: Option<(i32, i32)>,
     pub mode: Option<ModeRequest>,
+    /// How the picture is turned onto the panel.
+    pub transform: OutputTransform,
     /// ICC profile whose calibration curves (`vcgt`) are applied to the monitor.
     pub icc_profile: Option<std::path::PathBuf>,
     /// Variable refresh rate.
@@ -2450,6 +2536,27 @@ fn parse_output(node: &KdlNode) -> anyhow::Result<OutputConfig> {
                     _ => bail!("mode takes one string like \"1920x1080@60\""),
                 };
                 config.mode = Some(parse_mode(text)?);
+            }
+            "transform" => {
+                config.transform = match args.as_slice() {
+                    [value] => value
+                        .as_string()
+                        .and_then(OutputTransform::from_name)
+                        .with_context(|| {
+                            format!(
+                                "transform takes {}: transform \"90\"",
+                                OutputTransform::NAMES
+                                    .map(|n| format!("\"{n}\""))
+                                    .join(", ")
+                            )
+                        })?,
+                    _ => bail!(
+                        "transform takes one value, {}: transform \"90\"",
+                        OutputTransform::NAMES
+                            .map(|n| format!("\"{n}\""))
+                            .join(", ")
+                    ),
+                };
             }
             "adaptive-sync" => {
                 config.vrr = match args.as_slice() {

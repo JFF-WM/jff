@@ -3,11 +3,11 @@
 
 use std::time::{Duration, Instant};
 
-use smithay::backend::input::InputTime;
+use smithay::backend::input::{AbsolutePositionEvent, InputBackend, InputTime};
 use smithay::desktop::space::SpaceElement;
 use smithay::input::pointer::MotionEvent;
 use smithay::output::Output;
-use smithay::utils::{Logical, Point, Rectangle, Size, SERIAL_COUNTER};
+use smithay::utils::{Logical, Point, Rectangle, Size, Transform, SERIAL_COUNTER};
 use smithay::wayland::fractional_scale::with_fractional_scale;
 
 use crate::config::{ModeRequest, RuleOutput, WindowRule};
@@ -61,17 +61,56 @@ pub fn mhz_to_hz(mhz: i32) -> i32 {
     (mhz + 500) / 1000
 }
 
+/// The size of the picture drawn for `output`, in pixels: its mode in the orientation the
+/// monitor is used in, so width and height are swapped for a quarter turn. The output's
+/// compositor turns the frame onto the panel, so everything is drawn upright at this size.
+/// `None` when the monitor has no mode (is off).
+pub fn frame_size(output: &Output) -> Option<(i32, i32)> {
+    let mode = output.current_mode()?;
+    let size = output.current_transform().transform_size(mode.size);
+    Some((size.w, size.h))
+}
+
 /// The area `output` covers in the shared space.
 pub fn output_rect(output: &Output) -> Rect {
     let loc = output.current_location();
-    let size = output
-        .current_mode()
-        .map(|m| (m.size.w, m.size.h))
-        .unwrap_or((0, 0));
+    let size = frame_size(output).unwrap_or((0, 0));
     (loc.x, loc.y, size.0, size.1)
 }
 
+/// Where a point of a panel's own picture (`native` pixels, `point` in them) is in the upright
+/// frame drawn for it: what `transform` did to the frame, undone.
+pub fn upright_point(transform: Transform, native: (i32, i32), point: (f64, f64)) -> (f64, f64) {
+    let area: Size<f64, Logical> = (f64::from(native.0), f64::from(native.1)).into();
+    let upright = transform
+        .invert()
+        .transform_point_in(Point::from(point), &area);
+    (upright.x, upright.y)
+}
+
 impl JffState {
+    /// Where an absolute device (touchscreen, pen) event is on `output`, from the monitor's own
+    /// top left. The device reports where it was touched on the panel as built, so on a turned
+    /// monitor that is turned back to the upright frame the windows are in. (Winit has no turned
+    /// panel: its output only mirrors the picture on its way into the host's window.)
+    pub fn absolute_on_output<B: InputBackend, E: AbsolutePositionEvent<B>>(
+        &self,
+        output: &Output,
+        event: &E,
+    ) -> Point<f64, Logical> {
+        let (native, transform) = match output.current_mode() {
+            Some(mode) if self.backend.is_tty() => {
+                ((mode.size.w, mode.size.h), output.current_transform())
+            }
+            _ => {
+                let rect = output_rect(output);
+                ((rect.2, rect.3), Transform::Normal)
+            }
+        };
+        let at = event.position_transformed(Size::<i32, Logical>::from(native));
+        upright_point(transform, native, (at.x, at.y)).into()
+    }
+
     /// Area of every monitor, in the order they were added.
     pub fn output_rects(&self) -> Vec<Rect> {
         self.outputs.iter().map(output_rect).collect()
