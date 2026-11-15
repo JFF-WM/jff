@@ -57,3 +57,6 @@ features = [
   "backend_session_libseat",
   "backend_udev",
 ]
+
+[profile.release]
+debug = "line-tables-only"
