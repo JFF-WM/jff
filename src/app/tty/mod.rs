@@ -2313,6 +2313,9 @@ impl JffState {
 
     /// The display showed the frame queued on `crtc`.
     fn on_vblank(&mut self, crtc: crtc::Handle, meta: Option<DrmEventMetadata>) {
+        // The frame that just reached the screen says which monitor each surface is on: a window
+        // that moved to a monitor with other colors learns its new preferred description.
+        crate::protocol::color_management::refresh_feedbacks(self);
         let Backend::Tty(tty) = &mut self.backend else {
             return;
         };

@@ -4,10 +4,11 @@
 //! This module keeps the books: a surface's image description and rendering intent are
 //! double-buffered like the rest of its state. Requests change the pending state, a
 //! `wl_surface.commit` makes it current, and [`surface_color`] reads the current one. Only
-//! parametric descriptions exist: ICC profiles are refused with
-//! `unsupported_feature`. Mastering display metadata is checked: its primaries are not drawn
-//! differently, but its luminance is kept, and with `max_cll` it tells an HDR monitor how bright
-//! the content of a PQ surface gets, so the monitor's tone mapping can be fitted to it (see
+//! parametric descriptions exist, an ICC profile a client sends (`create_icc_creator`) is reduced
+//! to one when it is read (`feature::icc::client_description`). Mastering display metadata is
+//! kept: its primaries are the target volume that the gamut mapping fits to the output (see
+//! `primitives/gamut.rs`, `target_reach`), its luminance and `max_cll` tell an HDR monitor how
+//! bright the content of a PQ surface gets, so the monitor's tone mapping can be fitted to it (see
 //! `primitives/hdr_output.rs`, `ImageDescription::content_light`).
 //! Windows-scRGB (`create_windows_scrgb`, what Mesa's Vulkan WSI and Wine/Proton use for fp16
 //! HDR swapchains) is offered: sRGB primaries, an extended linear curve, 1.0 at 80 cd/m². The rules for building a description, and
@@ -42,18 +43,21 @@
 //!
 //! An output is described as sRGB, unless the config gives a monitor an ICC profile: then it is
 //! described as that profile says (its primaries, tone curve and white, see
-//! `feature::icc::description`), and [`sync_output_color`] keeps it up to date. What clients are
-//! told is one description for all outputs, the profile of the first monitor that has one, so
-//! the preferred description of any surface is that one, except on a monitor in HDR mode: that
-//! one is described as what it is (PQ in BT.2020, its peak, which is the EDID's or `hdr-peak`, and
-//! its SDR white), and the surfaces on it are told so. What the renderer converts to is the
-//! description of the monitor itself, so a monitor with no profile is still shown as sRGB. When
-//! the description clients are told changes, `image_description_changed` and
-//! `preferred_changed` go to the objects that asked, which is why those are kept in
-//! [`ColorManagement`].
+//! `feature::icc::description`), and [`sync_output_color`] keeps it up to date. Each monitor has
+//! its own description, and what a client is told is the one of the monitor it asks about: the
+//! `wl_output` of `get_output`, or the monitor a surface is shown on for its feedback. A monitor in
+//! HDR mode is described as what it is (PQ in BT.2020, its peak, which is the EDID's or
+//! `hdr-peak`, and its SDR white). What the renderer converts to is the description of the monitor
+//! itself, so a monitor with no profile is still shown as sRGB. When the description of a monitor
+//! changes, `image_description_changed` goes to the objects of that output, and
+//! `preferred_changed` to the feedback objects of the surfaces on it. A surface that moves to a
+//! monitor that is described differently is told the same way ([`refresh_feedbacks`]), which is why
+//! those objects are kept in [`ColorManagement`].
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashSet;
+use std::os::fd::OwnedFd;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use super::color_management_bindings::server::wp_color_management_output_v1::{
@@ -66,7 +70,9 @@ use super::color_management_bindings::server::wp_color_management_surface_v1::{
     self, WpColorManagementSurfaceV1,
 };
 use super::color_management_bindings::server::wp_color_manager_v1::{self, WpColorManagerV1};
-use super::color_management_bindings::server::wp_image_description_creator_icc_v1::WpImageDescriptionCreatorIccV1;
+use super::color_management_bindings::server::wp_image_description_creator_icc_v1::{
+    self, WpImageDescriptionCreatorIccV1,
+};
 use super::color_management_bindings::server::wp_image_description_creator_params_v1::{
     self, WpImageDescriptionCreatorParamsV1,
 };
@@ -163,6 +169,7 @@ pub fn hdr_output_description(
         max_cll: None,
         max_fall: None,
         mastering_luminance: None,
+        mastering_primaries: None,
     }
 }
 
@@ -219,10 +226,11 @@ pub struct ColorManagement {
     /// `None` when the config turns the protocol off.
     _global: Option<GlobalId>,
     identities: LongIdentities,
-    output: Arc<Described>,
-    /// The colors of each monitor that has an ICC profile, by connector name. A monitor that
-    /// is not in it is sRGB.
-    monitors: HashMap<String, ImageDescription>,
+    /// What a monitor with no ICC profile is described as: sRGB.
+    plain: Arc<Described>,
+    /// The monitors that have an ICC profile, by connector name, with their colors and what
+    /// clients are told about them. A monitor that is not in it is described as `plain`.
+    profiled: HashMap<String, Arc<Described>>,
     /// What clients are told about each monitor in HDR mode, by connector name.
     hdr: HashMap<String, Arc<Described>>,
     /// Information objects waiting for their events. `done` is a destructor event: sent while
@@ -243,7 +251,7 @@ impl ColorManagement {
     /// clients never see the protocol.
     pub fn new(display: &DisplayHandle, enabled: bool) -> Self {
         let mut identities = LongIdentities::new();
-        let output = Arc::new(Described {
+        let plain = Arc::new(Described {
             description: ImageDescription::srgb(),
             identity: identities.next().unwrap_or(1),
         });
@@ -251,8 +259,8 @@ impl ColorManagement {
             _global: enabled
                 .then(|| display.create_global::<JffState, WpColorManagerV1, ()>(3, ())),
             identities,
-            output,
-            monitors: HashMap::new(),
+            plain,
+            profiled: HashMap::new(),
             hdr: HashMap::new(),
             pending_info: Vec::new(),
             outputs: Vec::new(),
@@ -262,36 +270,25 @@ impl ColorManagement {
 
     /// The description of the output `name`, which is also the preferred one of the surfaces on it.
     pub fn output_description(&self, name: &str) -> Arc<Described> {
-        self.hdr.get(name).unwrap_or(&self.output).clone()
+        self.hdr
+            .get(name)
+            .or_else(|| self.profiled.get(name))
+            .unwrap_or(&self.plain)
+            .clone()
     }
 
     /// The colors of the monitor `name`: what its ICC profile says, sRGB without one.
     pub fn monitor_description(&self, name: &str) -> ImageDescription {
-        self.monitors
+        self.profiled
             .get(name)
-            .copied()
-            .unwrap_or_else(ImageDescription::srgb)
+            .map_or_else(ImageDescription::srgb, |told| told.description)
     }
 
     /// Whether the monitor `name` has an ICC profile that was read, so that
     /// [`monitor_description`](Self::monitor_description) is what the profile says and not the
     /// sRGB it falls back to.
     pub fn monitor_has_profile(&self, name: &str) -> bool {
-        self.monitors.contains_key(name)
-    }
-
-    /// Give the outputs a new description. Returns its identity, `None` when it is the one they
-    /// have already (or the numbers ran out, and what they have stays).
-    fn set_output_description(&mut self, description: ImageDescription) -> Option<u64> {
-        if self.output.description == description {
-            return None;
-        }
-        let identity = self.identities.next()?;
-        self.output = Arc::new(Described {
-            description,
-            identity,
-        });
-        Some(identity)
+        self.profiled.contains_key(name)
     }
 
     /// A client's description with a number of its own. `None` when the numbers ran out.
@@ -360,6 +357,28 @@ pub struct ColorSurface {
 /// The surface behind one `wp_color_management_surface_feedback_v1`.
 pub struct ColorFeedback {
     surface: WlSurface,
+    /// The identity of the preferred description the client was last given or told about, to see
+    /// when the surface has a new one ([`refresh_feedbacks`]).
+    told: AtomicU64,
+}
+
+/// What a client creating an ICC image description has sent so far.
+#[derive(Default)]
+pub struct IccCreator {
+    profile: Mutex<IccFile>,
+}
+
+/// The ICC file of an [`IccCreator`].
+#[derive(Default)]
+enum IccFile {
+    /// `set_icc_file` was not called.
+    #[default]
+    Unset,
+    /// The profile, read when it was set.
+    Data(Vec<u8>),
+    /// The profile could not be read for a reason that is no fault of the client: the description
+    /// fails with `operating_system`.
+    Unreadable,
 }
 
 /// The output behind one `wp_color_management_output_v1`, `None` if the `wl_output` was not
@@ -574,13 +593,20 @@ impl Dispatch<WpColorManagerV1, ()> for JffState {
                 }
             }
             Request::GetSurfaceFeedback { id, surface } => {
-                let object = data_init.init(id, ColorFeedback { surface });
+                let name = feedback_output_name(&state.outputs, &surface);
+                let told = state.color_management.output_description(&name).identity;
+                let object = data_init.init(
+                    id,
+                    ColorFeedback {
+                        surface,
+                        told: AtomicU64::new(told),
+                    },
+                );
                 state.color_management.feedbacks.retain(|f| f.is_alive());
                 state.color_management.feedbacks.push(object);
             }
             Request::CreateIccCreator { obj } => {
-                data_init.init(obj, ());
-                resource.post_error(Error::UnsupportedFeature, "ICC profiles are not supported");
+                data_init.init(obj, IccCreator::default());
             }
             Request::CreateParametricCreator { obj } => {
                 data_init.init(obj, ParamsCreator::new(resource.version()));
@@ -715,14 +741,9 @@ impl Dispatch<WpColorManagementSurfaceFeedbackV1, ColorFeedback> for JffState {
             resource.post_error(Error::Inert, "the wl_surface is gone");
             return;
         }
-        // The monitor the surface is shown on, the first one before it has been drawn.
-        let name = with_states(&data.surface, |states| {
-            surface_primary_scanout_output(&data.surface, states)
-        })
-        .or_else(|| state.outputs.first().cloned())
-        .map(|output| output.name())
-        .unwrap_or_default();
+        let name = feedback_output_name(&state.outputs, &data.surface);
         let described = state.color_management.output_description(&name);
+        data.told.store(described.identity, Ordering::SeqCst);
         init_ready(
             data_init,
             image_description,
@@ -850,14 +871,29 @@ impl Dispatch<WpImageDescriptionV1, ImageDescriptionData> for JffState {
     }
 }
 
-/// Bring what clients are told in line with the config and the monitors: ICC profiles, the first profile as the shared description, and the HDR descriptions. Runs at startup, on reload and when monitors come and go.
+/// The name of the monitor a surface is shown on: its primary scanout output, the first monitor
+/// before it has been drawn. Empty when there is none.
+fn feedback_output_name(outputs: &[Output], surface: &WlSurface) -> String {
+    with_states(surface, |states| {
+        surface_primary_scanout_output(surface, states)
+    })
+    .or_else(|| outputs.first().cloned())
+    .map(|output| output.name())
+    .unwrap_or_default()
+}
+
+/// Bring what clients are told in line with the config and the monitors: the ICC profile of each
+/// monitor as its own description, and the HDR descriptions. Runs at startup, on reload and when
+/// monitors come and go. Only the clients of a monitor whose description changed are told.
 pub fn sync_output_color(state: &mut JffState) {
-    let mut monitors = HashMap::new();
-    for output in &state.outputs {
-        let name = output.name();
+    let names: Vec<String> = state.outputs.iter().map(|output| output.name()).collect();
+    let before = told_identities(&state.color_management, &names);
+
+    let mut read = Vec::new();
+    for name in &names {
         let Some(path) = state
             .config
-            .output(&name)
+            .output(name)
             .and_then(|config| config.icc_profile.as_deref())
         else {
             continue;
@@ -865,7 +901,7 @@ pub fn sync_output_color(state: &mut JffState) {
         match crate::feature::icc::load_description(path) {
             Ok(description) => {
                 tracing::debug!("monitor {name}: color description from {}", path.display());
-                monitors.insert(name, description);
+                read.push((name.clone(), description));
             }
             Err(err) => tracing::warn!(
                 "monitor {name}: cannot describe {}: {err:#}",
@@ -873,16 +909,40 @@ pub fn sync_output_color(state: &mut JffState) {
             ),
         }
     }
-    let told = state
-        .outputs
-        .iter()
-        .find_map(|output| monitors.get(&output.name()).copied())
-        .unwrap_or_else(ImageDescription::srgb);
-    state.color_management.monitors = monitors;
-    let hdr_changed = sync_hdr_descriptions(state);
-    if !set_output_color(state, told) && hdr_changed {
-        notify_preferred_changed(state);
+    let manager = &mut state.color_management;
+    let mut profiled = HashMap::new();
+    for (name, description) in read {
+        // A profile that did not change keeps its identity, so clients see no change.
+        let kept = manager
+            .profiled
+            .get(&name)
+            .filter(|told| told.description == description)
+            .cloned();
+        let Some(described) = kept.or_else(|| manager.describe(description)) else {
+            continue;
+        };
+        profiled.insert(name, described);
     }
+    manager.profiled = profiled;
+    sync_hdr_descriptions(state);
+
+    let after = told_identities(&state.color_management, &names);
+    let changed: HashSet<String> = names
+        .into_iter()
+        .filter(|name| before.get(name) != after.get(name))
+        .collect();
+    if !changed.is_empty() {
+        tracing::info!("the color description of {changed:?} changed");
+        notify_changed(state, &changed);
+    }
+}
+
+/// The identity of what clients are told about each of `names`.
+fn told_identities(manager: &ColorManagement, names: &[String]) -> HashMap<String, u64> {
+    names
+        .iter()
+        .map(|name| (name.clone(), manager.output_description(name).identity))
+        .collect()
 }
 
 /// Take the HDR descriptions from the backend and say whether what clients are told about them changed.
@@ -918,17 +978,42 @@ fn sync_hdr_descriptions(state: &mut JffState) -> bool {
     true
 }
 
-/// Tell every client that follows the outputs' description that it may have changed. They ask
-/// again, and get the one of the monitor the surface is on.
-fn notify_preferred_changed(state: &mut JffState) {
+/// Tell the clients of the monitors in `changed` that their description may have changed: the
+/// output objects of those monitors, and the feedback objects of the surfaces on them. They ask
+/// again.
+fn notify_changed(state: &mut JffState, changed: &HashSet<String>) {
     let manager = &mut state.color_management;
     manager.outputs.retain(|o| o.is_alive());
-    manager.feedbacks.retain(|f| f.is_alive());
     for output in &manager.outputs {
-        output.image_description_changed();
+        let name = output
+            .data::<ColorOutput>()
+            .and_then(|data| data.output.as_ref())
+            .map(|output| output.name());
+        if name.is_some_and(|name| changed.contains(&name)) {
+            output.image_description_changed();
+        }
     }
-    let identity = manager.output.identity;
-    for feedback in &manager.feedbacks {
+    refresh_feedbacks(state);
+}
+
+/// Tell every surface feedback object whose surface has a preferred description other than the one
+/// its client last got: because the description of its monitor changed, or because the surface is
+/// now shown on another monitor. Call it after the clients' requests were dispatched, and when
+/// surfaces may have moved.
+pub fn refresh_feedbacks(state: &mut JffState) {
+    state.color_management.feedbacks.retain(|f| f.is_alive());
+    for feedback in &state.color_management.feedbacks {
+        let Some(data) = feedback.data::<ColorFeedback>() else {
+            continue;
+        };
+        if !data.surface.is_alive() {
+            continue;
+        }
+        let name = feedback_output_name(&state.outputs, &data.surface);
+        let identity = state.color_management.output_description(&name).identity;
+        if data.told.swap(identity, Ordering::SeqCst) == identity {
+            continue;
+        }
         // `preferred_changed` is deprecated: from version 2 on `preferred_changed2` is sent
         // instead, with the 64-bit identity.
         if feedback.version() >= 2 {
@@ -938,20 +1023,6 @@ fn notify_preferred_changed(state: &mut JffState) {
             feedback.preferred_changed(short);
         }
     }
-}
-
-/// Make `description` the outputs' and tell the clients that follow it, if it is a change.
-fn set_output_color(state: &mut JffState, description: ImageDescription) -> bool {
-    if state
-        .color_management
-        .set_output_description(description)
-        .is_none()
-    {
-        return false;
-    }
-    tracing::info!("the outputs' color description changed");
-    notify_preferred_changed(state);
-    true
 }
 
 /// Send the events of the information objects queued by `get_information`. Call it right after
@@ -1031,17 +1102,144 @@ impl Dispatch<WpImageDescriptionReferenceV1, ReferenceData> for JffState {
     }
 }
 
-/// The ICC creator is only ever created to be refused, the client is disconnected with it.
-impl Dispatch<WpImageDescriptionCreatorIccV1, ()> for JffState {
+/// The most an ICC profile may be, as the protocol says: 32 MiB.
+const MAX_ICC_SIZE: u32 = 32 * 1024 * 1024;
+
+/// Why a profile could not be read from the fd of `set_icc_file`.
+enum IccReadError {
+    /// The client broke a rule of the protocol.
+    Protocol(wp_image_description_creator_icc_v1::Error, &'static str),
+    /// The system failed, whatever the client sent.
+    System(std::io::Error),
+}
+
+/// Read `length` bytes at `offset` of `fd`, checking what the protocol asks of the request: not
+/// empty and no more than 32 MiB, seekable and readable, and within the file.
+fn read_icc_file(fd: OwnedFd, offset: u32, length: u32) -> Result<Vec<u8>, IccReadError> {
+    use std::io::Seek;
+    use std::os::unix::fs::FileExt;
+    use wp_image_description_creator_icc_v1::Error;
+
+    /// What reading a file that was not opened for reading gives (Linux's EBADF).
+    const EBADF: i32 = 9;
+
+    if length == 0 || length > MAX_ICC_SIZE {
+        return Err(IccReadError::Protocol(
+            Error::BadSize,
+            "the ICC profile is empty or bigger than 32 MiB",
+        ));
+    }
+    let mut file = std::fs::File::from(fd);
+    if file.stream_position().is_err() {
+        return Err(IccReadError::Protocol(
+            Error::BadFd,
+            "the ICC file is not seekable",
+        ));
+    }
+    let size = file.metadata().map_err(IccReadError::System)?.len();
+    if u64::from(offset) + u64::from(length) > size {
+        return Err(IccReadError::Protocol(
+            Error::OutOfFile,
+            "the ICC profile reaches beyond the end of the file",
+        ));
+    }
+    let mut data = vec![0u8; length as usize];
+    match file.read_exact_at(&mut data, u64::from(offset)) {
+        Ok(()) => Ok(data),
+        Err(err)
+            if err.raw_os_error() == Some(EBADF)
+                || err.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            Err(IccReadError::Protocol(
+                Error::BadFd,
+                "the ICC file is not readable",
+            ))
+        }
+        Err(err) => Err(IccReadError::System(err)),
+    }
+}
+
+/// The ICC creator: the profile is read when it is set, and turned into a description by `create`.
+/// A profile that is not what the protocol asks for (version 2 or 4, display or color space class,
+/// RGB) or has nothing to draw from makes a description that fails with `unsupported`.
+impl Dispatch<WpImageDescriptionCreatorIccV1, IccCreator> for JffState {
     fn request(
-        _state: &mut JffState,
+        state: &mut JffState,
         _client: &Client,
-        _resource: &WpImageDescriptionCreatorIccV1,
-        _request: <WpImageDescriptionCreatorIccV1 as Resource>::Request,
-        _data: &(),
+        resource: &WpImageDescriptionCreatorIccV1,
+        request: wp_image_description_creator_icc_v1::Request,
+        data: &IccCreator,
         _display: &DisplayHandle,
-        _data_init: &mut DataInit<'_, JffState>,
+        data_init: &mut DataInit<'_, JffState>,
     ) {
+        use wp_image_description_creator_icc_v1::{Error, Request};
+
+        let mut file = data.profile.lock().unwrap_or_else(PoisonError::into_inner);
+        match request {
+            Request::SetIccFile {
+                icc_profile,
+                offset,
+                length,
+            } => {
+                if !matches!(*file, IccFile::Unset) {
+                    resource.post_error(Error::AlreadySet, "the ICC file is set already");
+                    return;
+                }
+                match read_icc_file(icc_profile, offset, length) {
+                    Ok(bytes) => *file = IccFile::Data(bytes),
+                    Err(IccReadError::Protocol(error, message)) => {
+                        resource.post_error(error, message);
+                    }
+                    Err(IccReadError::System(err)) => {
+                        tracing::warn!("color management: cannot read an ICC profile: {err}");
+                        *file = IccFile::Unreadable;
+                    }
+                }
+            }
+            Request::Create { image_description } => {
+                match std::mem::take(&mut *file) {
+                    IccFile::Unset => {
+                        init_dead(data_init, image_description);
+                        resource.post_error(Error::IncompleteSet, "the ICC file is not set");
+                    }
+                    IccFile::Unreadable => init_failed(
+                        data_init,
+                        image_description,
+                        wp_image_description_v1::Cause::OperatingSystem,
+                        "the ICC profile could not be read",
+                    ),
+                    IccFile::Data(bytes) => match crate::feature::icc::client_description(&bytes) {
+                        Ok(description) => match state.color_management.describe(description) {
+                            // The protocol says `get_information` is not allowed on it.
+                            Some(described) => init_ready(
+                                data_init,
+                                image_description,
+                                described,
+                                false,
+                                resource.version(),
+                            ),
+                            None => init_failed(
+                                data_init,
+                                image_description,
+                                wp_image_description_v1::Cause::OperatingSystem,
+                                "out of image description numbers",
+                            ),
+                        },
+                        Err(reason) => {
+                            tracing::debug!(
+                                "color management: ICC profile not supported: {reason}"
+                            );
+                            init_failed(
+                                data_init,
+                                image_description,
+                                wp_image_description_v1::Cause::Unsupported,
+                                reason,
+                            );
+                        }
+                    },
+                }
+            }
+        }
     }
 }
 

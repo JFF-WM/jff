@@ -57,6 +57,7 @@ uniform vec2 cm_decode;
 uniform vec3 cm_src_luma;
 uniform vec2 cm_encode;
 uniform float cm_map;
+uniform float cm_reach;
 uniform vec2 cm_black;
 uniform vec3 cm_luma;
 uniform float cm_scale;
@@ -122,15 +123,45 @@ vec3 cm_from_light(vec3 l, vec2 curve) {
     return pow(l, vec3(1.0 / curve.y));
 }
 
+// Where the knee of the target volume starts: the same number as KNEE_START in primitives/gamut.rs.
+const float CM_KNEE = 0.8;
+
 // Light in the output's primaries to light the output can show. Colors that fit are untouched,
 // the others are clipped, or moved along the line to the grey of the same luminance until the
-// first channel to leave the gamut is exactly on its edge.
+// first channel to leave the gamut is exactly on its edge. When the surface's mastering display
+// reaches `cm_reach` times beyond the edge (cm_reach above 1), what is farther than CM_KNEE of the
+// way to the edge is first squeezed so that the mastering display's own corners end on it.
 vec3 cm_map_gamut(vec3 c) {
     if (cm_map < 0.5)
         return clamp(c, 0.0, 1.0);
     float y = clamp(dot(cm_luma, c), 0.0, 1.0);
     float low = min(c.r, min(c.g, c.b));
     float high = max(c.r, max(c.g, c.b));
+    if (cm_reach > 1.0 && high - low > 1e-6) {
+        // How far the color is from the grey axis, 1 on the edge of the gamut. A color whose grey
+        // is already past the edge has no such distance and is left to the hard mapping below.
+        bool bounded = true;
+        float distance = 0.0;
+        if (low < y) {
+            if (y > 0.0)
+                distance = (y - low) / y;
+            else if (low < 0.0)
+                bounded = false;
+        }
+        if (high > y) {
+            float room = 1.0 - y;
+            if (room > 0.0)
+                distance = max(distance, (high - y) / room);
+            else if (high > 1.0)
+                bounded = false;
+        }
+        if (bounded && distance > CM_KNEE) {
+            float eased = CM_KNEE + (1.0 - CM_KNEE) * (distance - CM_KNEE) / (cm_reach - CM_KNEE);
+            c = vec3(y) + (c - vec3(y)) * (eased / distance);
+            low = min(c.r, min(c.g, c.b));
+            high = max(c.r, max(c.g, c.b));
+        }
+    }
     float keep = 1.0;
     if (low < 0.0)
         keep = min(keep, y / (y - low));

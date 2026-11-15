@@ -17,6 +17,8 @@
 //!
 //! [`description`] reads the same profile for `wp_color_management_v1`: what a client is told
 //! the panel looks like once those curves are applied (its primaries, tone curve and white).
+//! [`client_description`] reads a profile a client sends (`create_icc_creator`) the other way
+//! round: the colors its pixels have, from the profile's own colorants and tone curves.
 
 pub mod lut;
 
@@ -595,14 +597,21 @@ fn panel_tf(data: &[u8]) -> TransferFunction {
     let Some(trc) = find_tag(data, b"gTRC").and_then(|tag| parse_trc(tag).ok()) else {
         return srgb;
     };
+    fit_tf(&trc)
+}
+
+/// The named curve closest to `trc`, or the power curve that gives the same light at half the code
+/// value. sRGB when nothing sensible fits.
+fn fit_tf(trc: &Trc) -> TransferFunction {
+    let srgb = TransferFunction::Named(NamedTf::Srgb);
     let fits = [
-        (worst_gap(&trc, srgb_to_light), srgb),
+        (worst_gap(trc, srgb_to_light), srgb),
         (
-            worst_gap(&trc, |x| x.powf(2.2)),
+            worst_gap(trc, |x| x.powf(2.2)),
             TransferFunction::Named(NamedTf::Gamma22),
         ),
         (
-            worst_gap(&trc, |x| x.powf(2.8)),
+            worst_gap(trc, |x| x.powf(2.8)),
             TransferFunction::Named(NamedTf::Gamma28),
         ),
     ];
@@ -622,6 +631,55 @@ fn panel_tf(data: &[u8]) -> TransferFunction {
         return TransferFunction::Power((exponent * EXPONENT_SCALE as f64).round() as u32);
     }
     srgb
+}
+
+/// The tone curve of the pixels of a client's profile: its green curve (`gTRC`) fitted by
+/// [`fit_tf`], or when the profile has lookup tables only, the green curve fitted to them.
+fn client_tf(data: &[u8]) -> Option<TransferFunction> {
+    if let Some(tag) = find_tag(data, b"gTRC") {
+        return parse_trc(tag).ok().map(|trc| fit_tf(&trc));
+    }
+    let [_, green, _] = lut::panel_model(data)?.trcs();
+    Some(fit_tf(&green))
+}
+
+/// What a client's ICC profile says about the colors of its pixels, as the parametric description
+/// jff draws: the primaries and white of the profile's colorants, and its tone curve. Anything a
+/// profile has beyond those (the bending of a lookup table's hues, rendering intents of its own, a
+/// black point) is not drawn, a table profile is the fit of [`lut::panel_model`].
+///
+/// What the protocol asks of the profile is checked: ICC version 2 or 4, class display or color
+/// space, three channels (RGB). The reason of an error says what is wrong, for the `failed` event.
+pub fn client_description(data: &[u8]) -> Result<ImageDescription, &'static str> {
+    if data.len() < 132 || &data[36..40] != b"acsp" {
+        return Err("not an ICC profile");
+    }
+    // The size in the header may not be more than what was sent. (Less is how a profile
+    // embedded in a bigger file looks, and is no matter.)
+    match be32(data, 0) {
+        Some(size) if size as usize <= data.len() => {}
+        _ => return Err("the ICC profile is truncated"),
+    }
+    if !matches!(data[8], 2 | 4) {
+        return Err("only ICC version 2 and 4 profiles are supported");
+    }
+    if !matches!(&data[12..16], b"mntr" | b"spac") {
+        return Err("the ICC profile is neither a display nor a color space profile");
+    }
+    if &data[16..20] != b"RGB " {
+        return Err("the ICC profile does not have three (RGB) channels");
+    }
+    let Some(primaries) = panel_primaries(data) else {
+        return Err("the ICC profile has no colorants that make a gamut");
+    };
+    let Some(tf) = client_tf(data) else {
+        return Err("the ICC profile has no tone curves");
+    };
+    Ok(ImageDescription {
+        primaries,
+        tf,
+        ..ImageDescription::srgb()
+    })
 }
 
 /// The luminance of the panel's white in cd/m², from `lumi`, if it is a believable one.

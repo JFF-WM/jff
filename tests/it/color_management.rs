@@ -66,9 +66,10 @@ fn offered_values_have_the_protocol_numbers() {
             .iter()
             .map(|f| f.raw())
             .collect::<Vec<_>>(),
-        [1, 2, 3, 4, 5, 7]
+        [0, 1, 2, 3, 4, 5, 7]
     );
-    // No ICC (0) and no extended target volume (6), Windows-scRGB (7) is offered.
+    // ICC (0) and Windows-scRGB (7) are offered, extended target volume (6) is not.
+    assert!(SUPPORTED_FEATURES.contains(&Feature::IccV2V4));
     assert!(SUPPORTED_FEATURES.contains(&Feature::Parametric));
     assert!(SUPPORTED_FEATURES.contains(&Feature::WindowsScrgb));
 
@@ -321,8 +322,8 @@ fn mastering_metadata_is_taken_once_each() {
         error_of(builder.set_mastering_luminance(50, 1_000)),
         CreatorError::AlreadySet
     );
-    // The primaries are a hint only, and the container's are the description's. The luminance is
-    // kept (it used to be thrown away, so this compared equal to a plain description).
+    // The container's primaries are the description's, the mastering display's are its target
+    // volume. Both the luminance and the primaries are kept.
     let described = builder.build().unwrap();
     assert_eq!(
         described.mastering_luminance,
@@ -332,8 +333,14 @@ fn mastering_metadata_is_taken_once_each() {
         })
     );
     assert_eq!(
+        described.mastering_primaries,
+        Some(Chromaticities::from_array(BT2020_PRIMARIES))
+    );
+    assert_eq!(described.primaries, ImageDescription::srgb().primaries);
+    assert_eq!(
         ImageDescription {
             mastering_luminance: None,
+            mastering_primaries: None,
             ..described
         },
         srgb_builder().build().unwrap()
@@ -750,4 +757,51 @@ fn info_reports_the_mastering_luminance_as_the_target_luminance() {
         min: 50,
         max: 10_000
     }));
+}
+
+// ---- mastering primaries as the target volume ---------------------------------------------
+
+#[test]
+fn the_builder_keeps_the_mastering_primaries() {
+    let mut builder = pq_builder();
+    let p3 = NamedPrimaries::DisplayP3.chromaticities();
+    builder
+        .set_mastering_display_primaries(p3.to_array())
+        .unwrap();
+    let described = builder.build().unwrap();
+    assert_eq!(described.mastering_primaries, Some(p3));
+    // a description without them is another one
+    assert_ne!(described, pq_builder().build().unwrap());
+    assert_eq!(pq_builder().build().unwrap().mastering_primaries, None);
+}
+
+#[test]
+fn mastering_primaries_that_are_the_containers_are_no_target_at_all() {
+    let mut builder = pq_builder();
+    builder
+        .set_mastering_display_primaries(NamedPrimaries::Bt2020.chromaticities().to_array())
+        .unwrap();
+    // equal to a description that did not set them, so clients and the renderer see no difference
+    assert_eq!(builder.build().unwrap(), pq_builder().build().unwrap());
+}
+
+#[test]
+fn info_reports_the_mastering_primaries_as_the_target_primaries() {
+    let p3 = NamedPrimaries::DisplayP3.chromaticities();
+    let mut builder = pq_builder();
+    builder
+        .set_mastering_display_primaries(p3.to_array())
+        .unwrap();
+    let info = builder.build().unwrap().info();
+    assert!(info.contains(&InfoEvent::TargetPrimaries(p3.to_array())));
+    // the primary volume is still the container's
+    assert!(info.contains(&InfoEvent::Primaries(
+        NamedPrimaries::Bt2020.chromaticities().to_array()
+    )));
+    // not set: the primary volume's, as it was
+    let plain = pq_builder().build().unwrap().info();
+    assert!(plain.contains(&InfoEvent::TargetPrimaries(
+        NamedPrimaries::Bt2020.chromaticities().to_array()
+    )));
+    assert!(!plain.contains(&InfoEvent::TargetPrimaries(p3.to_array())));
 }

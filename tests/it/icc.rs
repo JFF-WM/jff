@@ -1,6 +1,8 @@
 //! Tests for `jff_wm::feature::icc`.
 
-use jff_wm::feature::icc::{description, parse, srgb_to_light, GammaTable, Kind};
+use jff_wm::feature::icc::{
+    client_description, description, parse, srgb_to_light, GammaTable, Kind,
+};
 use jff_wm::primitives::color::{ImageDescription, NamedTf, TransferFunction};
 
 /// A minimal profile with the given tags.
@@ -275,4 +277,128 @@ fn lumi_gives_the_white_luminance() {
 #[test]
 fn description_rejects_what_is_not_a_profile() {
     assert!(description(b"nonsense").is_err());
+}
+
+// ---- client_description: the colors of a client's pixels --------------------------------
+
+/// `profile_tags` with the header a client's profile has: size, version 4, class `mntr`,
+/// color space `RGB ` and PCS `XYZ `.
+fn client_profile(
+    version: u8,
+    class: &[u8; 4],
+    space: &[u8; 4],
+    tags: &[(&[u8; 4], Vec<u8>)],
+) -> Vec<u8> {
+    let mut data = profile_tags(tags);
+    let size = data.len() as u32;
+    data[0..4].copy_from_slice(&size.to_be_bytes());
+    data[8] = version;
+    data[12..16].copy_from_slice(class);
+    data[16..20].copy_from_slice(space);
+    data[20..24].copy_from_slice(b"XYZ ");
+    data
+}
+
+/// A matrix/TRC RGB display profile: the sRGB colorants and one curve for the three channels.
+fn matrix_profile(curve: Vec<u8>) -> Vec<u8> {
+    let mut tags = srgb_colorants();
+    tags.push((b"rTRC", curve.clone()));
+    tags.push((b"gTRC", curve.clone()));
+    tags.push((b"bTRC", curve));
+    client_profile(4, b"mntr", b"RGB ", &tags)
+}
+
+#[test]
+fn a_matrix_profile_is_its_colorants_and_its_curve() {
+    let d = client_description(&matrix_profile(gamma_curve(2.2))).unwrap();
+    let srgb = ImageDescription::srgb().primaries;
+    assert!(near(d.primaries.red, srgb.red), "{:?}", d.primaries);
+    assert!(near(d.primaries.green, srgb.green), "{:?}", d.primaries);
+    assert!(near(d.primaries.blue, srgb.blue), "{:?}", d.primaries);
+    assert_eq!(d.tf, TransferFunction::Named(NamedTf::Gamma22));
+    // a client's profile makes no HDR claims and has no target volume
+    assert_eq!(d.max_cll, None);
+    assert_eq!(d.mastering_primaries, None);
+}
+
+#[test]
+fn the_curve_is_the_profiles_own_not_the_correction_a_monitor_gets() {
+    // a monitor profile without vcgt is made to follow sRGB, a client's pixels follow its curve
+    assert_eq!(
+        description(&matrix_profile(gamma_curve(2.8))).unwrap().tf,
+        TransferFunction::Named(NamedTf::Srgb)
+    );
+    assert_eq!(
+        client_description(&matrix_profile(gamma_curve(2.8)))
+            .unwrap()
+            .tf,
+        TransferFunction::Named(NamedTf::Gamma28)
+    );
+    assert_eq!(
+        client_description(&matrix_profile(parametric_gamma(2.2)))
+            .unwrap()
+            .tf,
+        TransferFunction::Named(NamedTf::Gamma22)
+    );
+}
+
+#[test]
+fn a_curve_that_is_no_named_one_becomes_a_power() {
+    // gamma 1.8, the curve of ProPhoto and old Macs
+    let d = client_description(&matrix_profile(gamma_curve(1.8))).unwrap();
+    match d.tf {
+        TransferFunction::Power(raw) => assert!((raw as i32 - 18_000).abs() < 300, "{raw}"),
+        other => panic!("expected a power curve, got {other:?}"),
+    }
+    // linear (no entries) is the power 1.0
+    let linear = client_description(&matrix_profile(b"curv\0\0\0\0\0\0\0\0".to_vec())).unwrap();
+    assert_eq!(linear.tf, TransferFunction::Power(10_000));
+}
+
+#[test]
+fn the_profile_has_to_be_what_the_protocol_asks_for() {
+    let mut tags = srgb_colorants();
+    for sig in [b"rTRC", b"gTRC", b"bTRC"] {
+        tags.push((sig, gamma_curve(2.2)));
+    }
+    // version 2 and 4, class display or color space, three channels
+    assert!(client_description(&client_profile(2, b"mntr", b"RGB ", &tags)).is_ok());
+    assert!(client_description(&client_profile(4, b"spac", b"RGB ", &tags)).is_ok());
+    assert!(client_description(&client_profile(3, b"mntr", b"RGB ", &tags)).is_err());
+    assert!(client_description(&client_profile(5, b"mntr", b"RGB ", &tags)).is_err());
+    assert!(client_description(&client_profile(4, b"prtr", b"RGB ", &tags)).is_err());
+    assert!(client_description(&client_profile(4, b"scnr", b"RGB ", &tags)).is_err());
+    assert!(client_description(&client_profile(4, b"mntr", b"GRAY", &tags)).is_err());
+    assert!(client_description(&client_profile(4, b"mntr", b"CMYK", &tags)).is_err());
+}
+
+#[test]
+fn a_profile_with_nothing_to_draw_from_is_refused_with_a_reason() {
+    // colorants but no curves
+    let only_colorants = client_profile(4, b"mntr", b"RGB ", &srgb_colorants());
+    assert!(client_description(&only_colorants).is_err());
+    // curves but no colorants: a gamut cannot be made up
+    let mut curves = Vec::new();
+    for sig in [b"rTRC", b"gTRC", b"bTRC"] {
+        curves.push((sig, gamma_curve(2.2)));
+    }
+    let only_curves = client_profile(4, b"mntr", b"RGB ", &curves);
+    assert!(client_description(&only_curves).is_err());
+    // not a profile at all, and one cut short
+    assert!(client_description(b"nonsense").is_err());
+    let mut cut = matrix_profile(gamma_curve(2.2));
+    let claimed = cut.len() as u32 + 100;
+    cut[0..4].copy_from_slice(&claimed.to_be_bytes());
+    assert!(client_description(&cut).is_err());
+    // an unusable curve is no curve
+    let broken = matrix_profile(b"curv".to_vec());
+    assert!(client_description(&broken).is_err());
+}
+
+#[test]
+fn a_profile_embedded_in_more_data_is_still_read() {
+    // the header's size is what the profile is, a client may have sent more after it
+    let mut data = matrix_profile(gamma_curve(2.2));
+    data.extend_from_slice(&[0u8; 64]);
+    assert!(client_description(&data).is_ok());
 }

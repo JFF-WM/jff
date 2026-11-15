@@ -14,7 +14,10 @@
 //! relative colorimetric clips them to the gamut's edge ([`GamutMap::Clip`]), perceptual
 //! desaturates them toward the grey of the same luminance until they fit ([`GamutMap::Compress`]),
 //! so a saturated color keeps its hue and its brightness instead of changing hue at the edge.
-//! Colors that already fit are not touched by either. The other intents change something before
+//! Colors that already fit are not touched by either, unless the surface says what its content
+//! was mastered on (`set_mastering_display_primaries`) and that reaches beyond the output's gamut:
+//! then the perceptual intents fit that target volume to the output instead of waiting for a color
+//! to leave it ([`target_reach`], [`soften`]). The other intents change something before
 //! that: saturation leaves the primaries out of the matrix, relative with black point
 //! compensation moves the surface's black onto the output's ([`Conversion::black`]), and absolute
 //! without adaptation leaves the white point alone ([`conversion_matrix_absolute`]).
@@ -343,6 +346,113 @@ pub fn map_gamut(light: [f32; 3], luma: [f32; 3], map: GamutMap) -> [f32; 3] {
     }
 }
 
+/// Where the knee of [`soften`] starts, as a share of the way from the grey axis to the edge of the
+/// output's gamut. `rounded.frag` has the same number (`CM_KNEE`).
+pub const KNEE_START: f32 = 0.8;
+
+/// The spread between the channels of a color below which it is taken to be a grey. `rounded.frag` has the same number.
+const GREY_SPREAD: f32 = 1e-6;
+
+/// How far `light` (output primaries) is from the grey axis, as a share of the way from the axis to
+/// the edge of the output's gamut along the same line: 0 for a grey, 1 on the edge, more outside.
+/// `luma` is the row of the output's RGB-to-XYZ matrix that gives Y. A color that cannot be
+/// brought in by moving it toward its grey (its grey is already past the edge) is infinitely far.
+pub fn edge_distance(light: [f32; 3], luma: [f32; 3]) -> f32 {
+    let y = (luma[0] * light[0] + luma[1] * light[1] + luma[2] * light[2]).clamp(0.0, 1.0);
+    let low = light[0].min(light[1]).min(light[2]);
+    let high = light[0].max(light[1]).max(light[2]);
+    // A grey is on the axis, whatever rounding makes of its luminance (white is the corner where
+    // the distance would be 0 over 0).
+    if high - low <= GREY_SPREAD {
+        return 0.0;
+    }
+    let mut distance = 0.0f32;
+    if low < y {
+        distance = if y > 0.0 {
+            (y - low) / y
+        } else if low < 0.0 {
+            f32::INFINITY
+        } else {
+            0.0
+        };
+    }
+    if high > y {
+        let room = 1.0 - y;
+        let high_distance = if room > 0.0 {
+            (high - y) / room
+        } else if high > 1.0 {
+            f32::INFINITY
+        } else {
+            0.0
+        };
+        distance = distance.max(high_distance);
+    }
+    distance
+}
+
+/// The distance `distance` ([`edge_distance`]) after a knee that fits `reach` onto the edge: what
+/// is closer than [`KNEE_START`] stays, the rest is squeezed linearly so that `reach` ends on 1.
+/// Nothing moves when `reach` is not above 1.
+pub fn knee(distance: f32, reach: f32) -> f32 {
+    if reach <= 1.0 || distance <= KNEE_START {
+        return distance;
+    }
+    KNEE_START + (1.0 - KNEE_START) * (distance - KNEE_START) / (reach - KNEE_START)
+}
+
+/// Move `light` toward its grey as [`knee`] says, so that a target volume that reaches `reach` times
+/// the output's gamut edge ([`target_reach`]) ends inside it, and what is near the edge of the
+/// output's own gamut is eased in instead of piling up on it. `light` keeps its luminance and
+/// hue. Colors farther out than the target volume are left for [`map_gamut`]. A `reach` of 0 (or
+/// anything not above 1) is no knee.
+pub fn soften(light: [f32; 3], luma: [f32; 3], reach: f32) -> [f32; 3] {
+    if reach <= 1.0 {
+        return light;
+    }
+    let distance = edge_distance(light, luma);
+    if !distance.is_finite() || distance <= KNEE_START {
+        return light;
+    }
+    let y = (luma[0] * light[0] + luma[1] * light[1] + luma[2] * light[2]).clamp(0.0, 1.0);
+    let scale = knee(distance, reach) / distance;
+    light.map(|v| y + (v - y) * scale)
+}
+
+/// How far the target volume of `source` (its mastering primaries) reaches beyond the gamut of an
+/// output, as the largest [`edge_distance`] of the target's red, green, blue, cyan, magenta and
+/// yellow at full strength. `matrix` takes linear light of the source's primaries to the output's
+/// (what `Conversion` carries) and `luma` is the output's Y row. 1 or less: the target fits. `None`
+/// when the surface has no target volume of its own, or its primaries are no real gamut.
+///
+/// The target's colors are the same colors (CIE XYZ) in the container, with no adaptation even if
+/// the white points differ, as the protocol says, `matrix` then moves them like every other color.
+pub fn target_reach(source: &ImageDescription, matrix: &Mat3, luma: [f32; 3]) -> Option<f32> {
+    let target = source.mastering_primaries.as_ref()?;
+    let in_container = mul(
+        &invert(&rgb_to_xyz(&source.primaries)?)?,
+        &rgb_to_xyz(target)?,
+    );
+    let to_output = mul(matrix, &in_container);
+    let corners = [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 1.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0],
+    ];
+    let reach = corners
+        .into_iter()
+        .map(|corner| {
+            let light = mul_vec(&to_output, corner);
+            edge_distance(light.map(|v| v as f32), luma)
+        })
+        .fold(0.0f32, f32::max);
+    // A corner that cannot be brought in at all would make every color infinitely far: that is no
+    // target worth fitting to.
+    reach.is_finite().then_some(reach)
+}
+
 /// No black point compensation: gain 1, lift 0.
 const NO_BLACK: [f32; 2] = [1.0, 0.0];
 
@@ -360,6 +470,9 @@ fn black_point_compensation(source: &Luminance, target: &Luminance) -> [f32; 2] 
     [gain, to - from * gain]
 }
 
+/// How far past 1 a target volume has to reach before the knee is used: a target that only touches the edge (a profile's rounding of the same gamut) needs none.
+const REACH_MARGIN: f32 = 1e-3;
+
 /// What the shader does to a surface to show its colors on an output.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Conversion {
@@ -375,6 +488,8 @@ pub struct Conversion {
     pub black: [f32; 2],
     /// The output's luminance row (Y of its red, green and blue), for [`GamutMap::Compress`].
     pub luma: [f32; 3],
+    /// How far the target volume of the surface reaches beyond the output's gamut ([`target_reach`]): above 1 the colors are eased in with [`soften`] before [`GamutMap::Compress`] brings in the rest. 0 for none.
+    pub reach: f32,
     /// Multiplies linear light after the matrix: turns PQ's or HLG's fraction of 10000 cd/m² into the output's white.
     pub scale: f32,
     /// The output is a linear working space (see [`Conversion::to_working`]): no gamut map and no encode.
@@ -428,7 +543,19 @@ impl Conversion {
         } else {
             1.0
         };
-        if !moves_colors && decode == encode && black == NO_BLACK {
+        let luma = rgb_to_xyz(&target.primaries).map_or([0.2126, 0.7152, 0.0722], |m| {
+            [m[1][0] as f32, m[1][1] as f32, m[1][2] as f32]
+        });
+        // Only a mapping that brings colors in gradually has a use for the target volume: the
+        // colorimetric intents clip, and say so.
+        let map = GamutMap::of(intent);
+        let reach = match map {
+            GamutMap::Compress => target_reach(source, &matrix, luma)
+                .filter(|reach| *reach > 1.0 + REACH_MARGIN)
+                .unwrap_or(0.0),
+            GamutMap::Clip => 0.0,
+        };
+        if !moves_colors && decode == encode && black == NO_BLACK && reach == 0.0 {
             return None;
         }
         let mut rows = [[0.0f32; 3]; 3];
@@ -437,16 +564,14 @@ impl Conversion {
                 *slot = value as f32;
             }
         }
-        let luma = rgb_to_xyz(&target.primaries).map_or([0.2126, 0.7152, 0.0722], |m| {
-            [m[1][0] as f32, m[1][1] as f32, m[1][2] as f32]
-        });
         Some(Self {
             rows,
             decode,
             encode,
-            map: GamutMap::of(intent),
+            map,
             black,
             luma,
+            reach,
             scale,
             working: false,
         })
@@ -474,6 +599,7 @@ impl Conversion {
             map: GamutMap::Clip,
             black: NO_BLACK,
             luma: [0.2627, 0.6780, 0.0593],
+            reach: 0.0,
             scale: if decode.is_absolute() {
                 PQ_PEAK / sdr_white.max(1.0)
             } else if decode == Curve::Linear {
@@ -502,6 +628,10 @@ impl Conversion {
         }
         let [gain, lift] = self.black;
         let mapped = mapped.map(|v| v * gain + lift);
+        let mapped = match self.map {
+            GamutMap::Compress => soften(mapped, self.luma, self.reach),
+            GamutMap::Clip => mapped,
+        };
         map_gamut(mapped, self.luma, self.map).map(|v| self.encode.encode(v))
     }
 
@@ -513,6 +643,7 @@ impl Conversion {
             value.to_bits().hash(&mut hasher);
         }
         self.map.shader_param().to_bits().hash(&mut hasher);
+        self.reach.to_bits().hash(&mut hasher);
         for value in self.black {
             value.to_bits().hash(&mut hasher);
         }

@@ -44,6 +44,10 @@ fn the_version_2_and_3_numbers_are_the_protocols() {
     use jff_wm::protocol::color_management_bindings::server::wp_color_manager_v1;
 
     assert_eq!(
+        u32::from(wp_color_manager_v1::Feature::IccV2V4),
+        Feature::IccV2V4.raw()
+    );
+    assert_eq!(
         u32::from(wp_color_manager_v1::Feature::WindowsBt2100),
         Feature::WindowsBt2100.raw()
     );
@@ -68,6 +72,10 @@ fn features_follow_the_version_the_client_bound() {
     let three = supported_features(3);
     assert!(three.contains(&Feature::WindowsBt2100));
     assert!(SUPPORTED_FEATURES.iter().all(|f| three.contains(f)));
+    // ICC profiles are there from the first version
+    assert_eq!(Feature::IccV2V4.raw(), 0);
+    assert_eq!(Feature::IccV2V4.since(), 1);
+    assert!(supported_features(1).contains(&Feature::IccV2V4));
     assert_eq!(Feature::WindowsBt2100.raw(), 8);
     assert_eq!(Feature::WindowsBt2100.since(), 3);
     assert_eq!(Feature::WindowsScrgb.since(), 1);
@@ -166,6 +174,7 @@ fn windows_bt2100_is_pq_in_bt2020_with_the_default_pq_luminances() {
         ),
         (None, None, None)
     );
+    assert_eq!(described.mastering_primaries, None);
     // it says nothing about its peak, so it is as bright as PQ allows
     assert_eq!(described.content_light(), ContentLight::Unknown);
     // and it is what a client would get by naming the same things

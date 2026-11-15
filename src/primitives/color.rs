@@ -23,7 +23,13 @@
 //! A PQ description may also say how bright its content gets: `max_cll`, or else the maximum of
 //! the mastering luminance. [`ImageDescription::content_light`] turns that into the number the
 //! HDR final pass fits its tone mapping to (`primitives/hdr_output.rs`). The mastering
-//! primaries are only checked, and the frame-average level is only passed on.
+//! primaries are kept ([`ImageDescription::mastering_primaries`]): they are the target volume
+//! the gamut mapping of `primitives/gamut.rs` fits to the output, and what `info` reports as
+//! the target primaries. The frame-average level is only passed on.
+//!
+//! ICC profiles (`create_icc_creator`) are offered. What a profile says is reduced to a
+//! parametric description by `feature::icc::client_description`, so everything below applies to
+//! them too.
 
 /// Scale of a chromaticity coordinate on the wire.
 pub const CHROMA_SCALE: i32 = 1_000_000;
@@ -113,9 +119,13 @@ pub fn supported_intents(version: u32) -> Vec<RenderIntent> {
         .collect()
 }
 
-/// Optional parts of the protocol jff offers. ICC profiles and extended target volumes are not.
+/// Optional parts of the protocol jff offers. Extended target volumes are not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Feature {
+    /// 0. `create_icc_creator`: a client's ICC v2 or v4 profile (RGB, display or color space
+    /// class) becomes a parametric description, see `feature::icc::client_description`. What
+    /// a profile has beyond primaries, white and tone curve is not drawn.
+    IccV2V4,
     /// 1.
     Parametric,
     /// 2.
@@ -124,9 +134,10 @@ pub enum Feature {
     SetTfPower,
     /// 4.
     SetLuminances,
-    /// 5. A target color volume inside the primary one. Its primaries are checked and not drawn
-    /// differently, its luminance is what an HDR monitor fits the tone mapping to when the
-    /// description has no `max_cll` (see [`ImageDescription::content_light`]).
+    /// 5. A target color volume inside the primary one. Its primaries are what the gamut mapping
+    /// fits to the output (`primitives/gamut.rs`), its luminance is what an HDR monitor fits the
+    /// tone mapping to when the description has no `max_cll` (see
+    /// [`ImageDescription::content_light`]).
     SetMasteringDisplayPrimaries,
     /// 7. `create_windows_scrgb`: the sRGB-primaries, extended-linear, 80 cd/m² reference
     /// description that Mesa's Vulkan WSI and Wine/Proton use for fp16 HDR swapchains.
@@ -139,6 +150,7 @@ pub enum Feature {
 impl Feature {
     pub fn raw(self) -> u32 {
         match self {
+            Self::IccV2V4 => 0,
             Self::Parametric => 1,
             Self::SetPrimaries => 2,
             Self::SetTfPower => 3,
@@ -160,6 +172,7 @@ impl Feature {
 
 /// Features clients of version 1 are told they can use. See [`supported_features`].
 pub const SUPPORTED_FEATURES: &[Feature] = &[
+    Feature::IccV2V4,
     Feature::Parametric,
     Feature::SetPrimaries,
     Feature::SetTfPower,
@@ -533,8 +546,12 @@ pub struct ImageDescription {
     pub max_cll: Option<u32>,
     /// Maximum frame-average light level, cd/m².
     pub max_fall: Option<u32>,
-    /// Luminance range of the mastering display. Its primaries are not kept: they are only checked.
+    /// Luminance range of the mastering display.
     pub mastering_luminance: Option<MasteringLuminance>,
+    /// Primaries and white of the mastering display: the target color volume, which the content
+    /// does not leave. `None` when not set, and when they are the primaries of the description
+    /// itself (the target is then the primary volume, which says nothing more).
+    pub mastering_primaries: Option<Chromaticities>,
 }
 
 impl ImageDescription {
@@ -553,6 +570,7 @@ impl ImageDescription {
             max_cll: None,
             max_fall: None,
             mastering_luminance: None,
+            mastering_primaries: None,
         }
     }
 
@@ -569,6 +587,7 @@ impl ImageDescription {
             max_cll: None,
             max_fall: None,
             mastering_luminance: None,
+            mastering_primaries: None,
         }
     }
 
@@ -623,9 +642,8 @@ impl ImageDescription {
     }
 
     /// What `wp_image_description_info_v1` tells about this description, in the order it is
-    /// sent. The target volume is the mastering display's luminance when the description has
-    /// one, else the primary volume's (and the primaries are always the primary ones, the
-    /// mastering primaries are not kept).
+    /// sent. The target volume is the mastering display's primaries and luminance when the
+    /// description has them, else the primary volume's.
     pub fn info(&self) -> Vec<InfoEvent> {
         let mut events = vec![InfoEvent::Primaries(self.primaries.to_array())];
         if let Some(named) = self.named_primaries() {
@@ -645,7 +663,11 @@ impl ImageDescription {
             max,
             reference,
         });
-        events.push(InfoEvent::TargetPrimaries(self.primaries.to_array()));
+        events.push(InfoEvent::TargetPrimaries(
+            self.mastering_primaries
+                .unwrap_or(self.primaries)
+                .to_array(),
+        ));
         events.push(match self.mastering_luminance {
             Some(mastering) => InfoEvent::TargetLuminance {
                 min: mastering.min,
@@ -948,9 +970,10 @@ impl ParamsBuilder {
         if let Err(reason) = primaries.check() {
             return Err(CreateError::Unsupported(reason));
         }
-        // The target primaries are a hint: they are checked so a nonsense set fails, and the
-        // picture is converted from the container volume. The luminance was checked when it was
-        // set, and is kept: it is what the tone mapping fits to when there is no `max_cll`.
+        // The target primaries are checked so a nonsense set fails, and kept: the gamut mapping
+        // fits the target volume to the output (`primitives/gamut.rs`). The luminance was
+        // checked when it was set, and is kept: it is what the tone mapping fits to when there
+        // is no `max_cll`.
         if let Some(Err(reason)) = self.mastering_primaries.map(|m| m.check()) {
             return Err(CreateError::Unsupported(reason));
         }
@@ -963,6 +986,11 @@ impl ParamsBuilder {
             mastering_luminance: self
                 .mastering_luminance
                 .map(|(min, max)| MasteringLuminance { min, max }),
+            // The same as the primary volume is no target at all: it compares equal to a
+            // description that did not set it.
+            mastering_primaries: self
+                .mastering_primaries
+                .filter(|target| *target != primaries),
         })
     }
 }

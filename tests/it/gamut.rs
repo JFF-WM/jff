@@ -594,3 +594,249 @@ fn intents_that_convert_differently_make_their_own_tag() {
         }
     }
 }
+
+// ---- the mastering display as the target volume --------------------------------------------
+
+use jff_wm::primitives::gamut::{edge_distance, knee, soften, target_reach, KNEE_START};
+
+const SRGB_LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
+
+/// BT.2020 content that says it was mastered on a Display P3 monitor.
+fn mastered_on_p3() -> ImageDescription {
+    ImageDescription {
+        mastering_primaries: Some(NamedPrimaries::DisplayP3.chromaticities()),
+        ..described(NamedPrimaries::Bt2020, NamedTf::Gamma22)
+    }
+}
+
+fn srgb_gamma22() -> ImageDescription {
+    described(NamedPrimaries::Srgb, NamedTf::Gamma22)
+}
+
+#[test]
+fn the_distance_to_the_edge_is_zero_on_grey_and_one_on_the_edge() {
+    // white too, where the distance would be 0 over 0
+    for grey in [0.4, 0.0, 1.0] {
+        assert_eq!(edge_distance([grey; 3], SRGB_LUMA), 0.0);
+    }
+    // a channel at 0 or at 1 is on the edge
+    assert!((edge_distance([1.0, 0.2, 0.3], SRGB_LUMA) - 1.0).abs() < 1e-6);
+    assert!((edge_distance([0.6, 0.3, 0.0], SRGB_LUMA) - 1.0).abs() < 1e-6);
+    // inside is less, outside is more
+    assert!(edge_distance([0.6, 0.4, 0.3], SRGB_LUMA) < 1.0);
+    assert!(edge_distance([1.2, 0.3, 0.3], SRGB_LUMA) > 1.0);
+    assert!(edge_distance([0.6, 0.3, -0.1], SRGB_LUMA) > 1.0);
+}
+
+#[test]
+fn a_color_that_cannot_be_brought_in_is_infinitely_far() {
+    // no luminance and a negative channel: nothing to move toward
+    assert!(edge_distance([0.0, 0.0, -0.1], [0.0, 0.0, 0.0]).is_infinite());
+    // white and above: the grey is already past the edge
+    assert!(edge_distance([2.0, 1.2, 1.0], [0.5, 0.5, 0.5]).is_infinite());
+}
+
+#[test]
+fn the_knee_leaves_the_near_alone_and_ends_the_reach_on_the_edge() {
+    for distance in [0.0, 0.3, KNEE_START] {
+        assert_eq!(knee(distance, 1.4), distance);
+    }
+    assert!((knee(1.4, 1.4) - 1.0).abs() < 1e-6);
+    // in between it rises, slower than the color moves
+    let (a, b) = (knee(1.0, 1.4), knee(1.2, 1.4));
+    assert!(KNEE_START < a && a < b && b < 1.0, "{a} {b}");
+    assert!(a < 1.0, "the edge itself is eased in");
+    // a target that fits needs nothing
+    assert_eq!(knee(0.95, 1.0), 0.95);
+    assert_eq!(knee(0.95, 0.0), 0.95);
+}
+
+#[test]
+fn soften_keeps_colors_that_are_far_from_the_edge_and_all_greys() {
+    let reach = 1.5;
+    for light in [[0.5, 0.4, 0.3], [0.2; 3], [0.0; 3], [1.0; 3]] {
+        assert_eq!(soften(light, SRGB_LUMA, reach), light);
+    }
+    // not above 1 is no knee, wherever the color is
+    let near_edge = [0.95, 0.3, 0.02];
+    assert_eq!(soften(near_edge, SRGB_LUMA, 1.0), near_edge);
+    assert_eq!(soften(near_edge, SRGB_LUMA, 0.0), near_edge);
+    // and one that cannot be brought in is left for the hard mapping
+    let hopeless = [0.0, 0.0, -0.1];
+    assert_eq!(soften(hopeless, [0.0; 3], reach), hopeless);
+}
+
+#[test]
+fn soften_keeps_the_luminance_and_the_hue_of_what_it_moves() {
+    let light = [1.1, 0.35, 0.1];
+    let softened = soften(light, SRGB_LUMA, 1.6);
+    assert_ne!(softened, light);
+    let y = |c: [f32; 3]| SRGB_LUMA[0] * c[0] + SRGB_LUMA[1] * c[1] + SRGB_LUMA[2] * c[2];
+    assert!((y(softened) - y(light)).abs() < 1e-5);
+    // moved along the line to its grey: each channel's offset from the grey shrinks by one factor
+    let grey = y(light);
+    let factors: Vec<f32> = (0..3)
+        .map(|i| (softened[i] - grey) / (light[i] - grey))
+        .collect();
+    assert!(
+        factors.iter().all(|f| (f - factors[0]).abs() < 1e-4),
+        "{factors:?}"
+    );
+    assert!(factors[0] > 0.0 && factors[0] < 1.0);
+}
+
+#[test]
+fn a_target_that_fits_the_output_has_a_reach_of_one_or_less() {
+    // sRGB-mastered BT.2020 content on a Display P3 output: the target is well inside
+    let source = ImageDescription {
+        mastering_primaries: Some(NamedPrimaries::Srgb.chromaticities()),
+        ..described(NamedPrimaries::Bt2020, NamedTf::Gamma22)
+    };
+    let p3 = NamedPrimaries::DisplayP3.chromaticities();
+    let matrix = conversion_matrix(&NamedPrimaries::Bt2020.chromaticities(), &p3).unwrap();
+    let luma = rgb_to_xyz(&p3).unwrap()[1].map(|v| v as f32);
+    assert!(target_reach(&source, &matrix, luma).unwrap() <= 1.0);
+    // and so the conversion has no knee at all
+    let output = described(NamedPrimaries::DisplayP3, NamedTf::Gamma22);
+    let conversion =
+        Conversion::to_output(&source, &output, RenderIntent::Perceptual, false).unwrap();
+    assert_eq!(conversion.reach, 0.0);
+}
+
+#[test]
+fn a_target_wider_than_the_output_reaches_past_its_edge() {
+    let source = mastered_on_p3();
+    let matrix = conversion_matrix(
+        &NamedPrimaries::Bt2020.chromaticities(),
+        &NamedPrimaries::Srgb.chromaticities(),
+    )
+    .unwrap();
+    let reach = target_reach(&source, &matrix, SRGB_LUMA).unwrap();
+    // what the P3 corners are in sRGB, worked out the other way round
+    let p3_to_srgb = conversion_matrix(
+        &NamedPrimaries::DisplayP3.chromaticities(),
+        &NamedPrimaries::Srgb.chromaticities(),
+    )
+    .unwrap();
+    let corners = [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 1.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0],
+    ];
+    let expected = corners
+        .into_iter()
+        .map(|corner: [f64; 3]| {
+            let light = [0, 1, 2]
+                .map(|row| (0..3).map(|k| p3_to_srgb[row][k] * corner[k]).sum::<f64>() as f32);
+            edge_distance(light, SRGB_LUMA)
+        })
+        .fold(0.0f32, f32::max);
+    assert!(reach > 1.1, "{reach}");
+    assert!(
+        (reach - expected).abs() < 1e-3,
+        "{reach} against {expected}"
+    );
+}
+
+#[test]
+fn a_surface_with_no_target_has_no_reach() {
+    let matrix = conversion_matrix(
+        &NamedPrimaries::Bt2020.chromaticities(),
+        &NamedPrimaries::Srgb.chromaticities(),
+    )
+    .unwrap();
+    let plain = described(NamedPrimaries::Bt2020, NamedTf::Gamma22);
+    assert_eq!(target_reach(&plain, &matrix, SRGB_LUMA), None);
+}
+
+#[test]
+fn the_perceptual_intents_use_the_target_volume_and_the_others_do_not() {
+    let target = srgb_gamma22();
+    let conversion =
+        Conversion::to_output(&mastered_on_p3(), &target, RenderIntent::Perceptual, false).unwrap();
+    assert!(conversion.reach > 1.1, "{}", conversion.reach);
+    // Saturation takes the container's primaries as the output's own, and a P3 target is within
+    // BT.2020 to a rounding: nothing to ease in.
+    let conversion =
+        Conversion::to_output(&mastered_on_p3(), &target, RenderIntent::Saturation, false).unwrap();
+    assert_eq!(conversion.map, GamutMap::Compress);
+    assert!(conversion.reach < 1.1, "{}", conversion.reach);
+    for intent in [
+        RenderIntent::Relative,
+        RenderIntent::Absolute,
+        RenderIntent::RelativeBpc,
+        RenderIntent::AbsoluteNoAdaptation,
+    ] {
+        let conversion = Conversion::to_output(&mastered_on_p3(), &target, intent, false).unwrap();
+        assert_eq!(conversion.reach, 0.0, "{intent:?}");
+    }
+    // the same content without the metadata is mapped as it always was
+    let plain = described(NamedPrimaries::Bt2020, NamedTf::Gamma22);
+    let conversion =
+        Conversion::to_output(&plain, &target, RenderIntent::Perceptual, false).unwrap();
+    assert_eq!(conversion.reach, 0.0);
+}
+
+#[test]
+fn the_corners_of_the_target_end_inside_the_output() {
+    let target = srgb_gamma22();
+    let source = mastered_on_p3();
+    let with = Conversion::to_output(&source, &target, RenderIntent::Perceptual, false).unwrap();
+    let without = Conversion::to_output(
+        &ImageDescription {
+            mastering_primaries: None,
+            ..source
+        },
+        &target,
+        RenderIntent::Perceptual,
+        false,
+    )
+    .unwrap();
+    // P3 red, as the BT.2020 container holds it: the knee eases it in, so it is less
+    // saturated than when only what leaves the gamut is brought back.
+    let p3_red_in_bt2020 = {
+        let m = mul(
+            &invert(&rgb_to_xyz(&NamedPrimaries::Bt2020.chromaticities()).unwrap()).unwrap(),
+            &rgb_to_xyz(&NamedPrimaries::DisplayP3.chromaticities()).unwrap(),
+        );
+        let linear = [m[0][0] as f32, m[1][0] as f32, m[2][0] as f32];
+        linear.map(|v| Curve::Power(2.2).encode(v.max(0.0)))
+    };
+    let a = with.apply(p3_red_in_bt2020);
+    let b = without.apply(p3_red_in_bt2020);
+    assert!(a.iter().all(|v| (0.0..=1.0).contains(v)), "{a:?}");
+    assert!(
+        a[1] > b[1] - 1e-6,
+        "green of the eased color is not less: {a:?} {b:?}"
+    );
+    // and a color well inside sRGB is as it was
+    let inside = [0.5, 0.45, 0.4];
+    let (x, y) = (with.apply(inside), without.apply(inside));
+    assert!(near(x, y, 1e-6), "{x:?} {y:?}");
+}
+
+#[test]
+fn the_tag_follows_the_reach() {
+    let target = srgb_gamma22();
+    let with =
+        Conversion::to_output(&mastered_on_p3(), &target, RenderIntent::Perceptual, false).unwrap();
+    let mut other = with;
+    other.reach = with.reach + 0.5;
+    assert_ne!(with.tag(), other.tag());
+}
+
+#[test]
+fn the_shader_has_the_knee_the_rust_has() {
+    let shader = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/render/effects/shaders/rounded.frag"
+    ));
+    assert!(
+        shader.contains(&format!("const float CM_KNEE = {KNEE_START:?};")),
+        "rounded.frag and KNEE_START disagree"
+    );
+    assert!(shader.contains("uniform float cm_reach;"));
+}
