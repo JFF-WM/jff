@@ -840,3 +840,14 @@ fn the_shader_has_the_knee_the_rust_has() {
     );
     assert!(shader.contains("uniform float cm_reach;"));
 }
+
+#[test]
+fn the_gamut_map_names_round_trip() {
+    for name in GamutMap::NAMES {
+        assert_eq!(GamutMap::from_name(name).unwrap().name(), name);
+    }
+    assert_eq!(GamutMap::from_name("clip"), Some(GamutMap::Clip));
+    assert_eq!(GamutMap::from_name("compress"), Some(GamutMap::Compress));
+    assert_eq!(GamutMap::from_name("perceptual"), None);
+    assert_eq!(GamutMap::from_name("Clip"), None);
+}

@@ -711,6 +711,7 @@ fn hdr_target(
     connector: connector::Handle,
     edid: Option<&Edid>,
     peak_override: Option<u32>,
+    min_override: Option<u32>,
 ) -> Result<hdr::Plan, Unavailable> {
     let kernel = KernelSupport {
         hdr_metadata: compositor
@@ -721,7 +722,7 @@ fn hdr_target(
             .is_ok_and(|all| all.contains(&Colorspace::Bt2020Rgb)),
         max_bpc: compositor.max_bpc_range(connector).ok().flatten(),
     };
-    hdr::plan(edid, &kernel, peak_override)
+    hdr::plan(edid, &kernel, peak_override).map(|plan| plan.with_min_luminance(min_override))
 }
 
 /// Set the connector's `content type` property to Game, or back to no data.
@@ -1248,6 +1249,10 @@ impl Tty {
             let content_metadata = output_config
                 .and_then(|c| c.hdr_content_metadata)
                 .unwrap_or(true);
+            let gamut_map = output_config
+                .and_then(|c| c.hdr_gamut_map)
+                .unwrap_or(hdr_output::DEFAULT_GAMUT_MAP);
+            let min_override = output_config.and_then(|c| c.hdr_min_luminance);
             let mut hdr = None;
             let mut hdr_plan = None;
             let mut target = ConnectorColorState::default();
@@ -1259,6 +1264,7 @@ impl Tty {
                     lit.connector,
                     lit.edid.as_ref(),
                     peak_override,
+                    min_override,
                 ) {
                     Ok(_) if !hdr_frame::supported(renderer) => {
                         Status::Sdr(Unavailable::NoFloatTarget)
@@ -1275,6 +1281,8 @@ impl Tty {
                             panel.as_ref(),
                         )
                         .with_black_level(black_level)
+                        .with_gamut_map(gamut_map)
+                        .with_min_luminance(f32::from(plan.min_luminance) / 10_000.0)
                         .with_white_balance(white_balance)
                         .with_saturation(saturation)
                         .with_contrast(contrast)

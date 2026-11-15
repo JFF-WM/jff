@@ -117,6 +117,17 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// The same plan with `min_luminance` (units of 0.0001 cd/m²) as the mastering minimum instead of the EDID's, when one is given.
+    pub fn with_min_luminance(self, min_luminance: Option<u32>) -> Plan {
+        match min_luminance {
+            Some(units) => Plan {
+                min_luminance: units.min(u32::from(u16::MAX)) as u16,
+                ..self
+            },
+            None => self,
+        }
+    }
+
     /// The same plan with the light levels of the content on screen: each is the client's value when it gave a nonzero one, capped at the panel's peak, and the frame average never exceeds the content peak.
     pub fn with_content(self, max_cll: Option<u32>, max_fall: Option<u32>) -> Plan {
         let cap = |level: Option<u32>, limit: u16| {

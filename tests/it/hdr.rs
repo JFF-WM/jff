@@ -2,7 +2,7 @@
 
 use jff_wm::primitives::edid::{Colorimetry, Edid, Eotfs, HdrStaticMetadata};
 use jff_wm::primitives::hdr::{
-    plan, KernelSupport, OutputEotf, PeakSource, Status, Unavailable, FALLBACK_PEAK_NITS,
+    plan, KernelSupport, OutputEotf, PeakSource, Plan, Status, Unavailable, FALLBACK_PEAK_NITS,
 };
 
 fn kernel() -> KernelSupport {
@@ -54,6 +54,43 @@ fn the_minimum_is_in_ten_thousandths_of_a_nit() {
     assert_eq!(
         plan(Some(&edid), &kernel(), None).unwrap().min_luminance,
         500
+    );
+}
+
+#[test]
+fn a_min_luminance_override_replaces_the_edid_minimum() {
+    let mut edid = panel();
+    edid.hdr.as_mut().unwrap().min_luminance = Some(0.05);
+    let from_edid = plan(Some(&edid), &kernel(), None).unwrap();
+    assert_eq!(from_edid.with_min_luminance(None).min_luminance, 500);
+    let overridden = from_edid.with_min_luminance(Some(1200));
+    assert_eq!(overridden.min_luminance, 1200);
+    // Nothing else about the plan moves.
+    assert_eq!(
+        Plan {
+            min_luminance: from_edid.min_luminance,
+            ..overridden
+        },
+        from_edid
+    );
+}
+
+#[test]
+fn a_min_luminance_override_stands_in_for_a_missing_minimum() {
+    let mut edid = panel();
+    edid.hdr.as_mut().unwrap().min_luminance = None;
+    let plan = plan(Some(&edid), &kernel(), None).unwrap();
+    assert_eq!(plan.min_luminance, 0);
+    assert_eq!(plan.with_min_luminance(Some(500)).min_luminance, 500);
+    assert_eq!(plan.with_min_luminance(Some(0)).min_luminance, 0);
+}
+
+#[test]
+fn a_min_luminance_override_fits_the_infoframe_field() {
+    let plan = plan(Some(&panel()), &kernel(), None).unwrap();
+    assert_eq!(
+        plan.with_min_luminance(Some(u32::MAX)).min_luminance,
+        u16::MAX
     );
 }
 

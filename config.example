@@ -308,6 +308,8 @@ cursor {
 //         hdr-white-balance 1.0 0.95 0.9     // gain of red, green and blue, 0.5 to 1.5 each, 1.0 1.0 1.0 by default
 //         hdr-tone-map "bt2390"              // how the frame is rolled off under the peak: "knee" (default) or "bt2390"
 //         hdr-content-metadata #true         // fit the roll-off to the content's own peak (on by default)
+//         hdr-gamut-map "clip"               // colors outside the panel's gamut: "compress" (default, toward grey) or "clip" (each channel)
+//         hdr-min-luminance 0.05             // cd/m2 of the panel's black, 0.0 to 1.0, replaces the EDID's; the shadows are raised off it
 //     }
 //     output "jff-winit" {
 //         hdr                                // simulate HDR when nested (hdr-peak is 1000 by default here)

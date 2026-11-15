@@ -39,6 +39,15 @@ pub const DEFAULT_BLACK_LEVEL: f32 = 0.0;
 /// Smallest and largest `hdr-saturation` accepted, 1.0 leaves the colors as they are.
 pub const SATURATION_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 
+/// Smallest and largest `hdr-min-luminance` accepted, in cd/m².
+pub const MIN_LUMINANCE_RANGE: std::ops::RangeInclusive<f32> = 0.0..=1.0;
+
+/// Black level of the panel for an output with no EDID value and no `hdr-min-luminance`, in cd/m²: none, black is taken as 0.
+pub const DEFAULT_MIN_LUMINANCE: f32 = 0.0;
+
+/// How colors the panel cannot show are handled on an output that does not set `hdr-gamut-map`.
+pub const DEFAULT_GAMUT_MAP: GamutMap = GamutMap::Compress;
+
 /// Saturation of an output that does not set `hdr-saturation`.
 pub const DEFAULT_SATURATION: f32 = 1.0;
 
@@ -188,6 +197,19 @@ pub fn set_black_level(nits: [f32; 3], y: f32, pivot: f32, level: f32) -> [f32; 
     } else {
         nits
     }
+}
+
+/// Luminance of a pixel, in cd/m², raised off the panel's black so that the shadows under it are not all shown as the same black. It is the BT.2390 black-lift term in the PQ domain, `E + b t^4` with `b` the code of `min_luminance`, but faded out up to `pivot` (SDR white) like [`set_black_level`] instead of towards the PQ top: `t` is 1 at black and 0 at `pivot`, so SDR white and everything above it are returned as they are. Black itself goes to `min_luminance`, which is what the panel shows for it anyway. `b` is kept under a fifth of the code of `pivot`, which keeps the curve rising, so a black far above what the pivot can carry is lifted less than asked. `min_luminance` of 0 (or less) leaves `nits` alone, and the result never goes above `peak`.
+pub fn lift_black(nits: f32, min_luminance: f32, pivot: f32, peak: f32) -> f32 {
+    if min_luminance <= 0.0 || nits >= pivot {
+        return nits;
+    }
+    let e = pq_encode(nits.max(0.0) / PQ_PEAK);
+    let pivot_code = pq_encode(pivot / PQ_PEAK);
+    let b = pq_encode(min_luminance / PQ_PEAK).min(pivot_code / 5.0);
+    let t = (1.0 - e / pivot_code).clamp(0.0, 1.0);
+    let lifted = e + b * t.powi(4);
+    (pq_decode(lifted) * PQ_PEAK).min(peak)
 }
 
 /// How SDR content is decoded into the working space of an HDR output.
@@ -350,8 +372,12 @@ pub struct FinalPass {
     pub luma_2020: [f32; 3],
     /// Y of the panel's red, green and blue.
     pub luma_panel: [f32; 3],
-    /// The panel's gamut is known: colors outside it are desaturated into it.
+    /// The panel's gamut is known: colors outside it are handled by `gamut_map`.
     pub map_gamut: bool,
+    /// What happens to a color the panel's gamut cannot show: moved toward the grey of its own luminance, or clipped channel by channel.
+    pub gamut_map: GamutMap,
+    /// Luminance of the panel's black in cd/m², 0 when it is not known: the shadows are raised off it up to SDR white, see [`lift_black`].
+    pub min_luminance: f32,
     /// Black level shift in cd/m², 0 for none, see [`set_black_level`].
     pub black_level: f32,
     /// Gain of the red, green and blue of BT.2020 light, 1.0 for none.
@@ -405,6 +431,8 @@ impl FinalPass {
             luma_2020,
             luma_panel,
             map_gamut,
+            gamut_map: DEFAULT_GAMUT_MAP,
+            min_luminance: DEFAULT_MIN_LUMINANCE,
             black_level: DEFAULT_BLACK_LEVEL,
             white_balance: DEFAULT_WHITE_BALANCE,
             saturation: DEFAULT_SATURATION,
@@ -432,6 +460,20 @@ impl FinalPass {
     pub fn with_white_balance(self, white_balance: [f32; 3]) -> Self {
         Self {
             white_balance,
+            ..self
+        }
+    }
+
+    /// The same pass with colors outside the panel's gamut handled by `gamut_map`.
+    pub fn with_gamut_map(self, gamut_map: GamutMap) -> Self {
+        Self { gamut_map, ..self }
+    }
+
+    /// The same pass for a panel whose black is `min_luminance` cd/m², 0 for unknown. Kept inside [`MIN_LUMINANCE_RANGE`].
+    pub fn with_min_luminance(self, min_luminance: f32) -> Self {
+        let range = &MIN_LUMINANCE_RANGE;
+        Self {
+            min_luminance: min_luminance.clamp(*range.start(), *range.end()),
             ..self
         }
     }
@@ -483,11 +525,12 @@ impl FinalPass {
                 (None, ToneMap::Bt2390) => bt2390_tone_map(contrasted, self.peak),
             };
             let scale = mapped / y;
-            nits = nits.map(|v| v * scale);
+            let lift = lift_black(mapped, self.min_luminance, self.sdr_white, self.peak) - mapped;
+            nits = nits.map(|v| v * scale + lift);
         }
         if self.map_gamut {
             let panel = mul_vec(&self.to_panel, nits).map(|v| v / self.peak);
-            let mapped = map_gamut(panel, self.luma_panel, GamutMap::Compress);
+            let mapped = map_gamut(panel, self.luma_panel, self.gamut_map);
             nits = mul_vec(&self.from_panel, mapped.map(|v| v * self.peak));
         }
         match self.eotf {

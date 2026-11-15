@@ -24,13 +24,15 @@ uniform float tint;
 
 // Final pass of an HDR output. The frame is linear BT.2020 light, 1.0 being SDR white (`sdr_white`
 // cd/m²). It is placed in cd/m², it gets the `white_balance` gains and `saturation` (luminance is kept), its black level is moved (`black_level` cd/m², faded out up to `sdr_white`), its contrast is set around `sdr_white`, its luminance is rolled off under the panel's `peak`, the colors
-// the panel cannot show are desaturated into its gamut (when `map_on`), and the result is PQ coded
+// the panel cannot show are brought into its gamut (when `map_on`: desaturated toward the grey of their luminance when `gamut_compress` is 1, clipped channel by channel when it is 0), and the result is PQ coded
 // in BT.2020 (`out_hlg` 0), or HLG coded for a 1000 cd/m² display (`out_hlg` 1), which is what the
 // connector announces. `tone_kind` 0 rolls the luminance off with the
 // knee, 1 with the BT.2390 EETF. `content_peak` above 0 is how bright the visible content says it
 // gets (cd/m², `FinalPass::content_peak`): it replaces `tone_kind`, content up to the panel's peak
 // is left as it is and brighter content is BT.2390-mapped with that peak as its source, 0 is
-// no metadata. A link with fewer bits than the signal needs gets `dither_levels` (see `dither`). This
+// no metadata. After the roll-off the shadows are raised off the panel's black (`min_luminance`
+// cd/m², 0 for none) with the BT.2390 black-lift term faded out up to `sdr_white`, `lift_black` below;
+// exact black stays black. A link with fewer bits than the signal needs gets `dither_levels` (see `dither`). This
 // is `FinalPass::apply` and `FinalPass::dither` in primitives/hdr_output.rs, keep them the same.
 uniform float sdr_white;
 uniform float peak;
@@ -44,6 +46,8 @@ uniform vec3 from_b;
 uniform vec3 luma_2020;
 uniform vec3 luma_panel;
 uniform float map_on;
+uniform float gamut_compress;
+uniform float min_luminance;
 uniform float black_level;
 uniform vec3 white_balance;
 uniform float saturation;
@@ -132,6 +136,20 @@ float tone_map(float nits) {
     return knee + range * (1.0 - exp(-(nits - knee) / range));
 }
 
+// Luminance in cd/m² raised off the panel's black: `E + b t^4` in the PQ domain, `b` the code of
+// `min_luminance` (kept under a fifth of the code of `sdr_white`), `t` 1 at black and 0 at `sdr_white`,
+// never above `peak`. This is `lift_black` in primitives/hdr_output.rs.
+float lift_black(float nits) {
+    if (min_luminance <= 0.0 || nits >= sdr_white)
+        return nits;
+    float e = pq_encode1(max(nits, 0.0));
+    float pivot = pq_encode1(sdr_white);
+    float b = min(pq_encode1(min_luminance), pivot / 5.0);
+    float t = clamp(1.0 - e / pivot, 0.0, 1.0);
+    float lifted = e + b * t * t * t * t;
+    return min(pq_decode1(lifted), peak);
+}
+
 // Interleaved gradient noise (Jimenez), 0 to 1, a fixed pattern per pixel. `dither_noise` in
 // primitives/hdr_output.rs.
 float ign(vec2 p) {
@@ -170,20 +188,23 @@ void main() {
             mapped = bt2390_tone_map(contrasted);
         else
             mapped = tone_map(contrasted);
-        nits *= mapped / y;
+        nits = nits * (mapped / y) + vec3(lift_black(mapped) - mapped);
     }
 
     if (map_on > 0.5) {
         vec3 p = vec3(dot(to_r, nits), dot(to_g, nits), dot(to_b, nits)) / peak;
-        float l = clamp(dot(luma_panel, p), 0.0, 1.0);
-        float low = min(p.r, min(p.g, p.b));
-        float high = max(p.r, max(p.g, p.b));
-        float keep = 1.0;
-        if (low < 0.0)
-            keep = min(keep, l / (l - low));
-        if (high > 1.0)
-            keep = min(keep, (1.0 - l) / (high - l));
-        p = clamp(vec3(l) + (p - vec3(l)) * keep, 0.0, 1.0) * peak;
+        if (gamut_compress > 0.5) {
+            float l = clamp(dot(luma_panel, p), 0.0, 1.0);
+            float low = min(p.r, min(p.g, p.b));
+            float high = max(p.r, max(p.g, p.b));
+            float keep = 1.0;
+            if (low < 0.0)
+                keep = min(keep, l / (l - low));
+            if (high > 1.0)
+                keep = min(keep, (1.0 - l) / (high - l));
+            p = vec3(l) + (p - vec3(l)) * keep;
+        }
+        p = clamp(p, 0.0, 1.0) * peak;
         nits = vec3(dot(from_r, p), dot(from_g, p), dot(from_b, p));
     }
 

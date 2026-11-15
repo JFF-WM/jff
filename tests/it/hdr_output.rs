@@ -3,12 +3,13 @@
 use jff_wm::primitives::color::{
     ContentLight, ImageDescription, Luminance, NamedPrimaries, NamedTf, TransferFunction,
 };
-use jff_wm::primitives::gamut::{Conversion, Curve};
+use jff_wm::primitives::gamut::{Conversion, Curve, GamutMap};
 use jff_wm::primitives::hdr_output::{
     bt2390_source_peak, bt2390_tone_map, contrast_curve, dither_noise, fitted_tone_map,
-    frame_content_peak, hlg_display_nits, hlg_inverse_oetf, low_headroom, pq_decode, pq_encode,
-    saturate, set_black_level, tone_map, FinalPass, SdrTransfer, ToneMap, BT2020_LUMA,
-    BT2390_SOURCE_PEAK, DEFAULT_SDR_WHITE, HDR_PEAK_RANGE, PQ_PEAK, SDR_WHITE_RANGE,
+    frame_content_peak, hlg_display_nits, hlg_inverse_oetf, lift_black, low_headroom, pq_decode,
+    pq_encode, saturate, set_black_level, tone_map, FinalPass, SdrTransfer, ToneMap, BT2020_LUMA,
+    BT2390_SOURCE_PEAK, DEFAULT_GAMUT_MAP, DEFAULT_SDR_WHITE, HDR_PEAK_RANGE, MIN_LUMINANCE_RANGE,
+    PQ_PEAK, SDR_WHITE_RANGE,
 };
 
 const PEAK: f32 = 301.8;
@@ -1085,4 +1086,190 @@ fn sdr_transfer_names_round_trip() {
         assert_eq!(SdrTransfer::from_name(name).unwrap().name(), name);
     }
     assert_eq!(SdrTransfer::from_name("gamma 2.2"), None);
+}
+
+#[test]
+fn no_min_luminance_leaves_the_pass_as_it_was() {
+    let plain = FinalPass::new(203.0, 1000.0, None);
+    let same = plain.with_min_luminance(0.0);
+    assert_eq!(same, plain);
+    for v in [
+        [0.0; 3],
+        [0.0001, 0.0002, 0.0003],
+        [0.01; 3],
+        [0.5; 3],
+        [1.0; 3],
+    ] {
+        assert_eq!(same.apply(v), plain.apply(v));
+    }
+}
+
+#[test]
+fn lift_black_without_a_min_luminance_is_the_identity() {
+    for nits in [0.0, 0.01, 1.0, 100.0, 500.0] {
+        assert_eq!(lift_black(nits, 0.0, 203.0, 1000.0), nits);
+    }
+}
+
+#[test]
+fn lift_black_puts_black_on_the_panels_black() {
+    let lifted = lift_black(0.0, 0.05, 203.0, 1000.0);
+    assert!((lifted - 0.05).abs() < 1e-3, "{lifted}");
+}
+
+#[test]
+fn lift_black_leaves_sdr_white_and_everything_above_it_alone() {
+    for nits in [203.0, 203.5, 400.0, 999.0] {
+        assert_eq!(lift_black(nits, 0.3, 203.0, 1000.0), nits);
+    }
+    // A pivot above the peak: nothing goes over the peak.
+    assert!(lift_black(250.0, 1.0, 400.0, 300.0) <= 300.0);
+}
+
+#[test]
+fn lift_black_only_raises_the_shadows_and_keeps_their_order() {
+    for (min, pivot, peak) in [
+        (0.0005, 203.0, 1000.0),
+        (0.05, 203.0, 301.8),
+        (0.3, 100.0, 1000.0),
+        (1.0, 10.0, 600.0),
+        (1.0, 1000.0, 1000.0),
+    ] {
+        let mut last = 0.0f32;
+        let mut nits = 1e-5f32;
+        while nits < peak {
+            let out = lift_black(nits, min, pivot, peak);
+            assert!(out >= nits * 0.9999, "{min} {pivot}: {nits} -> {out}");
+            assert!(out >= last * 0.9999, "{min} {pivot}: {nits} -> {out}");
+            assert!(out <= peak);
+            last = out;
+            nits *= 1.03;
+        }
+    }
+}
+
+#[test]
+fn lift_black_keeps_the_darkest_steps_apart() {
+    // Without the lift 0.001 and 0.02 cd/m² are both under a panel black of 0.05 and look the
+    // same, with it they stay apart.
+    let (a, b) = (
+        lift_black(0.001, 0.05, 203.0, 1000.0),
+        lift_black(0.02, 0.05, 203.0, 1000.0),
+    );
+    assert!(b - a > 0.03, "{a} {b}");
+    assert!(a > 0.05 && b > 0.05);
+}
+
+#[test]
+fn lift_black_fades_out_well_under_sdr_white() {
+    let out = lift_black(100.0, 0.1, 203.0, 1000.0);
+    assert!((out / 100.0 - 1.0).abs() < 1e-3, "{out}");
+}
+
+#[test]
+fn a_min_luminance_lifts_the_shadows_of_the_pass_and_not_black() {
+    let plain = FinalPass::new(203.0, 1000.0, None);
+    let lifted = plain.with_min_luminance(0.1);
+    // Exact black stays 0, so local dimming and dithering still see it.
+    assert_eq!(lifted.apply([0.0; 3]), plain.apply([0.0; 3]));
+    // Light that is nearly nothing is shown at the panel's black, not under it.
+    let dark = [1e-8; 3];
+    close(lifted.apply(dark), [pq(0.1); 3], 4e-3);
+    assert!(lifted.apply([0.01; 3])[0] > plain.apply([0.01; 3])[0]);
+    assert!(lifted.apply([0.0003; 3])[0] > lifted.apply(dark)[0]);
+    close(lifted.apply([1.0; 3]), plain.apply([1.0; 3]), 1e-6);
+    close(lifted.apply([3.0; 3]), plain.apply([3.0; 3]), 1e-6);
+}
+
+#[test]
+fn the_lift_is_neutral_light_and_keeps_the_order_of_the_channels() {
+    let lifted = FinalPass::new(203.0, 1000.0, None).with_min_luminance(0.1);
+    let [r, g, b] = lifted.apply([0.002, 0.001, 0.0005]);
+    assert!(r > g && g > b);
+}
+
+#[test]
+fn a_min_luminance_is_kept_inside_its_range() {
+    let pass = FinalPass::new(203.0, 1000.0, None);
+    assert_eq!(
+        pass.with_min_luminance(50.0).min_luminance,
+        *MIN_LUMINANCE_RANGE.end()
+    );
+    assert_eq!(pass.with_min_luminance(-1.0).min_luminance, 0.0);
+    assert_eq!(pass.with_min_luminance(0.05).min_luminance, 0.05);
+}
+
+#[test]
+fn a_min_luminance_applies_after_every_tone_curve() {
+    for tone in [ToneMap::Knee, ToneMap::Bt2390] {
+        let plain = FinalPass::new(203.0, PEAK, None).with_tone_map(tone);
+        let lifted = plain.with_min_luminance(0.1);
+        assert!(
+            lifted.apply([0.01; 3])[0] > plain.apply([0.01; 3])[0],
+            "{tone:?}"
+        );
+        close(lifted.apply([2.0; 3]), plain.apply([2.0; 3]), 1e-6);
+    }
+    let fitted = FinalPass::new(203.0, PEAK, None).with_content_peak(Some(1000.0));
+    let lifted = fitted.with_min_luminance(0.1);
+    assert!(lifted.apply([0.01; 3])[0] > fitted.apply([0.01; 3])[0]);
+}
+
+/// A color of BT.2020 that the AOC's smaller gamut cannot show, and one it can.
+const OUTSIDE: [f32; 3] = [0.0, 0.4, 0.0];
+
+#[test]
+fn the_gamut_map_is_compress_unless_set() {
+    assert_eq!(DEFAULT_GAMUT_MAP, GamutMap::Compress);
+    let pass = FinalPass::new(203.0, PEAK, Some(&panel()));
+    assert_eq!(pass.gamut_map, GamutMap::Compress);
+    assert_eq!(pass.with_gamut_map(GamutMap::Compress), pass);
+    assert_eq!(
+        pass.with_gamut_map(GamutMap::Clip).gamut_map,
+        GamutMap::Clip
+    );
+}
+
+#[test]
+fn clipping_and_compressing_agree_on_colors_that_fit() {
+    let compress = FinalPass::new(203.0, PEAK, Some(&panel())).with_gamut_map(GamutMap::Compress);
+    let clip = compress.with_gamut_map(GamutMap::Clip);
+    for v in [[0.0; 3], [0.2; 3], [0.5; 3], [1.0; 3]] {
+        close(clip.apply(v), compress.apply(v), 1e-5);
+    }
+}
+
+#[test]
+fn clipping_and_compressing_treat_colors_outside_the_gamut_differently() {
+    let compress = FinalPass::new(203.0, PEAK, Some(&panel())).with_gamut_map(GamutMap::Compress);
+    let clip = compress.with_gamut_map(GamutMap::Clip);
+    let (kept, clipped) = (compress.apply(OUTSIDE), clip.apply(OUTSIDE));
+    assert!(
+        kept.iter().zip(clipped).any(|(a, b)| (a - b).abs() > 1e-3),
+        "{kept:?} {clipped:?}"
+    );
+}
+
+#[test]
+fn clipping_keeps_the_light_of_the_channels_that_fit() {
+    // Clipping only cuts the channel that is out of range, compressing moves all three toward grey.
+    let clip = FinalPass::new(203.0, PEAK, Some(&panel())).with_gamut_map(GamutMap::Clip);
+    let compress = clip.with_gamut_map(GamutMap::Compress);
+    let to_panel = |pass: &FinalPass| {
+        let code = pass.apply(OUTSIDE);
+        code.map(|c| pq_decode(c) * PQ_PEAK)
+    };
+    let (clipped, compressed) = (to_panel(&clip), to_panel(&compress));
+    let sum = |v: [f32; 3]| v[0] + v[1] + v[2];
+    assert!(sum(clipped) != sum(compressed));
+}
+
+#[test]
+fn the_gamut_map_does_nothing_without_a_known_panel_gamut() {
+    let compress = FinalPass::new(203.0, PEAK, None).with_gamut_map(GamutMap::Compress);
+    let clip = compress.with_gamut_map(GamutMap::Clip);
+    assert!(!clip.map_gamut);
+    for v in [OUTSIDE, [0.3, 0.2, 0.1], [2.0, 0.0, 0.0]] {
+        assert_eq!(clip.apply(v), compress.apply(v));
+    }
 }

@@ -305,6 +305,24 @@ pub enum GamutMap {
 }
 
 impl GamutMap {
+    /// The names the config takes, in the order of the variants.
+    pub const NAMES: [&'static str; 2] = ["clip", "compress"];
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "clip" => Some(Self::Clip),
+            "compress" => Some(Self::Compress),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Clip => "clip",
+            Self::Compress => "compress",
+        }
+    }
+
     /// What the rendering intent of a surface asks for.
     pub fn of(intent: RenderIntent) -> Self {
         match intent {
