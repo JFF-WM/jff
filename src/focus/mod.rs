@@ -283,7 +283,10 @@ impl JffState {
         let Some(surface) = &self.layer_on_demand_focus else {
             return;
         };
-        let good = surface.alive() && is_mapped(surface) && self.layer_takes_keys(surface);
+        let good = surface.alive()
+            && is_mapped(surface)
+            && self.layer_takes_keys(surface)
+            && !self.layer_covered_by_fullscreen(surface);
         if !good {
             self.layer_on_demand_focus = None;
         }

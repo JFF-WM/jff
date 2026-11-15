@@ -578,9 +578,17 @@ impl JffState {
 
     /// A mapped layer surface on top of the windows that wants every key (a launcher), if any.
     pub fn exclusive_layer_surface(&self) -> Option<WlSurface> {
+        let fullscreen = self.fullscreen_rects();
         for output in &self.outputs {
             let map = layer_map_for_output(output);
-            for layer in ABOVE_WINDOWS {
+            // Layers a fullscreen window covers can't take the keyboard, as they can't take the
+            // pointer (`under`).
+            let above = layers_above(
+                &fullscreen,
+                crate::feature::outputs::output_rect(output),
+                false,
+            );
+            for &layer in above {
                 let found = map.layers_on(layer).rev().find(|surface| {
                     surface.cached_state().keyboard_interactivity
                         == KeyboardInteractivity::Exclusive
@@ -592,6 +600,24 @@ impl JffState {
             }
         }
         None
+    }
+
+    /// Whether `surface` is a layer surface that a fullscreen window covers: on the top layer of
+    /// a monitor whose topmost window is fullscreen.
+    pub fn layer_covered_by_fullscreen(&self, surface: &WlSurface) -> bool {
+        let fullscreen = self.fullscreen_rects();
+        self.outputs.iter().any(|output| {
+            let above = layers_above(
+                &fullscreen,
+                crate::feature::outputs::output_rect(output),
+                false,
+            );
+            layer_map_for_output(output).layers().any(|layer| {
+                layer.wl_surface() == surface
+                    && ABOVE_WINDOWS.contains(&layer.layer())
+                    && !above.contains(&layer.layer())
+            })
+        })
     }
 
     /// A click landed on a layer surface: give it the keyboard if it takes keys.
