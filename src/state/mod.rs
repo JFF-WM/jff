@@ -378,6 +378,8 @@ pub struct JffState {
     pub focused_window: Option<Window>,
     /// A panel the user clicked that takes keys when asked (`on_demand`).
     pub layer_on_demand_focus: Option<WlSurface>,
+    /// Serials of the key presses, clicks and touches clients got, for xdg-activation tokens.
+    pub input_serials: crate::input::serials::InputSerials,
     /// The menu that currently holds keyboard and pointer, if any.
     pub popup_grab: Option<PopupGrabState>,
     /// The fingers on a touchscreen (see `input/touch.rs`).
@@ -691,6 +693,7 @@ impl JffState {
             keyboard_focus: KeyboardFocus::Nobody,
             focused_window: None,
             layer_on_demand_focus: None,
+            input_serials: Default::default(),
             popup_grab: None,
             fingers: Default::default(),
         };
@@ -1023,22 +1026,17 @@ impl XdgActivationHandler for JffState {
             data.user_data.insert_if_missing(|| UrgentOnlyMarker);
             return true;
         };
-        let Some(seat) = Seat::<JffState>::from_resource(&seat) else {
+        if Seat::<JffState>::from_resource(&seat).is_none() {
             return false;
-        };
-
-        // The serial must be from the last time the seat's keyboard or pointer entered a
-        // surface, or later: a client holding an old serial can't pull the focus to itself.
-        // Both are checked, a panel without keyboard interactivity never has the keyboard.
-        let keyboard_ok = seat
-            .get_keyboard()
-            .and_then(|k| k.last_enter())
-            .is_some_and(|last_enter| serial.is_no_older_than(&last_enter));
-        let pointer_ok = seat
-            .get_pointer()
-            .and_then(|p| p.last_enter())
-            .is_some_and(|last_enter| serial.is_no_older_than(&last_enter));
-        keyboard_ok || pointer_ok
+        }
+        // The serial must be that of a recent key press, click or touch that went to the app
+        // asking: an `enter` serial (a plain hover) is no user action. Anything else is
+        // treated like no serial, the token can ask for attention but never for the focus.
+        if !self.input_serials.accepts(serial, data.client_id.as_ref()) {
+            tracing::debug!("activation token with a serial that is no recent input of its app");
+            data.user_data.insert_if_missing(|| UrgentOnlyMarker);
+        }
+        true
     }
 
     fn request_activation(
@@ -1055,7 +1053,16 @@ impl XdgActivationHandler for JffState {
                 .map(|entry| entry.window.clone());
             if let Some(window) = window {
                 if token_data.user_data.get::<UrgentOnlyMarker>().is_some() {
-                    tracing::debug!("activation without an input serial, focus left alone");
+                    // The focus stays, the window is marked instead, until it gets the keyboard.
+                    // One that has it already has nothing to ask for.
+                    let focused = self.focused_window().is_some_and(|w| w == window);
+                    tracing::debug!(
+                        "activation without an input serial, focus left alone, urgent: {}",
+                        !focused
+                    );
+                    if !focused {
+                        self.set_urgent(&window, true);
+                    }
                 } else {
                     // The window may be on a workspace that isn't shown: go there, or the
                     // keyboard would have nowhere to follow.

@@ -310,6 +310,10 @@ impl JffState {
                 continue;
             };
             let active = layout == Some(&entry.window);
+            // A window that has the keyboard has nothing left to ask attention for.
+            if active {
+                self.set_urgent(&entry.window, false);
+            }
             let changed = toplevel.with_pending_state(|state| {
                 let was = state.states.contains(xdg_toplevel::State::Activated);
                 if active {

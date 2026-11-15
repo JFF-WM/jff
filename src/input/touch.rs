@@ -124,6 +124,8 @@ impl JffState {
         if let Some((surface, _)) = &under {
             self.stamp_touch(surface, time);
         }
+        self.input_serials
+            .note(serial, under.as_ref().map(|(surface, _)| surface));
         touch.down(
             self,
             under,
@@ -190,14 +192,9 @@ impl JffState {
                 if let Some(surface) = &finger.target {
                     self.stamp_touch(surface, time);
                 }
-                touch.up(
-                    self,
-                    &UpEvent {
-                        slot,
-                        serial: SERIAL_COUNTER.next_serial(),
-                        time,
-                    },
-                );
+                let serial = SERIAL_COUNTER.next_serial();
+                self.input_serials.note(serial, finger.target.as_ref());
+                touch.up(self, &UpEvent { slot, serial, time });
             }
         }
         if finger.pressed {

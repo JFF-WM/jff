@@ -96,6 +96,8 @@ pub struct View {
     /// Whether the window has the keyboard. `diff` ignores it, `Snapshot::focused` is what
     /// produces `focus` events.
     pub focused: bool,
+    /// The window asked for attention and hasn't had the keyboard since.
+    pub urgent: bool,
     pub output: Option<String>,
     /// The workspace the window lives on, counting from 1.
     pub workspace: usize,
@@ -178,7 +180,7 @@ impl View {
     fn members(&self) -> String {
         format!(
             "\"id\":{},\"app_id\":{},\"title\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\
-             \"maximized\":{},\"fullscreen\":{},\"focused\":{},\"output\":{},\"workspace\":{},\"pid\":{},\"container\":{}",
+             \"maximized\":{},\"fullscreen\":{},\"focused\":{},\"urgent\":{},\"output\":{},\"workspace\":{},\"pid\":{},\"container\":{}",
             self.id,
             json_opt(self.app_id.as_deref()),
             json_opt(self.title.as_deref()),
@@ -189,6 +191,7 @@ impl View {
             self.maximized,
             self.fullscreen,
             self.focused,
+            self.urgent,
             json_opt(self.output.as_deref()),
             self.workspace,
             self.pid.map_or_else(|| "null".to_string(), |pid| pid.to_string()),
@@ -543,6 +546,11 @@ pub enum Event {
         id: u64,
         on: bool,
     },
+    /// The window asked for attention (`on`), or got the keyboard and the request ended.
+    Urgent {
+        id: u64,
+        on: bool,
+    },
     ViewWorkspace {
         id: u64,
         workspace: usize,
@@ -598,6 +606,7 @@ impl Event {
             | Event::Drag { .. }
             | Event::Maximized { .. }
             | Event::Fullscreen { .. }
+            | Event::Urgent { .. }
             | Event::ViewWorkspace { .. }
             | Event::ViewContainer { .. } => Group::Views,
             Event::Focus { .. } => Group::Focus,
@@ -651,6 +660,9 @@ impl Event {
             Event::Fullscreen { id, on } => {
                 format!("{{\"event\":\"fullscreen\",\"id\":{id},\"on\":{on}}}")
             }
+            Event::Urgent { id, on } => {
+                format!("{{\"event\":\"urgent\",\"id\":{id},\"on\":{on}}}")
+            }
             Event::ViewWorkspace { id, workspace } => {
                 format!("{{\"event\":\"view-workspace\",\"id\":{id},\"workspace\":{workspace}}}")
             }
@@ -694,7 +706,7 @@ impl Event {
 /// The events that turn `old` into `new`, in the order a client should see them. Monitors are
 /// added or changed first, then panels open, then windows open (ascending id), then menus open,
 /// then changes on windows already there (ascending id, and per window: title, app id,
-/// drag start, geometry, maximized, fullscreen, workspace, drag end), then the shown workspace, then focus, then
+/// drag start, geometry, maximized, fullscreen, urgent, workspace, drag end), then the shown workspace, then focus, then
 /// menus close, windows close (ascending id, after the focus event that moved away from them),
 /// panels close, then monitors removed, overview, screenshot, lock. A menu always opens after
 /// and closes before what it belongs to.
@@ -794,6 +806,12 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
             events.push(Event::Fullscreen {
                 id,
                 on: after.fullscreen,
+            });
+        }
+        if before.urgent != after.urgent {
+            events.push(Event::Urgent {
+                id,
+                on: after.urgent,
             });
         }
         if before.workspace != after.workspace {

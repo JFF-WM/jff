@@ -9,7 +9,9 @@
 //! (not the one the pointer happens to be on).
 //!
 //! A workspace is named after its number (1-based), carries its index as its one coordinate, and
-//! is `active` while it's the shown one in its group.
+//! is `active` while it's the shown one in its group. It is `urgent` while a window on it asked
+//! for attention (an xdg-activation token without input) and hasn't had the keyboard since, in a
+//! per-output group only the windows of that monitor count.
 //!
 //! Like `jff msg watch`, changes come from comparing: once per event-loop iteration,
 //! `JffState::publish_ext_workspaces` compares the workspace count, the shown workspaces, and
@@ -45,8 +47,8 @@ struct Group {
     handle: ExtWorkspaceGroupHandleV1,
     /// The handle of workspace `i` is `workspaces[i]`.
     workspaces: Vec<ExtWorkspaceHandleV1>,
-    /// The workspace announced as active.
-    active: Option<usize>,
+    /// The state announced for workspace `i`, at `sent[i]`.
+    sent: Vec<State>,
     /// Names of the monitors the group was told about.
     outputs: Vec<String>,
 }
@@ -92,14 +94,29 @@ struct View {
     shared: usize,
     /// The workspace each monitor shows, by name (per-output workspaces).
     shown: Vec<(String, usize)>,
+    /// The monitor and the workspace (0-based) of every window that asked for attention.
+    urgent: Vec<(String, usize)>,
 }
 
-fn state_of(active: bool) -> State {
-    if active {
-        State::Active
-    } else {
-        State::empty()
+impl View {
+    /// Whether a window on workspace `index` asked for attention. `output` is the monitor of a
+    /// per-output group, `None` for the group every monitor shares.
+    fn is_urgent(&self, output: Option<&str>, index: usize) -> bool {
+        self.urgent
+            .iter()
+            .any(|(monitor, at)| *at == index && output.map_or(true, |own| own == monitor))
     }
+}
+
+fn state_of(active: bool, urgent: bool) -> State {
+    let mut state = State::empty();
+    if active {
+        state |= State::Active;
+    }
+    if urgent {
+        state |= State::Urgent;
+    }
+    state
 }
 
 /// Take a group away: its workspaces leave it and go, then the group goes.
@@ -169,7 +186,7 @@ fn sync(display: &DisplayHandle, binding: &mut Binding, view: &View, outputs: &[
                     output: output.clone(),
                     handle,
                     workspaces: Vec::new(),
-                    active: None,
+                    sent: Vec::new(),
                     outputs: Vec::new(),
                 });
                 sent = true;
@@ -220,33 +237,32 @@ fn sync(display: &DisplayHandle, binding: &mut Binding, view: &View, outputs: &[
             }
             handle.name((at + 1).to_string());
             handle.coordinates((at as u32).to_ne_bytes().to_vec());
-            handle.state(state_of(at == *current));
+            let state = state_of(at == *current, view.is_urgent(output.as_deref(), at));
+            handle.state(state);
             handle.capabilities(WorkspaceCapabilities::Activate);
             group.handle.workspace_enter(&handle);
             group.workspaces.push(handle);
+            group.sent.push(state);
             sent = true;
-        }
-        if group.active.is_none() && !group.workspaces.is_empty() {
-            // Announced as part of the handles just created.
-            group.active = Some(*current);
         }
         // Workspaces that went away.
         while group.workspaces.len() > view.count {
             if let Some(handle) = group.workspaces.pop() {
                 group.handle.workspace_leave(&handle);
                 handle.removed();
+                group.sent.pop();
                 sent = true;
             }
         }
 
-        // The shown workspace changed.
-        if group.active != Some(*current) && *current < group.workspaces.len() {
-            if let Some(old) = group.active.filter(|&i| i < group.workspaces.len()) {
-                group.workspaces[old].state(state_of(false));
+        // The shown workspace changed, or a window on one asked for attention or stopped.
+        for (at, handle) in group.workspaces.iter().enumerate() {
+            let state = state_of(at == *current, view.is_urgent(output.as_deref(), at));
+            if group.sent.get(at) != Some(&state) {
+                handle.state(state);
+                group.sent[at] = state;
+                sent = true;
             }
-            group.workspaces[*current].state(state_of(true));
-            group.active = Some(*current);
-            sent = true;
         }
     }
     sent
@@ -272,6 +288,12 @@ impl JffState {
             } else {
                 Vec::new()
             },
+            urgent: self
+                .desk
+                .all_top_down()
+                .filter(|entry| self.is_urgent(&entry.window))
+                .map(|entry| (entry.output.clone(), entry.workspace))
+                .collect(),
         }
     }
 

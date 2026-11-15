@@ -1,6 +1,7 @@
 //! Input: forwards keyboard, pointer, pen and touch events to the seat, and does click-to-focus.
 
 pub mod grabs;
+pub mod serials;
 mod tablet;
 mod touch;
 
@@ -477,6 +478,8 @@ impl JffState {
         }
 
         // Step 2: forward the key to the focused client.
+        self.input_serials
+            .note(serial, keyboard.current_focus().as_ref());
         keyboard.input_forward(self, key_code, key_state, serial, time, mods_changed);
     }
 
@@ -766,6 +769,8 @@ impl JffState {
             }
         }
 
+        self.input_serials
+            .note(serial, pointer.current_focus().as_ref());
         pointer.button(
             self,
             &ButtonEvent {
@@ -799,6 +804,7 @@ impl JffState {
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
         };
+        self.input_serials.note(serial, Some(surface));
         let previous = keyboard.current_focus();
         if previous.as_ref() == Some(surface) {
             keyboard.input_forward(self, key_code, key_state, serial, time, false);

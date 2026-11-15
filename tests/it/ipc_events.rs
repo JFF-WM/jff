@@ -18,6 +18,7 @@ fn view(id: u64) -> View {
         maximized: false,
         fullscreen: false,
         focused: false,
+        urgent: false,
         output: Some("DP-1".to_string()),
         workspace: 1,
         pid: Some(4242),
@@ -342,6 +343,27 @@ fn maximize_and_fullscreen() {
 }
 
 #[test]
+fn urgent_is_an_event_and_a_member_of_the_view() {
+    let old = Snapshot {
+        views: vec![view(3)],
+        ..Snapshot::default()
+    };
+    let mut urgent = old.clone();
+    urgent.views[0].urgent = true;
+    assert_eq!(diff(&old, &urgent), vec![Event::Urgent { id: 3, on: true }]);
+    assert_eq!(
+        diff(&urgent, &old),
+        vec![Event::Urgent { id: 3, on: false }]
+    );
+    assert_eq!(
+        Event::Urgent { id: 3, on: true }.to_json(),
+        "{\"event\":\"urgent\",\"id\":3,\"on\":true}"
+    );
+    assert!(urgent.views[0].to_json().contains("\"urgent\":true"));
+    assert!(old.views[0].to_json().contains("\"urgent\":false"));
+}
+
+#[test]
 fn a_view_changing_workspace() {
     let old = snapshot(vec![view(1)]);
     let mut new = old.clone();
@@ -643,6 +665,7 @@ fn every_event_belongs_to_its_group() {
         (Event::Drag { id: 1, on: true }, Group::Views),
         (Event::Maximized { id: 1, on: true }, Group::Views),
         (Event::Fullscreen { id: 1, on: true }, Group::Views),
+        (Event::Urgent { id: 1, on: true }, Group::Views),
         (
             Event::ViewWorkspace {
                 id: 1,

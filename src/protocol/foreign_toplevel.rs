@@ -12,6 +12,9 @@
 //!   state is never sent.
 //! - `set_rectangle` (where the taskbar button is, for a minimize animation): ignored.
 //! - the `parent` event: never sent.
+//! - urgency: the protocol has no state for "asks for attention" (only maximized, minimized,
+//!   activated and fullscreen), so a window that is urgent looks like any other here. The
+//!   `urgent` member and event of `jff msg` and the `urgent` state of `ext-workspace-v1` carry it.
 //!
 //! Windows on every workspace are announced, not just the ones on the shown workspace. A window
 //! is announced once it has a size (same rule as `jff msg views`).

@@ -56,9 +56,12 @@
 //! `{"ok":true,"workspace":2,"count":9}` (the shown workspace, from 1). `status` replies
 //! `{"ok":true,"views":[...],"workspace":2,"count":9}`. A view is
 //! `{"id":1,"app_id":"foot","title":"~","x":40,"y":40,"width":800,"height":600,
-//!   "maximized":false,"fullscreen":false,"focused":true,"output":"DP-1","workspace":1,
-//!   "pid":4242,"container":null}`.
-//! `id` is assigned when the window appears and never reused while jff runs. `pid` is the
+//!   "maximized":false,"fullscreen":false,"focused":true,"urgent":false,"output":"DP-1",
+//!   "workspace":1,"pid":4242,"container":null}`.
+//! `id` is assigned when the window appears and never reused while jff runs. `urgent` is true
+//! while the window asked for attention (an xdg-activation token without input, a terminal's
+//! bell or a finished download) and hasn't had the keyboard since, the `urgent` event tells when it
+//! changes. `pid` is the
 //! process id of the client that owns the window (null when unknown), an X11 window reports
 //! xwayland-satellite's pid. `container` is `{"id":1,"name":"Terminals"}` for a window that is a
 //! member of a tiling container (`name` is null for a container without one), null for any
@@ -252,6 +255,11 @@ const MAX_WATCH_INPUT: usize = 64 * 1024;
 /// The number clients use to name a view. Attached to the window when it appears.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ViewId(pub u64);
+
+/// Whether a window asked for attention (an activation token without input, see
+/// `XdgActivationHandler`) and hasn't had the keyboard since. Attached to the window.
+#[derive(Debug, Default)]
+struct Urgent(std::sync::atomic::AtomicBool);
 
 /// Same for popups and layer surfaces, given the first time one is listed.
 struct SurfaceId(u64);
@@ -963,11 +971,31 @@ impl JffState {
             maximized,
             fullscreen,
             focused,
+            urgent: self.is_urgent(window),
             output,
             workspace,
             pid: self.window_pid(window),
             container: self.container_ref(window),
         }
+    }
+
+    /// Whether `window` asked for attention and hasn't been focused since.
+    pub fn is_urgent(&self, window: &Window) -> bool {
+        window
+            .user_data()
+            .get::<Urgent>()
+            .is_some_and(|u| u.0.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Mark `window` as wanting attention (`true`) or clear it. Returns whether it changed.
+    pub fn set_urgent(&self, window: &Window, on: bool) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        if !on && window.user_data().get::<Urgent>().is_none() {
+            return false;
+        }
+        window.user_data().insert_if_missing(Urgent::default);
+        let flag = window.user_data().get::<Urgent>();
+        flag.is_some_and(|u| u.0.swap(on, Relaxed) != on)
     }
 
     /// Process id of the client that owns `window`, if the socket can tell.
