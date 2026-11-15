@@ -133,7 +133,10 @@ pub fn run() -> anyhow::Result<()> {
     // XRGB2101010 besides the two every client has), so clients that draw in them need no
     // conversion first.
     let shm_formats: Vec<_> = state.backend.renderer().shm_formats().collect();
-    state.shm_state.update_formats(shm_formats);
+    state.shm_state.update_formats(shm_formats.iter().copied());
+    // A client can only make a buffer in a format wl_shm offers, so that is also what picture
+    // formats a capture can ask for are picked from.
+    state.image_copy.offer_hdr_formats(&shm_formats);
 
     // outputs are described by their ICC profile, if the config gives them one
     crate::protocol::color_management::sync_output_color(&mut state);

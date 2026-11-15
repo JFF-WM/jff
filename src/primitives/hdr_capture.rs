@@ -121,6 +121,21 @@ pub fn pq_picture(pass: &FinalPass, half_rgba: &[u16]) -> PqPicture {
     }
 }
 
+/// Code one row of a [`PqPicture`] (`codes`: R G B per pixel) as 10-bit pixels for a client's
+/// buffer, four bytes each: `Xrgb2101010` when `red_high`, `Xbgr2101010` otherwise. The two
+/// bits that are alpha in the `Argb`/`Abgr` forms are set, so the picture is opaque in those
+/// too. `row` takes as many pixels as `codes` has, a longer one keeps its tail (the stride's
+/// padding).
+pub fn pack_row_2101010(codes: &[f32], red_high: bool, row: &mut [u8]) {
+    for (rgb, out) in codes.chunks_exact(3).zip(row.chunks_exact_mut(4)) {
+        let [r, g, b] =
+            [rgb[0], rgb[1], rgb[2]].map(|c| (c.clamp(0.0, 1.0) * 1023.0).round() as u32);
+        let (high, low) = if red_high { (r, b) } else { (b, r) };
+        let word = (3u32 << 30) | (high << 20) | (g << 10) | low;
+        out.copy_from_slice(&word.to_le_bytes());
+    }
+}
+
 /// [`pq_picture`] for a picture with an alpha channel, such as a window: `half_rgba` is
 /// premultiplied, `width` pixels a row, and `codes` comes back as R G B A per pixel with the
 /// color straight (so it is the color of the window, not the color of the window over black). The

@@ -1,6 +1,6 @@
 //! Tests for `jff_wm::primitives::hdr_capture`.
 
-use jff_wm::primitives::hdr_capture::{half_to_f32, pq_picture};
+use jff_wm::primitives::hdr_capture::{half_to_f32, pack_row_2101010, pq_picture};
 use jff_wm::primitives::hdr_output::{pq_encode, tone_map, FinalPass, ToneMap};
 
 const ONE: u16 = 0x3C00;
@@ -140,4 +140,60 @@ fn the_rounded_corners_of_a_picture_come_out_of_its_alpha() {
     assert_eq!(alpha(10, 10), 1.0);
     // the color under the cut corner is the same as everywhere else
     assert_eq!(picture.codes[0], picture.codes[(10 * 20 + 10) * 4]);
+}
+
+fn word(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+#[test]
+fn xrgb2101010_has_red_in_the_high_bits() {
+    let mut row = [0u8; 12];
+    pack_row_2101010(
+        &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        true,
+        &mut row,
+    );
+    assert_eq!(word(&row[0..4]), (3 << 30) | (0x3FF << 20));
+    assert_eq!(word(&row[4..8]), (3 << 30) | (0x3FF << 10));
+    assert_eq!(word(&row[8..12]), (3 << 30) | 0x3FF);
+}
+
+#[test]
+fn xbgr2101010_has_blue_in_the_high_bits() {
+    let mut row = [0u8; 12];
+    pack_row_2101010(
+        &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        false,
+        &mut row,
+    );
+    assert_eq!(word(&row[0..4]), (3 << 30) | 0x3FF);
+    assert_eq!(word(&row[4..8]), (3 << 30) | (0x3FF << 10));
+    assert_eq!(word(&row[8..12]), (3 << 30) | (0x3FF << 20));
+}
+
+#[test]
+fn ten_bit_codes_round_to_the_nearest_step() {
+    let mut row = [0u8; 4];
+    // 0.5 is 511.5 steps: rounds up. 1/1023 is exactly one step.
+    pack_row_2101010(&[0.5, 1.0 / 1023.0, 0.4999], true, &mut row);
+    let w = word(&row);
+    assert_eq!((w >> 20) & 0x3FF, 512);
+    assert_eq!((w >> 10) & 0x3FF, 1);
+    assert_eq!(w & 0x3FF, 511);
+}
+
+#[test]
+fn out_of_range_codes_stay_inside_ten_bits() {
+    let mut row = [0u8; 4];
+    pack_row_2101010(&[2.0, -1.0, f32::NAN], true, &mut row);
+    assert_eq!(word(&row), (3 << 30) | (0x3FF << 20));
+}
+
+#[test]
+fn a_row_longer_than_the_picture_keeps_its_padding() {
+    let mut row = [0xAAu8; 8];
+    pack_row_2101010(&[0.0, 0.0, 0.0], true, &mut row);
+    assert_eq!(word(&row[0..4]), 3 << 30);
+    assert_eq!(&row[4..], &[0xAA; 4]);
 }

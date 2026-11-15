@@ -435,7 +435,7 @@ impl JffState {
 
     /// The working space and final pass of `output` while it is shown as HDR, `None` when it is
     /// not. On winit it is the simulation (`hdr` on the `jff-winit` output).
-    fn hdr_capture(&self, output: &Output) -> Option<(WorkingSpace, FinalPass)> {
+    pub(crate) fn hdr_capture(&self, output: &Output) -> Option<(WorkingSpace, FinalPass)> {
         match &self.backend {
             Backend::Tty(tty) => tty.hdr_capture(output),
             Backend::Winit(_) => self.winit_hdr_capture(output),
