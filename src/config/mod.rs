@@ -13,6 +13,8 @@
 //!
 //! `binds` has three actions for several monitors, each takes one target: `left`, `right`, `up`, `down` (the monitor that lies that way from the one in use), `next`, `prev` (left to right, then top to bottom, wrapping) or the name of a monitor (`"DP-2"`, see `jff msg outputs`). `focus-monitor "right"` moves the pointer and the keyboard there (to the topmost window, or to the middle of an empty monitor). `move-to-monitor "right"` sends the focused window there, pointer and keyboard follow, and a window of a tiling container takes its container along. `move-workspace-to-monitor "right"` trades what the monitor in use shows with what that monitor shows, and needs `workspaces { per-output }`. A target that does not exist (the edge of the desktop) does nothing, a name that is not connected shows an error toast.
 //!
+//! `binds` also has `minimize` (the focused window goes out of sight), `unminimize` (the one minimized last comes back) and a scratchpad: `move-to-scratchpad` puts the focused window in it, `scratchpad` brings one to the monitor in use, centered, or puts it away again when it has the keyboard (with several it steps through them). A hidden window keeps its workspace and place, a taskbar click or an activation request brings it back, and sending a scratchpad window to a workspace takes it out of the scratchpad.
+//!
 //! `warp-mouse-to-focus` moves the pointer to the center of a window when it gets the keyboard by something other than the pointer (a binding, the switcher, a new window, a closed one, a taskbar, a workspace switch), also when the pointer is over it already, unless the focus came from a click, a game has locked the pointer, or a window is being dragged. Off by default.
 //!
 //! `input { … }` sets up pointer devices: `touchpad { … }` and `mouse { … }` for every device of that kind, and `device "NAME" { … }` for the one with that libinput name (jff logs the name of every device it sees, at info level), which wins over the two. Inside: `tap`, `tap-button-map "left-right-middle"|"left-middle-right"`, `drag`, `natural-scroll`, `accel-speed N` (-1 to 1), `accel-profile "flat"|"adaptive"`, `scroll-method "none"|"two-finger"|"edge"|"on-button-down"`, `scroll-button "middle"|CODE`, `disable-while-typing`, `click-method "button-areas"|"clickfinger"`, `middle-emulation`, `left-handed`, `off` and `disable-on-external-mouse`. A setting that is not there stays at the device's own default, except `tap` on a touchpad, which is on. Applied when a device is plugged in and on reload, only on the TTY backend. A setting a device doesn't support is skipped.
@@ -206,6 +208,16 @@ pub enum Action {
     Snap(Side),
     /// Ask the focused window to close.
     Close,
+    /// Put the focused window out of sight until `unminimize`, a taskbar or an activation
+    /// request brings it back.
+    Minimize,
+    /// Bring back the window that was minimized last, on the workspace it came from.
+    Unminimize,
+    /// Put the focused window in the scratchpad, out of sight.
+    MoveToScratchpad,
+    /// A scratchpad window that has the keyboard goes away, otherwise one comes to the monitor
+    /// in use, centered and on top. With several it steps through them.
+    Scratchpad,
     /// Show every window of the current monitor as a thumbnail.
     Overview,
     /// Window switcher: a row of thumbnails, most recently used first. Pressing the key again
@@ -3020,6 +3032,10 @@ fn parse_action(node: &KdlNode) -> anyhow::Result<Action> {
         "snap-top" => no_args(Action::Snap(Side::Top)),
         "snap-bottom" => no_args(Action::Snap(Side::Bottom)),
         "close" => no_args(Action::Close),
+        "minimize" => no_args(Action::Minimize),
+        "unminimize" => no_args(Action::Unminimize),
+        "move-to-scratchpad" => no_args(Action::MoveToScratchpad),
+        "scratchpad" => no_args(Action::Scratchpad),
         "overview" => no_args(Action::Overview),
         "switch-window" => no_args(Action::SwitchWindow { backwards: false }),
         "switch-window-back" => no_args(Action::SwitchWindow { backwards: true }),

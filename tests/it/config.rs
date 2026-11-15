@@ -2339,3 +2339,37 @@ fn rejects_bad_monitor_actions() {
     assert!(Config::parse("binds { Alt+1 { move-to-monitor 2; } }").is_err());
     assert!(Config::parse("binds { Alt+1 { move-workspace-to-monitor; } }").is_err());
 }
+
+#[test]
+fn minimize_and_scratchpad_actions_are_parsed() {
+    let config = Config::parse(
+        r#"binds {
+            Super+M { minimize; }
+            Super+Shift+M { unminimize; }
+            Super+Minus { scratchpad; }
+            Super+Shift+Minus { move-to-scratchpad; }
+        }"#,
+    )
+    .unwrap();
+    let logo = mods(false, false, false, true);
+    let logo_shift = mods(false, false, true, true);
+    assert_eq!(config.action_for(&logo, key("m")), Some(&Action::Minimize));
+    assert_eq!(
+        config.action_for(&logo_shift, key("m")),
+        Some(&Action::Unminimize)
+    );
+    assert_eq!(
+        config.action_for(&logo, key("minus")),
+        Some(&Action::Scratchpad)
+    );
+    assert_eq!(
+        config.action_for(&logo_shift, key("minus")),
+        Some(&Action::MoveToScratchpad)
+    );
+}
+
+#[test]
+fn minimize_and_scratchpad_take_no_arguments() {
+    assert!(Config::parse(r#"binds { Alt+1 { minimize "now"; } }"#).is_err());
+    assert!(Config::parse(r#"binds { Alt+1 { scratchpad 1; } }"#).is_err());
+}

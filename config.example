@@ -553,4 +553,10 @@ binds {
     Super+Ctrl+Right  { move-workspace-to-monitor "right"; }
     Super+Shift+Left { move-to-monitor "left"; }
     Super+Ctrl+Left  { move-workspace-to-monitor "left"; }
+
+    // minimize/unminimize and scratchpad
+    Super+M       { minimize; }
+    Super+Shift+M { unminimize; }
+    Super+Minus       { scratchpad; }
+    Super+Shift+Minus { move-to-scratchpad; }
 }

@@ -8,8 +8,8 @@
 //! and sends the difference. Nothing is computed while no client has bound the protocol.
 //!
 //! Not supported:
-//! - minimize: jff has no minimized windows, so `set_minimized` is ignored and the `minimized`
-//!   state is never sent.
+//! - the `minimized` state: `set_minimized` and `unset_minimized` work (see `feature/stash.rs`),
+//!   but the state is never sent, so a taskbar does not show a window as minimized.
 //! - `set_rectangle` (where the taskbar button is, for a minimize animation): ignored.
 //! - the `parent` event: never sent.
 //! - urgency: the protocol has no state for "asks for attention" (only maximized, minimized,
@@ -338,8 +338,10 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, u64> for JffState {
                 }
             }
             Request::Close => toplevel.send_close(),
-            // jff has no minimized windows, and no animation that needs the button's place.
-            Request::SetMinimized | Request::UnsetMinimized | Request::SetRectangle { .. } => {}
+            Request::SetMinimized => state.minimize_window(&window),
+            Request::UnsetMinimized => state.unminimize_window(&window),
+            // No animation that needs the button's place.
+            Request::SetRectangle { .. } => {}
             _ => {}
         }
     }

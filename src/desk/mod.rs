@@ -90,6 +90,13 @@ pub struct Entry<W> {
     /// those of its container, and its `pos` is derived from the container's tree
     /// ([`Desk::tile_container`]).
     pub container: Option<ContainerId>,
+    /// Set while the window is out of sight on purpose (minimized, or put away in the
+    /// scratchpad): the number says how recently, higher is later. It keeps its workspace and
+    /// monitor, but is not shown, drawn or reachable, see [`Desk::is_visible`].
+    pub hidden: Option<u64>,
+    /// Whether the window belongs to the scratchpad: put away with [`Desk::hide_where`] and
+    /// brought back by the scratchpad key, as opposed to a minimized one.
+    pub scratch: bool,
 }
 
 pub struct Desk<W> {
@@ -112,6 +119,8 @@ pub struct Desk<W> {
     /// The number the next window and the next container get.
     next_window: u64,
     next_container: u64,
+    /// The number the next hidden window gets, see [`Entry::hidden`].
+    next_hidden: u64,
 }
 
 impl<W> Default for Desk<W> {
@@ -124,6 +133,7 @@ impl<W> Default for Desk<W> {
             containers: Vec::new(),
             next_window: 0,
             next_container: 0,
+            next_hidden: 0,
         }
     }
 }
@@ -161,6 +171,8 @@ impl<W> Desk<W> {
             output: output.to_owned(),
             id,
             container: None,
+            hidden: None,
+            scratch: false,
         });
         pos
     }
@@ -215,9 +227,72 @@ impl<W> Desk<W> {
         }
     }
 
-    /// Whether `entry` is on the workspace that's shown where it is.
+    /// Whether `entry` is on the workspace that's shown where it is, and not put away.
     pub fn is_visible(&self, entry: &Entry<W>) -> bool {
-        entry.workspace == self.current_on(&entry.output)
+        entry.hidden.is_none() && entry.workspace == self.current_on(&entry.output)
+    }
+
+    /// Put the first window matching `pred` out of sight, as the newest hidden one. With
+    /// `scratch` it also joins the scratchpad. Returns false, having changed nothing, when
+    /// there is no such window, it is hidden already, or it is a member of a container (take it
+    /// out first with [`Desk::leave_container`]).
+    pub fn hide_where(&mut self, pred: impl Fn(&W) -> bool, scratch: bool) -> bool {
+        let next = self.next_hidden;
+        let Some(e) = self.entries.iter_mut().find(|e| pred(&e.window)) else {
+            return false;
+        };
+        if e.container.is_some() || e.hidden.is_some() {
+            return false;
+        }
+        e.hidden = Some(next);
+        e.scratch |= scratch;
+        self.next_hidden += 1;
+        true
+    }
+
+    /// Bring the first hidden window matching `pred` back, on top of its workspace. Returns
+    /// false when there is no such window or it was not hidden.
+    pub fn unhide_where(&mut self, pred: impl Fn(&W) -> bool) -> bool {
+        let Some(i) = self
+            .entries
+            .iter()
+            .position(|e| pred(&e.window) && e.hidden.is_some())
+        else {
+            return false;
+        };
+        let mut entry = self.entries.remove(i);
+        entry.hidden = None;
+        self.entries.push(entry);
+        true
+    }
+
+    /// Take the first window matching `pred` into the scratchpad, or out of it.
+    pub fn set_scratch_where(&mut self, pred: impl Fn(&W) -> bool, scratch: bool) {
+        if let Some(e) = self.entries.iter_mut().find(|e| pred(&e.window)) {
+            e.scratch = scratch;
+        }
+    }
+
+    /// The window that has been hidden the longest, of the scratchpad (`scratch`) or the
+    /// minimized ones. The scratchpad key takes this one, so a window put away goes to the back
+    /// of the line and the keys step through them all.
+    pub fn oldest_hidden(&self, scratch: bool) -> Option<&Entry<W>> {
+        self.entries
+            .iter()
+            .filter(|e| e.scratch == scratch)
+            .filter_map(|e| e.hidden.map(|at| (at, e)))
+            .min_by_key(|(at, _)| *at)
+            .map(|(_, e)| e)
+    }
+
+    /// The window that was hidden last, of the scratchpad (`scratch`) or the minimized ones.
+    pub fn newest_hidden(&self, scratch: bool) -> Option<&Entry<W>> {
+        self.entries
+            .iter()
+            .filter(|e| e.scratch == scratch)
+            .filter_map(|e| e.hidden.map(|at| (at, e)))
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, e)| e)
     }
 
     /// With per-output workspaces: put every window on the monitor `home` names for it (`None`:
@@ -334,11 +409,12 @@ impl<W> Desk<W> {
         true
     }
 
-    /// How many windows live on `workspace`.
+    /// How many windows live on `workspace`. A hidden one does not count, the workspace is
+    /// as empty as it looks.
     pub fn count_on(&self, workspace: usize) -> usize {
         self.entries
             .iter()
-            .filter(|e| e.workspace == workspace)
+            .filter(|e| e.workspace == workspace && e.hidden.is_none())
             .count()
     }
 
@@ -350,9 +426,11 @@ impl<W> Desk<W> {
     pub fn step_occupied(&self, output: &str, from: usize, steps: i32, count: usize) -> usize {
         let last = count.max(1) - 1;
         let occupied = |workspace: usize| {
-            self.entries
-                .iter()
-                .any(|e| e.workspace == workspace && (!self.per_output || e.output == output))
+            self.entries.iter().any(|e| {
+                e.hidden.is_none()
+                    && e.workspace == workspace
+                    && (!self.per_output || e.output == output)
+            })
         };
         let mut at = from.min(last);
         let mut left = steps.unsigned_abs();

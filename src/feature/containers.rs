@@ -1049,7 +1049,7 @@ impl JffState {
     /// room, and it floats at half the size of its monitor, put so that `at` is at the same
     /// relative spot in it as in the monitor. It keeps the keyboard. Returns where it was put
     /// and its size, or `None`, having changed nothing, for a window that is in no container.
-    fn eject_from_container(
+    pub(crate) fn eject_from_container(
         &mut self,
         window: &Window,
         at: Point<f64, Logical>,

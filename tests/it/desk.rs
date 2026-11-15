@@ -430,3 +430,72 @@ fn a_trade_does_not_merge_into_a_hidden_workspace() {
     assert_eq!(d.home_of(|w| *w == "h"), Some(("right".to_owned(), 0)));
     assert_eq!(d.current_on("right"), 1);
 }
+
+#[test]
+fn a_hidden_window_is_not_shown_but_keeps_its_place() {
+    let mut d = Desk::default();
+    let at = d.add("a");
+    d.add("b");
+    assert!(d.hide_where(|w| *w == "a", false));
+    assert_eq!(order(&d), ["b"]);
+    assert_eq!(d.pos_of(|w| *w == "a"), Some(at));
+    assert_eq!(d.home_of(|w| *w == "a"), Some((String::new(), 0)));
+    // Hiding it twice does nothing, and a window that is not there cannot be hidden.
+    assert!(!d.hide_where(|w| *w == "a", false));
+    assert!(!d.hide_where(|w| *w == "z", false));
+}
+
+#[test]
+fn unhiding_puts_the_window_back_on_top() {
+    let mut d = Desk::default();
+    d.add("a");
+    d.add("b");
+    d.hide_where(|w| *w == "a", false);
+    assert!(d.unhide_where(|w| *w == "a"));
+    assert_eq!(order(&d), ["a", "b"]);
+    // One that is not hidden stays where it is.
+    assert!(!d.unhide_where(|w| *w == "b"));
+    assert_eq!(order(&d), ["a", "b"]);
+}
+
+#[test]
+fn hidden_windows_come_back_newest_or_oldest_first() {
+    let mut d = Desk::default();
+    for w in ["a", "b", "c"] {
+        d.add(w);
+    }
+    d.hide_where(|w| *w == "b", false);
+    d.hide_where(|w| *w == "a", false);
+    d.hide_where(|w| *w == "c", true);
+    // Minimized and scratchpad windows are kept apart.
+    assert_eq!(d.newest_hidden(false).map(|e| e.window), Some("a"));
+    assert_eq!(d.oldest_hidden(false).map(|e| e.window), Some("b"));
+    assert_eq!(d.oldest_hidden(true).map(|e| e.window), Some("c"));
+    // Put away again, a window goes to the back of the line.
+    d.unhide_where(|w| *w == "b");
+    d.hide_where(|w| *w == "b", false);
+    assert_eq!(d.oldest_hidden(false).map(|e| e.window), Some("a"));
+}
+
+#[test]
+fn a_scratchpad_window_stays_in_it_until_taken_out() {
+    let mut d = Desk::default();
+    d.add("a");
+    d.hide_where(|w| *w == "a", true);
+    d.unhide_where(|w| *w == "a");
+    assert!(d.find_by(|w| *w == "a").is_some_and(|e| e.scratch));
+    d.set_scratch_where(|w| *w == "a", false);
+    d.hide_where(|w| *w == "a", false);
+    assert!(d.oldest_hidden(true).is_none());
+    assert_eq!(d.oldest_hidden(false).map(|e| e.window), Some("a"));
+}
+
+#[test]
+fn hidden_windows_do_not_make_a_workspace_occupied() {
+    let mut d = Desk::default();
+    d.add("a");
+    assert_eq!(d.count_on(0), 1);
+    d.hide_where(|w| *w == "a", true);
+    assert_eq!(d.count_on(0), 0);
+    assert_eq!(d.step_occupied("", 3, -1, 10), 3);
+}

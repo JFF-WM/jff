@@ -135,8 +135,11 @@ impl JffState {
         }
     }
 
-    /// Show the workspace `window` lives on (it may be hidden right now), on its monitor.
+    /// Show the workspace `window` lives on (it may be hidden right now), on its monitor. A
+    /// window that was minimized or put in the scratchpad comes back where it was, so a taskbar
+    /// click or an activation request brings it up.
     pub fn show_workspace_of(&mut self, window: &Window) {
+        self.desk.unhide_where(|w| w == window);
         if let Some((output, workspace)) = self.desk.home_of(|w| w == window) {
             self.switch_workspace_on(&output, workspace);
         }
@@ -157,6 +160,8 @@ impl JffState {
         let Some((output, from)) = self.desk.home_of(|w| w == window) else {
             return;
         };
+        // Sending a window somewhere is how it leaves the scratchpad.
+        self.desk.set_scratch_where(|w| w == window, false);
         if from == target {
             return;
         }
