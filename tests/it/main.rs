@@ -47,6 +47,7 @@ mod screenshot_area;
 mod screenshot_capture;
 mod screenshot_save;
 mod scroll_steps;
+mod stats;
 mod tile_tree;
 mod touch;
 mod window_anim;

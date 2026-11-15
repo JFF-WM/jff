@@ -475,6 +475,11 @@ window-rule { match app-id="kitty"; opacity 0.9; }
 //   reload-config / quit
 //   screenshot-area / screenshot-fullscreen / screenshot-window
 //   toggle-shortcuts-inhibit      let the focused window's keyboard-shortcuts inhibitor go, or come back
+//   toggle-stats                  show or hide "statistics for nerds" for the focused window: client / shown /
+//                                 display FPS, frame sync (vsync, VRR, tearing), HDR, direct scanout and why not.
+//                                 While shown the window is composited (the overlay is drawn over it), so direct
+//                                 scanout and tearing are off, and the overlay says so. `jff msg stats` reads the
+//                                 same numbers without drawing anything.
 //   forward-key "APP-ID"          hand the key to that app's window without focusing it, for its own global hotkeys
 //   Needing `tiling-containers`:
 //   focus-container "NAME"        focus the first container with that name on this workspace
@@ -508,6 +513,7 @@ binds {
     // Alt+Up { snap-top, }
     // Alt+Down { snap-bottom, }
     // Super+Escape { toggle-shortcuts-inhibit, }
+    // Super+Shift+S { toggle-stats, }
 
     // Tiling containers (need `tiling-containers`)
     // Super+T { focus-container "Terminals", }

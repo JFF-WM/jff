@@ -206,6 +206,12 @@ fn toggle_shortcuts_inhibit_is_bound_by_default_and_takes_no_arguments() {
 }
 
 #[test]
+fn toggle_stats_can_be_bound_and_takes_no_arguments() {
+    assert!(Config::parse("binds { Super+Shift+S { toggle-stats; } }").is_ok());
+    assert!(Config::parse("binds { Super+Shift+S { toggle-stats 1; } }").is_err());
+}
+
+#[test]
 fn screenshots_are_bound_by_default() {
     let config = Config::default();
     assert_eq!(

@@ -425,6 +425,16 @@ fn toggle_overview_takes_no_arguments() {
 }
 
 #[test]
+fn stats_requests_take_no_arguments() {
+    assert_eq!(parse_request("stats"), Ok(Request::Stats));
+    assert_eq!(parse_request("toggle-stats"), Ok(Request::ToggleStats));
+    assert!(parse_request("stats 1").is_err());
+    assert!(parse_request("toggle-stats on").is_err());
+    assert!(COMMANDS.contains("stats"));
+    assert!(COMMANDS.contains("toggle-stats"));
+}
+
+#[test]
 fn outputs_takes_no_arguments() {
     assert_eq!(parse_request(" outputs \n"), Ok(Request::Outputs));
     assert!(parse_request("outputs DP-1").is_err());

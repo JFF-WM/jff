@@ -107,6 +107,7 @@ fn anything_drawn_over_the_window_declines() {
         Over::Layer,
         Over::Popup,
         Over::Toast,
+        Over::StatsOverlay,
         Over::Lock,
         Over::Screenshot,
         Over::Overview,

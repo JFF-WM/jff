@@ -17,6 +17,8 @@ pub enum Over {
     Layer,
     Popup,
     Toast,
+    /// The stats overlay (`toggle-stats`).
+    StatsOverlay,
     Lock,
     Screenshot,
     Overview,
@@ -29,6 +31,7 @@ impl fmt::Display for Over {
             Self::Layer => "a layer surface is over it",
             Self::Popup => "a popup is over it",
             Self::Toast => "a toast is over it",
+            Self::StatsOverlay => "the stats overlay is over it",
             Self::Lock => "the screen is locked",
             Self::Screenshot => "a screenshot is open",
             Self::Overview => "the overview is open",

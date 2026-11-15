@@ -15,6 +15,7 @@ pub mod overview_search;
 pub mod portals;
 pub mod screenshot;
 pub mod stash;
+pub mod stats;
 pub mod window_anim;
 pub mod workspaces;
 pub mod xwayland;

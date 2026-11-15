@@ -73,6 +73,7 @@ use crate::primitives::hdr::{self, KernelSupport, OutputEotf, Status, Unavailabl
 use crate::primitives::hdr_output::{self, FinalPass};
 use crate::primitives::hdr_scanout::{self, Decline, Facts, Over, Tried};
 use crate::primitives::layout;
+use crate::primitives::stats as nerd;
 use crate::protocol::color_management::WorkingSpace;
 use crate::protocol::layer_shell::{
     fullscreen_covers, fullscreen_surface, layer_body_elements, layer_elements,
@@ -1856,6 +1857,39 @@ impl JffState {
         // while an area screenshot is open here, the frozen frame replaces layers and windows
         // (cursor stays on top)
         let frozen = self.screenshot.as_ref().filter(|ui| ui.shows(&lit.output));
+        // The stats overlay follows the window the user works in, on the monitor that has it.
+        let nerd_window = if self.stats.active() {
+            self.focused_window
+                .as_ref()
+                .filter(|window| {
+                    self.desk.pos_of(|w| w == *window).is_some_and(|pos| {
+                        let size = window.geometry().size;
+                        let center = (f64::from(pos.0 + size.w / 2), f64::from(pos.1 + size.h / 2));
+                        layout::contains(rect, center)
+                    })
+                })
+                .and_then(crate::feature::stats::window_facts)
+        } else {
+            None
+        };
+        if let Some((surface, _)) = &nerd_window {
+            self.stats
+                .follow(surface.id().protocol_id(), &lit.output.name());
+        }
+        // Drawn over the window, so the frame has to be composited: no direct scanout while it
+        // is on screen. The overlay says so.
+        let nerd_overlay = nerd_window.is_some()
+            && self.stats.drawn()
+            && !locked
+            && frozen.is_none()
+            && !overview
+                .as_ref()
+                .is_some_and(|plan| plan.output == lit.output);
+        let mut nerd_covering = false;
+        let mut nerd_overview = false;
+        let mut nerd_decline: Option<String> = None;
+        let mut nerd_alt: Option<bool> = None;
+
         // A fullscreen window exactly the size of the monitor hides everything behind it. The
         // frame then holds only that window (plus cursor and overlay layer), so DrmCompositor
         // can show the client's buffer on the primary plane without a copy.
@@ -1898,7 +1932,13 @@ impl JffState {
             // An HDR output composites into its own texture, so a window goes to the plane only
             // when `hdr_scanout::decide` says its buffer can reach the panel as it is.
             let covering = overview_here.is_none() && fullscreen_covers(&self.desk, rect);
-            direct_scanout = hdr_space.is_none() && covering;
+            nerd_covering = covering;
+            nerd_overview = overview_here.is_some();
+            direct_scanout = hdr_space.is_none() && covering && !nerd_overlay;
+            if nerd_overlay && hdr_space.is_none() {
+                // without the overlay the frame would be tried on the plane
+                nerd_alt = Some(covering);
+            }
             let mut scanout_blocked = None;
             // The light levels the connector should state: the client's while its buffer goes to the plane.
             let mut content = (None, None);
@@ -1916,6 +1956,8 @@ impl JffState {
                             Some(Over::Cursor)
                         } else if !self.osd.is_empty() {
                             Some(Over::Toast)
+                        } else if nerd_overlay {
+                            Some(Over::StatsOverlay)
                         } else {
                             None
                         },
@@ -1927,6 +1969,13 @@ impl JffState {
                         signalled: current == lit.compositor.pending_color_state()
                             && current == lit.color_target,
                     };
+                    if nerd_overlay {
+                        let without = Facts {
+                            over: facts.over.filter(|over| *over != Over::StatsOverlay),
+                            ..facts
+                        };
+                        nerd_alt = Some(hdr_scanout::decide(&without).is_ok());
+                    }
                     let key = Tried {
                         surface: surface.id().protocol_id(),
                         format: buffer_format,
@@ -1965,6 +2014,9 @@ impl JffState {
                 }
             }
             if let Some(reason) = scanout_blocked.flatten() {
+                if nerd_window.is_some() {
+                    nerd_decline = Some(reason.to_string());
+                }
                 if lit.hdr_scanout.reason != Some(reason) {
                     lit.hdr_scanout.reason = Some(reason);
                     if reason.is_notable() {
@@ -2111,6 +2163,24 @@ impl JffState {
                 .elements(&mut *renderer, &lit.output, pointer, &mut toasts);
             elements.splice(osd_at..osd_at, toasts);
         }
+        // the stats overlay, above the toasts
+        if nerd_overlay {
+            let inset = match &nerd_window {
+                Some((_, win)) if !win.fullscreen => {
+                    let zone = layer_map_for_output(&lit.output).non_exclusive_zone();
+                    if zone.size.w > 0 && zone.size.h > 0 {
+                        (zone.loc.x, zone.loc.y, zone.size.w)
+                    } else {
+                        (0, 0, rect.2)
+                    }
+                }
+                _ => (0, 0, rect.2),
+            };
+            let fonts = self.osd.fonts();
+            if let Some(element) = self.stats.element(&mut *renderer, fonts, inset) {
+                elements.splice(osd_at..osd_at, [element]);
+            }
+        }
 
         // Plane scanout is off by default. When a fullscreen window covers the monitor, allow
         // its buffer on the primary plane whatever the element kind, and move the cursor to its
@@ -2147,6 +2217,8 @@ impl JffState {
         } else {
             PresentationMode::VSync
         };
+
+        let nerd_async = matches!(presentation, PresentationMode::Async);
 
         // HDR: composite in the working space, then hand the output's compositor the one
         // element that encodes the result for the signal.
@@ -2305,6 +2377,99 @@ impl JffState {
             }
         }
 
+        // Stats for nerds: what this frame did, as the overlay and `jff msg stats` show it. The
+        // numbers are rebuilt a few times a second, not per frame.
+        if let Some((surface, win)) = &nerd_window {
+            if queued {
+                self.stats.note_queued(&lit.output.name());
+            }
+            if self.stats.due(std::time::Instant::now()) {
+                let (color, format) = surface_scanout_facts(surface);
+                let buffer = match format {
+                    Some(code) => nerd::BufferKind::Dmabuf(code),
+                    None if crate::protocol::layer_shell::is_mapped(surface) => {
+                        nerd::BufferKind::Shm
+                    }
+                    None => nerd::BufferKind::None,
+                };
+                // a client-drawn shadow makes the sizes differ, so only a fullscreen window is compared
+                let buffer_size = if win.fullscreen {
+                    smithay::backend::renderer::utils::with_renderer_surface_state(
+                        surface,
+                        |state| state.buffer_size(),
+                    )
+                    .flatten()
+                    .map(|size| (size.w, size.h))
+                } else {
+                    None
+                };
+                let path = if lit.scanning_out {
+                    nerd::Path::Direct
+                } else {
+                    nerd::Path::Composited(if locked {
+                        nerd::Why::Locked
+                    } else if frozen.is_some() {
+                        nerd::Why::Screenshot
+                    } else if nerd_overview {
+                        nerd::Why::Overview
+                    } else if !win.fullscreen {
+                        nerd::Why::NotFullscreen
+                    } else if !nerd_covering {
+                        nerd::Why::NotCovering
+                    } else if nerd_overlay {
+                        nerd::Why::StatsOverlay
+                    } else if let Some(text) = nerd_decline.take() {
+                        nerd::Why::Hdr(text)
+                    } else if layers_shown(&lit.output, layers_above(&fullscreen, rect, false)) {
+                        nerd::Why::LayerOver
+                    } else if !input_popups.is_empty() {
+                        nerd::Why::PopupOver
+                    } else {
+                        nerd::Why::PlaneRefused
+                    })
+                };
+                let snapshot = nerd::Snapshot {
+                    app_id: win.app_id.clone(),
+                    output: lit.output.name(),
+                    mode: lit
+                        .output
+                        .current_mode()
+                        .map(|mode| (mode.size.w, mode.size.h, mode.refresh)),
+                    client: None,
+                    shown: None,
+                    display_hz: 0.0,
+                    fullscreen: win.fullscreen,
+                    wants_tearing: win.wants_tearing,
+                    says_game: win.says_game,
+                    buffer,
+                    buffer_size,
+                    window_size: win.window_size,
+                    color,
+                    allow_tearing: self.config.allow_tearing(),
+                    vrr_policy: match lit.vrr_mode {
+                        Vrr::Off => "off",
+                        Vrr::Fullscreen => "fullscreen",
+                        Vrr::Always => "always",
+                    },
+                    path,
+                    scanout_without_overlay: nerd_alt,
+                    vrr: match lit.vrr_support {
+                        VrrSupport::NotSupported => nerd::Vrr::Unsupported,
+                        _ if lit.vrr_on => nerd::Vrr::On,
+                        _ => nerd::Vrr::Off,
+                    },
+                    hdr_output: lit.hdr.is_some(),
+                    content_game: lit.content_game,
+                    async_flip: nerd_async,
+                };
+                self.stats.store(
+                    snapshot,
+                    std::time::Instant::now(),
+                    crate::protocol::presentation::monotonic_now(),
+                );
+            }
+        }
+
         if queued {
             // The frame goes out with the next vblank, so the timer that stood in for it is
             // not needed any more.
@@ -2407,6 +2572,10 @@ impl JffState {
         };
         lit.last_vblank =
             Some(hw_time.unwrap_or_else(crate::protocol::presentation::monotonic_now));
+        if self.stats.active() {
+            self.stats
+                .note_flip(&lit.output.name(), lit.last_vblank.unwrap_or_default());
+        }
         match lit.compositor.frame_submitted() {
             Ok(mut feedback) => {
                 let refresh = crate::protocol::presentation::refresh_interval(&lit.output)

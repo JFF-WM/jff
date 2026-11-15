@@ -33,6 +33,12 @@
 //! move-cursor X Y            put the pointer at X, Y (pixels in the shared space, like events)
 //! click left|right|middle    press and release that button where the pointer is
 //! toggle-overview            open the window overview, or close it when it is open
+//! stats                      what happened to the focused window on its way to the screen, as
+//!                            JSON (client, shown and display frame rates, sync, VRR, HDR,
+//!                            direct scanout and why not). Starts counting for 10 seconds after
+//!                            each request without drawing anything, so the first reply can have
+//!                            `"stats":null`
+//! toggle-stats               show or hide the stats overlay (the `toggle-stats` action)
 //! status                     views and workspace state in one reply (for panels)
 //! outputs                    every monitor: area, scanout, adaptive sync and colors
 //! screenshot-area            freeze the monitor under the pointer and pick a rectangle to save
@@ -363,6 +369,11 @@ pub enum Request {
     MoveCursor(i32, i32),
     /// `toggle-overview`: open the overview, or close it when it is open.
     ToggleOverview,
+    /// `stats`: the numbers of the stats overlay for the focused window, as JSON. Starts
+    /// counting if nothing is (for a few seconds after the last request, nothing is drawn).
+    Stats,
+    /// `toggle-stats`: show or hide the stats overlay.
+    ToggleStats,
     /// `click left|right|middle`: a press and release at the pointer.
     Click(ClickButton),
     /// `watch [GROUP...]`: keep the connection and stream events. No groups means all of them.
@@ -373,7 +384,7 @@ pub enum Request {
 pub const COMMANDS: &str =
     "views, status, outputs, focused, view-info, close, maximize, unmaximize, toggle-maximize, \
      fullscreen, unfullscreen, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
-     screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, watch";
+     screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, stats, toggle-stats, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
     word.parse::<usize>()
@@ -449,6 +460,10 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         ("workspaces", _) => return Err("workspaces takes no arguments".to_string()),
         ("toggle-overview", []) => return Ok(Request::ToggleOverview),
         ("toggle-overview", _) => return Err("toggle-overview takes no arguments".to_string()),
+        ("stats", []) => return Ok(Request::Stats),
+        ("stats", _) => return Err("stats takes no arguments".to_string()),
+        ("toggle-stats", []) => return Ok(Request::ToggleStats),
+        ("toggle-stats", _) => return Err("toggle-stats takes no arguments".to_string()),
         ("status", []) => return Ok(Request::Status),
         ("status", _) => return Err("status takes no arguments".to_string()),
         ("outputs", []) => return Ok(Request::Outputs),
@@ -849,6 +864,21 @@ impl JffState {
                 Ok(format!(
                     "{{\"ok\":true,\"open\":{}}}\n",
                     self.overview_active()
+                ))
+            }
+            Request::Stats => {
+                // Counts for a few seconds after this request, drawing nothing. The first
+                // answer can be empty: there is nothing measured yet.
+                self.stats.request_collect(std::time::Instant::now());
+                self.arm_stats_timer();
+                self.queue_redraw_all();
+                Ok(self.stats.json())
+            }
+            Request::ToggleStats => {
+                self.toggle_stats();
+                Ok(format!(
+                    "{{\"ok\":true,\"shown\":{}}}\n",
+                    self.stats.drawn()
                 ))
             }
             Request::MoveCursor(x, y) => {

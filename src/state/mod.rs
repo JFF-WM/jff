@@ -189,6 +189,8 @@ pub struct JffState {
     /// pointer until it is put down (see `feature/containers.rs`, `TileMoveGrab`).
     pub tile_carry: Option<crate::feature::containers::TileCarry>,
     pub osd: crate::feature::osd::Osd,
+    /// The stats overlay and its counters (`toggle-stats`, see `feature/stats.rs`).
+    pub stats: crate::feature::stats::StatsOverlay,
     /// Installed applications, for the overview search.
     pub app_index: crate::feature::app_index::AppIndex,
     /// `restore-apps`: the apps of the last session and the ones open now.
@@ -619,6 +621,7 @@ impl JffState {
             dnd_icon: None,
             tile_carry: None,
             osd: crate::feature::osd::Osd::new(config.osd().font.clone()),
+            stats: crate::feature::stats::StatsOverlay::new(),
             app_index: crate::feature::app_index::AppIndex::new(),
             app_restore: crate::feature::app_restore::AppRestore::default(),
             xdg_foreign_state,
@@ -863,6 +866,9 @@ impl CompositorHandler for JffState {
         while let Some(parent) = get_parent(&root) {
             root = parent;
         }
+
+        // The stats overlay counts the frames of the window it follows (one bool when off).
+        self.stats_commit(surface, &root);
 
         // A window's first commit is the answer to nothing yet: now it gets its first configure.
         let first_commit = self

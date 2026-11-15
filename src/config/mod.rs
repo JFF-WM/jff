@@ -251,6 +251,10 @@ pub enum Action {
     ScreenshotWindow,
     /// Toggle the keyboard-shortcuts inhibitor of the focused window.
     ToggleShortcutsInhibit,
+    /// Show or hide the stats overlay for the focused window: frame rates, vsync, VRR, HDR,
+    /// direct scanout and why not. While it is shown the window is composited, so direct
+    /// scanout and tearing are off (it says so).
+    ToggleStats,
     /// Focus the first tiling container with this name on the current workspace, or show an
     /// error toast when there is none (`focus-container "Terminals"`).
     FocusContainer(String),
@@ -3068,6 +3072,7 @@ fn parse_action(node: &KdlNode) -> anyhow::Result<Action> {
         "screenshot-fullscreen" => no_args(Action::ScreenshotFullscreen),
         "screenshot-window" => no_args(Action::ScreenshotWindow),
         "toggle-shortcuts-inhibit" => no_args(Action::ToggleShortcutsInhibit),
+        "toggle-stats" => no_args(Action::ToggleStats),
         "forward-key" => match <[String; 1]>::try_from(args) {
             Ok([app_id]) if !app_id.is_empty() => Ok(Action::ForwardKey(app_id)),
             _ => bail!("forward-key takes one app id, like forward-key \"com.obsproject.Studio\""),

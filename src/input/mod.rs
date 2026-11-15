@@ -898,6 +898,7 @@ impl JffState {
                 }
             }
             Action::ToggleShortcutsInhibit => self.toggle_shortcuts_inhibit(),
+            Action::ToggleStats => self.toggle_stats(),
             Action::FocusContainer(name) => {
                 self.focus_container_named(&name);
             }
