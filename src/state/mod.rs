@@ -1407,9 +1407,15 @@ impl XdgShellHandler for JffState {
     }
 
     // Games and video players ask for fullscreen: fill the whole output, no frame.
-    fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<WlOutput>) {
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, output: Option<WlOutput>) {
         tracing::info!("client requested fullscreen");
-        self.set_filled(&surface, xdg_toplevel::State::Fullscreen, true);
+        // A client may name the monitor to cover, otherwise it is the one the window is on.
+        let named = output
+            .as_ref()
+            .and_then(Output::from_resource)
+            .filter(|output| self.outputs.contains(output));
+        let monitor = named.and_then(|output| self.move_for_fullscreen(&surface, &output));
+        self.set_mode_on(&surface, WindowMode::Fullscreen, monitor);
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
@@ -2005,7 +2011,44 @@ impl JffState {
         self.set_mode(surface, target);
     }
 
+    /// Move a window to `output` for a fullscreen request that names it, keeping its offset on
+    /// the monitor it was on. Gives the rect of `output`, `None` when the window stays where it
+    /// is (a member of a container fills its container, a window that is gone).
+    fn move_for_fullscreen(
+        &mut self,
+        surface: &ToplevelSurface,
+        output: &Output,
+    ) -> Option<layout::Rect> {
+        let root = surface.wl_surface();
+        let is_this = |w: &Window| is_window_for(w, root);
+        if self.desk.container_of(is_this).is_some() {
+            return None;
+        }
+        let pos = self.desk.pos_of(is_this)?;
+        let size = self.desk.find_by(is_this)?.window.geometry().size;
+        let size = (size.w, size.h);
+        let to = crate::feature::outputs::output_rect(output);
+        let from = self.rect_for_window(pos, size);
+        if from != to {
+            let moved = (pos.0 - from.0 + to.0, pos.1 - from.1 + to.1);
+            self.desk
+                .set_pos_where(is_this, layout::fit_into(moved, size, to));
+        }
+        self.desk.set_output_where(is_this, &output.name());
+        Some(to)
+    }
+
     pub fn set_mode(&mut self, surface: &ToplevelSurface, target: WindowMode) {
+        self.set_mode_on(surface, target, None);
+    }
+
+    /// [`JffState::set_mode`] on the monitor `monitor` (the window's own when `None`).
+    fn set_mode_on(
+        &mut self,
+        surface: &ToplevelSurface,
+        target: WindowMode,
+        monitor: Option<layout::Rect>,
+    ) {
         let wl_surface = surface.wl_surface();
         let is_this = |w: &Window| is_window_for(w, wl_surface);
         // A member of a container is placed by its tree: maximize fills the container.
@@ -2029,7 +2072,7 @@ impl JffState {
             self.desk.float_where(is_this)
         } else {
             let pos = self.desk.pos_of(is_this).unwrap_or_default();
-            let monitor = self.rect_for_window(pos, (size.w, size.h));
+            let monitor = monitor.unwrap_or_else(|| self.rect_for_window(pos, (size.w, size.h)));
             let (x, y, w, h) = match target {
                 WindowMode::Fullscreen => monitor,
                 WindowMode::Snapped(side) => geom::snapped_rect(
