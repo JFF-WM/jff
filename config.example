@@ -8,7 +8,7 @@
 // top-level nodes, which are otherwise silently ignored. An unknown key INSIDE a known block
 // is an error.
 //
-// Flags (`maximize-new-windows`, `no-client-decorations`, `numlock`, `include-cursor`,
+// Flags (`maximize-new-windows`, `focus-follows-mouse`, `warp-mouse-to-focus`, `no-client-decorations`, `numlock`, `include-cursor`,
 // `copy-to-clipboard`, `enable` in `log`, `hdr`, ...) accept a bare name (`numlock`),
 // `#true` / `#false`, `"true"` / `"false"`, `"yes"` / `"no"` or `"on"` / `"off"`.
 // Colors are written as "#rgb", "#rgba", "#rrggbb" or "#rrggbbaa".
@@ -44,6 +44,21 @@ maximize-new-windows #true
 
 // Draw windows without client-side decorations (titlebars) where the app allows it.
 no-client-decorations #true
+
+// Focus follows the mouse (off by default): the window under the pointer gets the keyboard as
+// soon as the pointer moves onto it, no click needed. The window is not raised. The keyboard
+// stays where it is while the overview, the screenshot selection or the lock screen is up, while
+// a panel or launcher (fuzzel, a bar's menu) has the keyboard, while a menu is open, and while a
+// button is held (a drag).
+focus-follows-mouse #true
+
+// The mouse follows the focus (off by default): when a window gets the keyboard by something
+// other than the pointer (Alt+Tab, the overview, a new window, a workspace switch, a taskbar),
+// the pointer jumps to the center of that window, also when it is over it already. A click never
+// moves the pointer, and neither does a pointer a game has locked or a window being dragged.
+// Use it together with `focus-follows-mouse`: that one moves the keyboard to the pointer, this one
+// moves the pointer to the keyboard, so the two never disagree after Alt+Tab.
+warp-mouse-to-focus #true
 
 // Restore the apps of the last session (off by default). While on, jff remembers every open
 // window (its app id, workspace and monitor) in $XDG_STATE_HOME/jff-wm/open-apps. At the next

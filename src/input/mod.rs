@@ -603,6 +603,7 @@ impl JffState {
         );
         pointer.frame(self);
         self.update_toplevel_drag();
+        self.focus_follows_mouse(pos);
 
         // The pointer reached a surface that already asked for a lock: engage it.
         if let Some((surface, origin)) = new_under {
@@ -639,6 +640,7 @@ impl JffState {
         );
         pointer.frame(self);
         self.update_toplevel_drag();
+        self.focus_follows_mouse(pos);
     }
 
     /// A pointer button went down or up: mouse bindings, click-to-focus, window drags, the
@@ -728,6 +730,8 @@ impl JffState {
             }
             if let Some(Under::Window(window, surface, _)) = under {
                 tracing::debug!("button {} pressed on surface {:?}", button, surface.id());
+                // The pointer is on this window, `warp-mouse-to-focus` has nothing to follow.
+                self.warped_focus = Some(window.clone());
                 self.focus_window(&window);
 
                 // Modifier+drag (Alt, see `drag-modifier`) works on any window, even

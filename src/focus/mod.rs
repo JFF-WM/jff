@@ -21,10 +21,10 @@ use smithay::desktop::{
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{IsAlive, Serial, SERIAL_COUNTER};
+use smithay::utils::{IsAlive, Logical, Point, Serial, SERIAL_COUNTER};
 use smithay::wayland::shell::wlr_layer::KeyboardInteractivity;
 
-use crate::protocol::layer_shell::is_mapped;
+use crate::protocol::layer_shell::{is_mapped, Under};
 use crate::state::JffState;
 
 /// Who the seat's keyboard belongs to.
@@ -155,6 +155,7 @@ impl JffState {
             layout.as_ref()
         };
         self.refresh_window_states(shown_active);
+        self.warp_mouse_to_focus(shown_active.cloned());
 
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
@@ -328,6 +329,96 @@ impl JffState {
                 let _ = toplevel.send_pending_configure();
             }
         }
+    }
+
+    /// `focus-follows-mouse`: the pointer is at `pos` after a move. When a window is under it
+    /// that is not the one with the keyboard, that window gets the keyboard, without being
+    /// raised. Nothing happens over a panel, while the overview, the screenshot selection or the
+    /// lock screen is up, while a panel or launcher has the keyboard, a menu is open, or the
+    /// pointer is grabbed (a button is held, a window is dragged).
+    pub(crate) fn focus_follows_mouse(&mut self, pos: Point<f64, Logical>) {
+        if !self.config.focus_follows_mouse()
+            || self.session_locked()
+            || self.overview_active()
+            || self.screenshot.is_some()
+            || self.layer_on_demand_focus.is_some()
+            || self.popup_grab.is_some()
+        {
+            return;
+        }
+        if self.seat.get_pointer().is_none_or(|p| p.is_grabbed()) {
+            return;
+        }
+        let Some(Under::Window(window, _, _)) = self.under(pos) else {
+            return;
+        };
+        if self.focused_window.as_ref() == Some(&window) {
+            return;
+        }
+        // The pointer is on it already, `warp-mouse-to-focus` has nothing to follow.
+        self.warped_focus = Some(window.clone());
+        self.focused_window = Some(window);
+        self.update_keyboard_focus();
+    }
+
+    /// `warp-mouse-to-focus`: when `window` (the one that has the keyboard, `None` while the
+    /// overview or the lock screen has it) is not the one dealt with last, move the pointer to
+    /// its center, also when the pointer is over it already (a maximized window covers the whole
+    /// monitor). Nothing moves when the focus came from a click (the click marks the window as
+    /// dealt with, see `pointer_button_with`), when a client has locked the pointer, or while a
+    /// window is dragged. A window that has no size yet is left for the next pass.
+    fn warp_mouse_to_focus(&mut self, window: Option<Window>) {
+        let Some(window) = window else {
+            return;
+        };
+        if !self.config.warp_mouse_to_focus() {
+            // Turned on later, it must not jump to a window that has had the focus for hours.
+            self.warped_focus = Some(window);
+            return;
+        }
+        if self.warped_focus.as_ref() == Some(&window) {
+            return;
+        }
+        let size = window.geometry().size;
+        let Some(pos) = self.desk.pos_of(|w| *w == window) else {
+            return;
+        };
+        if size.w <= 0 || size.h <= 0 {
+            return;
+        }
+        self.warped_focus = Some(window);
+        if self.dragging_view.is_some() {
+            tracing::debug!("warp-mouse-to-focus: a window is being dragged, pointer left alone");
+            return;
+        }
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        let at = pointer.current_location();
+        let (x, y) = (f64::from(pos.0), f64::from(pos.1));
+        if let Some(surface) = pointer.current_focus() {
+            let locked = smithay::wayland::pointer_constraints::with_pointer_constraint(
+                &surface,
+                &pointer,
+                |constraint| constraint.is_some_and(|c| c.is_active()),
+            );
+            if locked {
+                tracing::debug!(
+                    "warp-mouse-to-focus: the pointer is locked by a client, left alone"
+                );
+                return;
+            }
+        }
+        let to = self.move_cursor((x + f64::from(size.w) / 2.0, y + f64::from(size.h) / 2.0));
+        tracing::debug!(
+            "warp-mouse-to-focus: pointer from ({:.0}, {:.0}) to {to:?}, the center of the window at ({}, {}) {}x{}",
+            at.x,
+            at.y,
+            pos.0,
+            pos.1,
+            size.w,
+            size.h
+        );
     }
 
     /// Forget a menu grab that ended by itself (the menu was dismissed, a click outside it).

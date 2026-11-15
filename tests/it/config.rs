@@ -31,6 +31,30 @@ fn mods(ctrl: bool, alt: bool, shift: bool, logo: bool) -> ModifiersState {
 }
 
 #[test]
+fn warp_mouse_to_focus_is_off_unless_enabled() {
+    assert!(!Config::default().warp_mouse_to_focus());
+    assert!(Config::parse("warp-mouse-to-focus")
+        .unwrap()
+        .warp_mouse_to_focus());
+    assert!(!Config::parse("warp-mouse-to-focus #false")
+        .unwrap()
+        .warp_mouse_to_focus());
+    assert!(Config::parse("warp-mouse-to-focus 3").is_err());
+}
+
+#[test]
+fn focus_follows_mouse_is_off_unless_enabled() {
+    assert!(!Config::default().focus_follows_mouse());
+    assert!(Config::parse("focus-follows-mouse")
+        .unwrap()
+        .focus_follows_mouse());
+    assert!(!Config::parse("focus-follows-mouse #false")
+        .unwrap()
+        .focus_follows_mouse());
+    assert!(Config::parse("focus-follows-mouse 3").is_err());
+}
+
+#[test]
 fn new_windows_maximize_unless_disabled() {
     assert!(Config::default().maximize_new_windows());
     assert!(!Config::parse("maximize-new-windows #false")

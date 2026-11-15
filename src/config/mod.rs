@@ -11,6 +11,10 @@
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
+//! `warp-mouse-to-focus` moves the pointer to the center of a window when it gets the keyboard by something other than the pointer (a binding, the switcher, a new window, a closed one, a taskbar, a workspace switch), also when the pointer is over it already, unless the focus came from a click, a game has locked the pointer, or a window is being dragged. Off by default.
+//!
+//! `focus-follows-mouse` gives the keyboard to the window under the pointer as soon as the pointer moves onto it, without a click and without raising it. The keyboard stays where it is while the overview, the screenshot selection or the lock screen is up, a panel or launcher has the keyboard, a menu is open, or a button is held. Off by default.
+//!
 //! `tiling-containers` turns on tiling containers (groups of windows that tile among themselves, see `desk::container`), and is off by default. It accepts a bare name or `#true` / `#false`.
 //! `restore-apps` starts the applications that were open when the last session ended (one launch per app, found by the app id of its windows in the installed `.desktop` files, see `feature::app_restore`), puts each of their windows on the monitor and the workspace it was on, and keeps that list up to date while you work. It is off by default, and while it is off jff neither reads nor writes the list. It accepts a bare name or `#true` / `#false`, and is read at startup: turning it on in a running session starts saving, and the next session restores. Its monitor and workspace win over those of a `window-rule`, a monitor that is not connected any more leaves the window where it opens by default.
 //! `container-rule { match app-id="…", title="…", tag="…", name "…" }` (any number, the `match` lines all have to hold, the first rule that fits a window gives the container its name): a rule does not create a container, it names the one the user creates, from the first window that fits. `name` and `layout "NAME"` are its actions (`layout` applies the saved container layout NAME, see `save-container-layout`, every time a window that fits the rule joins a container, so tagged windows find their slot as they open), `jff check-config` warns about a rule with neither, and any other key inside it is an error.
@@ -35,7 +39,7 @@
 //! Two things that bite when editing the file by hand:
 //! - `adaptive-sync` takes a quoted string (`"off"` / `"fullscreen"` / `"always"`), not a
 //!   bare flag.
-//! - `maximize-new-windows`, `no-client-decorations`, `numlock`, `include-cursor`,
+//! - `maximize-new-windows`, `warp-mouse-to-focus`, `focus-follows-mouse`, `no-client-decorations`, `numlock`, `include-cursor`,
 //!   `copy-to-clipboard` and `enable` (in `log`) accept a bare name (`numlock`), `true` / `false`, `"true"` /
 //!   `"false"`, `"yes"` / `"no"`, or `"on"` / `"off"`.
 //!
@@ -140,6 +144,8 @@ binds {
 pub const TOP_LEVEL_NODES: &[&str] = &[
     "workspaces",
     "maximize-new-windows",
+    "warp-mouse-to-focus",
+    "focus-follows-mouse",
     "allow-tearing",
     "global-hotkeys",
     "restore-apps",
@@ -1154,6 +1160,10 @@ pub struct Config {
     /// Every monitor has its own shown workspace, `workspaces { per-output }`.
     workspaces_per_output: bool,
     maximize_new_windows: bool,
+    /// `warp-mouse-to-focus`: the pointer follows the keyboard focus. Off by default.
+    warp_mouse_to_focus: bool,
+    /// `focus-follows-mouse`: the window under the pointer gets the keyboard. Off by default.
+    focus_follows_mouse: bool,
     /// `allow-tearing`: a fullscreen window that asked for it (wp_tearing_control_v1) is shown
     /// with async page flips. Off by default.
     allow_tearing: bool,
@@ -1222,6 +1232,8 @@ impl Default for Config {
                 workspaces: DEFAULT_WORKSPACES,
                 workspaces_per_output: false,
                 maximize_new_windows: true,
+                warp_mouse_to_focus: false,
+                focus_follows_mouse: false,
                 allow_tearing: false,
                 global_hotkeys: false,
                 restore_apps: false,
@@ -1417,6 +1429,8 @@ impl Config {
         };
 
         let maximize_new_windows = parse_flag(&doc, "maximize-new-windows", true)?;
+        let warp_mouse_to_focus = parse_flag(&doc, "warp-mouse-to-focus", false)?;
+        let focus_follows_mouse = parse_flag(&doc, "focus-follows-mouse", false)?;
         let allow_tearing = parse_flag(&doc, "allow-tearing", false)?;
         let global_hotkeys = parse_flag(&doc, "global-hotkeys", false)?;
         let restore_apps = parse_flag(&doc, "restore-apps", false)?;
@@ -1562,6 +1576,8 @@ impl Config {
             workspaces,
             workspaces_per_output,
             maximize_new_windows,
+            warp_mouse_to_focus,
+            focus_follows_mouse,
             allow_tearing,
             global_hotkeys,
             restore_apps,
@@ -1770,6 +1786,17 @@ impl Config {
     /// Whether new windows start maximized.
     pub fn maximize_new_windows(&self) -> bool {
         self.maximize_new_windows
+    }
+
+    /// Whether the pointer follows the keyboard focus (`warp-mouse-to-focus`, off by default).
+    pub fn warp_mouse_to_focus(&self) -> bool {
+        self.warp_mouse_to_focus
+    }
+
+    /// Whether the window under the pointer gets the keyboard (`focus-follows-mouse`, off by
+    /// default).
+    pub fn focus_follows_mouse(&self) -> bool {
+        self.focus_follows_mouse
     }
 
     /// Whether windows fade in and out (`window-animations`, on by default).

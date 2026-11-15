@@ -376,6 +376,8 @@ pub struct JffState {
     /// The window the user works in, as picked by a click, a new window, or a request. The
     /// keyboard follows it unless a launcher or the overview has it.
     pub focused_window: Option<Window>,
+    /// The window `warp-mouse-to-focus` last dealt with, so one focus change warps once.
+    pub warped_focus: Option<Window>,
     /// A panel the user clicked that takes keys when asked (`on_demand`).
     pub layer_on_demand_focus: Option<WlSurface>,
     /// Serials of the key presses, clicks and touches clients got, for xdg-activation tokens.
@@ -692,6 +694,7 @@ impl JffState {
             active_virtual_keymap: None,
             keyboard_focus: KeyboardFocus::Nobody,
             focused_window: None,
+            warped_focus: None,
             layer_on_demand_focus: None,
             input_serials: Default::default(),
             popup_grab: None,
