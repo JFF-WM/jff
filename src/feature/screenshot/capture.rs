@@ -472,6 +472,14 @@ impl JffState {
         })
     }
 
+    /// Nothing on screen may be read while the session is locked, windows included.
+    fn refuse_when_locked(&self) -> Result<(), String> {
+        if self.session_locked() {
+            return Err("the session is locked".to_string());
+        }
+        Ok(())
+    }
+
     /// Build what a picture of `output` draws. `hdr` is the working space of a monitor in HDR
     /// mode: the elements are then converted to it, and a picture in the sRGB of a file is not
     /// what comes out.
@@ -481,9 +489,7 @@ impl JffState {
         with_cursor: bool,
         hdr: Option<WorkingSpace>,
     ) -> Result<OutputFrame, String> {
-        if self.session_locked() {
-            return Err("the session is locked".to_string());
-        }
+        self.refuse_when_locked()?;
         let size = frame_size(output).ok_or("the monitor has no mode (it is off)")?;
         let scale_factor = output.current_scale().fractional_scale();
         let scale = Scale::from(scale_factor);
@@ -679,6 +685,7 @@ impl JffState {
         window: &Window,
         color: Option<OutputColor>,
     ) -> Result<(Vec<JffElement>, f64, Size<i32, Physical>), String> {
+        self.refuse_when_locked()?;
         let geo = window.geometry();
         let (scale_factor, size) = self.window_capture_size(window)?;
         let scale = Scale::from(scale_factor);
@@ -776,6 +783,7 @@ impl JffState {
         window: &Window,
         hdr: Option<WorkingSpace>,
     ) -> Result<ShownFrame, String> {
+        self.refuse_when_locked()?;
         let geo = window.geometry();
         let (scale_factor, size) = self.window_capture_size(window)?;
         let pos = self
