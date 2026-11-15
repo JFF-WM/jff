@@ -616,10 +616,15 @@ pub(crate) fn thumb_elements(
         Some(toplevel) => gamut::tree_conversions(toplevel.wl_surface()),
         None => Vec::new(),
     };
+    let alpha_modes = window
+        .toplevel()
+        .map(|toplevel| crate::render::effects::pixel_alpha::modes(toplevel.wl_surface()))
+        .unwrap_or_default();
     let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
         window.render_elements(&mut *renderer, loc, scale, 1.0);
     for surface in surfaces {
         let conversion = gamut::find(&conversions, surface.id());
+        let alpha_mode = crate::render::effects::pixel_alpha::find(&alpha_modes, surface.id());
         let shrunk = RescaleRenderElement::from_element(
             surface,
             Point::<i32, Physical>::from((0, 0)),
@@ -627,7 +632,7 @@ pub(crate) fn thumb_elements(
         );
         let placed = RelocateRenderElement::from_element(shrunk, slot, Relocate::Relative);
         out.push(
-            match gamut::masked(&mut *renderer, rounding.as_ref(), conversion) {
+            match gamut::masked(&mut *renderer, rounding.as_ref(), conversion, alpha_mode) {
                 Some(mask) => mask.wrap_thumb(placed),
                 None => JffElement::Thumb(placed),
             },
@@ -977,8 +982,11 @@ fn wallpaper_elements(
                     Kind::Unspecified,
                 );
             let conversions = gamut::tree_conversions(surface);
+            let alpha_modes = crate::render::effects::pixel_alpha::modes(surface);
             for element in surfaces {
                 let conversion = gamut::find(&conversions, element.id());
+                let alpha_mode =
+                    crate::render::effects::pixel_alpha::find(&alpha_modes, element.id());
                 let shrunk = RescaleRenderElement::from_element(
                     element,
                     Point::<i32, Physical>::from((0, 0)),
@@ -986,7 +994,7 @@ fn wallpaper_elements(
                 );
                 let placed = RelocateRenderElement::from_element(shrunk, slot, Relocate::Relative);
                 out.push(
-                    match gamut::masked(&mut *renderer, rounding.as_ref(), conversion) {
+                    match gamut::masked(&mut *renderer, rounding.as_ref(), conversion, alpha_mode) {
                         Some(mask) => mask.wrap_thumb(placed),
                         None => JffElement::Thumb(placed),
                     },

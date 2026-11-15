@@ -38,6 +38,13 @@ uniform vec3 ycc_b;
 uniform vec3 ycc_off;
 uniform float ycc_on;
 
+// Alpha mode (wp-color-representation): 0 premultiplied electrical, what the blending wants and
+// what a surface is without the protocol; 1 premultiplied optical, the color is linear light
+// times alpha; 2 straight, the color is not multiplied by alpha at all. Both are turned into
+// premultiplied electrical right after sampling (straight color is multiplied, optical color is
+// encoded with the surface's own curve), or, with `cm_on`, taken as light as they are.
+uniform float alpha_mode;
+
 // Color management (wp-color-management): the surface's own gamut and curve to the output's.
 // Straight (not premultiplied) color is decoded with `cm_decode`, mapped in linear light by the
 // matrix whose rows are cm_r, cm_g, cm_b, scaled by `cm_black` (gain, lift: black point
@@ -182,10 +189,21 @@ void main() {
     }
 #endif
 
+    // Straight alpha: multiply now, the rest of the shader works on premultiplied color.
+    bool optical = alpha_mode > 0.5 && alpha_mode < 1.5;
+    if (alpha_mode > 1.5)
+        color.rgb *= color.a;
+    if (optical && cm_on < 0.5) {
+        // Linear light times alpha, drawn as a plain sRGB surface: encode with the sRGB curve.
+        vec3 light = color.a > 0.0 ? color.rgb / color.a : color.rgb;
+        color.rgb = cm_from_light(light, vec2(1.0, 0.0)) * color.a;
+    }
+
     if (cm_on > 0.5) {
         // The curves are not linear, so they work on the straight color, not the premultiplied one.
         vec3 straight = color.a > 0.0 ? color.rgb / color.a : color.rgb;
-        vec3 light = cm_to_light(straight, cm_decode);
+        // Optical color is light already, the curve only describes what it would be encoded as.
+        vec3 light = optical ? straight : cm_to_light(straight, cm_decode);
         light = vec3(dot(cm_r, light), dot(cm_g, light), dot(cm_b, light)) * cm_scale;
         if (cm_working > 0.5) {
             color.rgb = max(light, 0.0) * color.a;

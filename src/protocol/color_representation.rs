@@ -5,23 +5,27 @@
 //! YUV buffers with the matrix and range the client declared: see `primitives/yuv.rs` for the
 //! arithmetic and `render/effects/yuv.rs` for where it is applied.
 //!
-//! Only what the renderer does correctly is advertised. Without `yuv`, that is premultiplied
-//! electrical alpha and RGB with full range (`identity`), which is what every surface is drawn
-//! as. A client that needs more, such as BT.709 limited range video, sees that the compositor
-//! has no such support and converts for itself. With `yuv`, BT.601, BT.709, BT.2020, FCC and
-//! SMPTE 240M in limited and full range are added, see [`supported_coefficients`]. Straight
-//! and optical alpha stay unadvertised.
+//! Only what the renderer does correctly is advertised. All three alpha modes are: the shader
+//! turns straight and premultiplied optical alpha into the premultiplied electrical alpha that
+//! the blending expects, see `render/effects/pixel_alpha.rs`. For the matrix and range, without
+//! `yuv` that is RGB with full range (`identity`), which is what every surface is drawn as. A
+//! client that needs more, such as BT.709 limited range video, sees that the compositor has no
+//! such support and converts for itself. With `yuv`, BT.601, BT.709, BT.2020, FCC and SMPTE
+//! 240M in limited and full range are added, see [`supported_coefficients`].
 //!
 //! The values are double-buffered like the rest of a surface's state: requests change the
 //! pending state and a `wl_surface.commit` makes it current. [`color_representation`] reads
 //! the current one. Destroying the extension object unsets everything, also on the next commit.
 //!
-//! Not checked: the `pixel_format` error, for a committed buffer whose format does not fit what
-//! was set. A matrix set on an RGB buffer is ignored when drawing (the shader only changes
-//! external, i.e. YUV, textures), and a YUV buffer marked `identity` is drawn as it would be
-//! without the protocol.
+//! The `pixel_format` error is raised at commit, by a pre-commit hook that is installed with the
+//! extension object: a buffer attached in that commit (or the last one attached, when the commit
+//! only changes the representation) whose format does not fit the matrix that is pending. A
+//! YCbCr matrix on an RGB buffer is an error, and so is `identity` on a YUV one, see
+//! [`pixel_format_conflict`]. Only the matrix is checked: alpha mode and chroma location are
+//! drawn as declared whatever the format.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use smithay::reexports::wayland_protocols::wp::color_representation::v1::server::wp_color_representation_manager_v1::{
     self, WpColorRepresentationManagerV1,
@@ -30,11 +34,17 @@ use smithay::reexports::wayland_protocols::wp::color_representation::v1::server:
     self, WpColorRepresentationSurfaceV1,
 };
 use smithay::reexports::wayland_server::backend::{ClientId, GlobalId};
+use smithay::backend::allocator::Buffer as _;
+use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
-use smithay::wayland::compositor::{with_states, Cacheable, SurfaceData};
+use smithay::wayland::compositor::{
+    add_pre_commit_hook, with_states, BufferAssignment, Cacheable, SurfaceAttributes, SurfaceData,
+};
+use smithay::wayland::dmabuf::get_dmabuf;
+use smithay::wayland::shm::with_buffer_contents;
 
 use crate::state::JffState;
 
@@ -194,8 +204,13 @@ impl ChromaLocation {
     }
 }
 
-/// Alpha modes clients are told they can use: what the renderer draws correctly.
-pub const SUPPORTED_ALPHA_MODES: &[AlphaMode] = &[AlphaMode::PremultipliedElectrical];
+/// Alpha modes clients are told they can use: what the renderer draws correctly. The default
+/// has to be there, it is what unset means. The others are converted to it by the shader.
+pub const SUPPORTED_ALPHA_MODES: &[AlphaMode] = &[
+    AlphaMode::PremultipliedElectrical,
+    AlphaMode::PremultipliedOptical,
+    AlphaMode::Straight,
+];
 
 /// What a driver turns a YUV buffer into RGB with when it is told nothing: BT.601, limited
 /// range. The shader corrects from this to what the client declared.
@@ -218,6 +233,46 @@ pub fn supported_coefficients(yuv: bool) -> Vec<(Coefficients, Range)> {
         }
     }
     pairs
+}
+
+/// Whether a pixel format (a DRM fourcc or a `wl_shm` format, by its `Debug` name such as
+/// `Nv12` or `Argb8888`) stores YCbCr rather than RGB. The names are what both enums share, so
+/// one test serves the two and does not depend on which variants a Smithay version has.
+pub fn format_is_yuv(format: impl std::fmt::Debug) -> bool {
+    let name = format!("{format:?}");
+    const PREFIXES: &[&str] = &[
+        "Yuyv", "Yvyu", "Uyvy", "Vyuy", "Nv", "P0", "P2", "P3", "Yuv", "Yvu", "Ayuv", "Avuy",
+        "Xyuv", "Xvuy", "Xvyu", "Vuy", "Q4", "Q0",
+    ];
+    // Y210, Y412, Y0l2 and the like. `Yu`/`Yv` are covered above.
+    let y_numbered = name
+        .strip_prefix('Y')
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| c.is_ascii_digit());
+    y_numbered || PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+}
+
+/// Whether the `pixel_format` error applies: `coefficients` is what a surface has pending and
+/// `yuv` whether its buffer is YUV. A YCbCr matrix wants a YUV buffer and `identity` an RGB one.
+/// Nothing set is nothing to check.
+pub fn pixel_format_conflict(yuv: bool, coefficients: Option<(u32, u32)>) -> bool {
+    let Some((coefficients, _)) = coefficients else {
+        return false;
+    };
+    match Coefficients::from_raw(coefficients) {
+        Some(Coefficients::Identity) => yuv,
+        Some(_) => !yuv,
+        None => false,
+    }
+}
+
+/// Whether the buffer is YUV. Only a dmabuf or a shm buffer can be, anything else (a single
+/// pixel buffer) is RGB.
+fn buffer_is_yuv(buffer: &WlBuffer) -> bool {
+    if let Ok(dmabuf) = get_dmabuf(buffer) {
+        return format_is_yuv(dmabuf.format().code);
+    }
+    with_buffer_contents(buffer, |_, _, data| format_is_yuv(data.format)).unwrap_or(false)
 }
 
 /// What a surface has set, as of its last commit.
@@ -281,6 +336,60 @@ pub fn color_representation_in(states: &SurfaceData) -> ColorRepresentation {
 /// Whether a surface has its extension object already, kept in its data map.
 #[derive(Default)]
 struct HasExtension(AtomicBool);
+
+/// What the `pixel_format` check needs of a surface, kept in its data map: the extension
+/// object to raise the error on, and whether the last buffer attached was YUV.
+#[derive(Default)]
+struct PixelFormatCheck {
+    object: Mutex<Option<WpColorRepresentationSurfaceV1>>,
+    yuv: Mutex<Option<bool>>,
+    /// The pre-commit hook is added once per surface, it outlives the extension object.
+    hooked: AtomicBool,
+}
+
+/// Raise `pixel_format` when what is pending now does not fit the buffer. Runs before the
+/// commit is applied, so the client is gone before it can be drawn wrong.
+fn check_pixel_format(surface: &WlSurface) {
+    let failing = with_states(surface, |states| {
+        let check = states.data_map.get::<PixelFormatCheck>()?;
+        let attached = states
+            .cached_state
+            .get::<SurfaceAttributes>()
+            .pending()
+            .buffer
+            .as_ref()
+            .and_then(|assignment| match assignment {
+                BufferAssignment::NewBuffer(buffer) => Some(buffer_is_yuv(buffer)),
+                _ => None,
+            });
+        let mut known = check.yuv.lock().ok()?;
+        if attached.is_some() {
+            *known = attached;
+        }
+        let yuv = (*known)?;
+        let coefficients = states
+            .cached_state
+            .get::<ColorRepresentationState>()
+            .pending()
+            .coefficients;
+        if !pixel_format_conflict(yuv, coefficients) {
+            return None;
+        }
+        let object = check.object.lock().ok()?.clone();
+        object.map(|object| (object, yuv))
+    });
+    if let Some((object, yuv)) = failing {
+        let message = if yuv {
+            "identity matrix coefficients on a YUV buffer"
+        } else {
+            "YCbCr matrix coefficients on an RGB buffer"
+        };
+        object.post_error(
+            wp_color_representation_surface_v1::Error::PixelFormat,
+            message,
+        );
+    }
+}
 
 pub struct ColorRepresentationManager {
     _global: GlobalId,
@@ -353,7 +462,26 @@ impl Dispatch<WpColorRepresentationManagerV1, ()> for JffState {
                     );
                     return;
                 }
-                data_init.init(id, ColorRepresentationSurface { surface });
+                let object = data_init.init(
+                    id,
+                    ColorRepresentationSurface {
+                        surface: surface.clone(),
+                    },
+                );
+                let hook_needed = with_states(&surface, |states| {
+                    let check = states
+                        .data_map
+                        .get_or_insert_threadsafe(PixelFormatCheck::default);
+                    if let Ok(mut slot) = check.object.lock() {
+                        *slot = Some(object);
+                    }
+                    !check.hooked.swap(true, Ordering::SeqCst)
+                });
+                if hook_needed {
+                    add_pre_commit_hook::<JffState, _>(&surface, |_state, _dh, surface| {
+                        check_pixel_format(surface);
+                    });
+                }
             }
             wp_color_representation_manager_v1::Request::Destroy => {}
             _ => {}
@@ -439,6 +567,11 @@ impl Dispatch<WpColorRepresentationSurfaceV1, ColorRepresentationSurface> for Jf
         with_states(&data.surface, |states| {
             if let Some(has) = states.data_map.get::<HasExtension>() {
                 has.0.store(false, Ordering::SeqCst);
+            }
+            if let Some(check) = states.data_map.get::<PixelFormatCheck>() {
+                if let Ok(mut slot) = check.object.lock() {
+                    *slot = None;
+                }
             }
             if states.cached_state.has::<ColorRepresentationState>() {
                 let mut cached = states.cached_state.get::<ColorRepresentationState>();

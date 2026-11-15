@@ -2,9 +2,10 @@
 //! tells clients it supports.
 
 use jff_wm::protocol::color_representation::{
-    supported_coefficients, AlphaMode, ChromaLocation, Coefficients, ColorRepresentation, Range,
-    DRIVER_COEFFICIENTS, SUPPORTED_ALPHA_MODES,
+    format_is_yuv, pixel_format_conflict, supported_coefficients, AlphaMode, ChromaLocation,
+    Coefficients, ColorRepresentation, Range, DRIVER_COEFFICIENTS, SUPPORTED_ALPHA_MODES,
 };
+use smithay::backend::allocator::Fourcc;
 
 #[test]
 fn alpha_modes_have_the_protocol_values() {
@@ -49,10 +50,16 @@ fn a_surface_with_nothing_set_is_premultiplied_and_leaves_the_rest_to_the_compos
 }
 
 #[test]
-fn without_yuv_only_rgb_is_advertised() {
-    // The default alpha mode has to be there, it is what unset means.
+fn every_alpha_mode_is_advertised() {
+    // The default one is what unset means, the shader turns the other two into it.
     assert!(SUPPORTED_ALPHA_MODES.contains(&AlphaMode::default()));
-    assert!(!SUPPORTED_ALPHA_MODES.contains(&AlphaMode::Straight));
+    assert!(SUPPORTED_ALPHA_MODES.contains(&AlphaMode::PremultipliedOptical));
+    assert!(SUPPORTED_ALPHA_MODES.contains(&AlphaMode::Straight));
+    assert_eq!(SUPPORTED_ALPHA_MODES.len(), 3);
+}
+
+#[test]
+fn without_yuv_only_rgb_is_advertised() {
     assert_eq!(
         supported_coefficients(false),
         [(Coefficients::Identity, Range::Full)]
@@ -92,4 +99,34 @@ fn luma_weights_sum_below_one_and_the_driver_default_is_known() {
     }
     assert_eq!(Coefficients::Bt709.luma_weights(), Some((0.2126, 0.0722)));
     assert_eq!(DRIVER_COEFFICIENTS, (Coefficients::Bt601, Range::Limited));
+}
+
+#[test]
+fn yuv_formats_are_told_from_rgb_ones() {
+    for yuv in [Fourcc::Nv12, Fourcc::Yuyv, Fourcc::Yuv420, Fourcc::P010] {
+        assert!(format_is_yuv(yuv), "{yuv:?}");
+    }
+    for rgb in [
+        Fourcc::Argb8888,
+        Fourcc::Xrgb8888,
+        Fourcc::Abgr8888,
+        Fourcc::Abgr2101010,
+        Fourcc::Rgb565,
+    ] {
+        assert!(!format_is_yuv(rgb), "{rgb:?}");
+    }
+}
+
+#[test]
+fn a_matrix_has_to_fit_the_buffer_format() {
+    let identity = Some((Coefficients::Identity.raw(), Range::Full.raw()));
+    let bt709 = Some((Coefficients::Bt709.raw(), Range::Limited.raw()));
+    // A YCbCr matrix is for YUV buffers, `identity` for RGB ones.
+    assert!(!pixel_format_conflict(true, bt709));
+    assert!(pixel_format_conflict(false, bt709));
+    assert!(!pixel_format_conflict(false, identity));
+    assert!(pixel_format_conflict(true, identity));
+    // Nothing set, nothing to contradict, whatever the buffer is.
+    assert!(!pixel_format_conflict(true, None));
+    assert!(!pixel_format_conflict(false, None));
 }

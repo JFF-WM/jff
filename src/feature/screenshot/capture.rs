@@ -693,6 +693,18 @@ impl JffState {
                 conversions.extend(gamut::conversions(popup.wl_surface(), &color));
             }
         }
+        // Straight or optical alpha is converted whether the picture is color managed or not.
+        let mut alpha_modes = Vec::new();
+        if let Some(toplevel) = window.toplevel() {
+            alpha_modes.extend(crate::render::effects::pixel_alpha::modes(
+                toplevel.wl_surface(),
+            ));
+            for (popup, _) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
+                alpha_modes.extend(crate::render::effects::pixel_alpha::modes(
+                    popup.wl_surface(),
+                ));
+            }
+        }
         let renderer = self.backend.renderer();
         // A client's fade (wp_alpha_modifier_v1) is applied per surface on top of the 1.0, so
         // the picture shows the window as it looks on screen, translucent where it is faded.
@@ -702,7 +714,8 @@ impl JffState {
         let mut elements: Vec<JffElement> = Vec::new();
         for surface in surfaces {
             let conversion = gamut::find(&conversions, surface.id());
-            match gamut::masked(&mut *renderer, None, conversion) {
+            let alpha_mode = crate::render::effects::pixel_alpha::find(&alpha_modes, surface.id());
+            match gamut::masked(&mut *renderer, None, conversion, alpha_mode) {
                 Some(mask) => elements.push(mask.wrap(surface)),
                 None => elements.push(JffElement::from(surface)),
             }

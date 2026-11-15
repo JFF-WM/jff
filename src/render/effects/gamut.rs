@@ -38,6 +38,9 @@ use smithay::wayland::compositor::{with_surface_tree_downward, TraversalAction};
 
 use crate::primitives::color::{ContentLight, ImageDescription, RenderIntent};
 use crate::primitives::gamut::Conversion;
+use crate::protocol::color_representation::AlphaMode;
+
+use super::pixel_alpha;
 use crate::protocol::color_management::{surface_color_in, OutputColor, WorkingSpace};
 use crate::render::effects::rounded::Rounding;
 use crate::render::elements::JffElement;
@@ -256,15 +259,26 @@ pub fn masked(
     renderer: &mut GlesRenderer,
     base: Option<&Rounding>,
     conversion: Option<Conversion>,
+    alpha_mode: AlphaMode,
 ) -> Option<Rounding> {
-    match (base, conversion) {
+    let plain = alpha_mode == AlphaMode::default();
+    let mask = match (base, conversion) {
         (Some(base), Some(conversion)) => Some(base.clone().with_conversion(conversion)),
         (Some(base), None) => Some(base.clone()),
         (None, Some(conversion)) => {
             Rounding::passthrough(renderer).map(|mask| mask.with_conversion(conversion))
         }
+        // Straight or optical alpha is converted by the shader even with nothing else to do.
+        (None, None) if !plain => Rounding::passthrough(renderer),
         (None, None) => None,
-    }
+    };
+    mask.map(|mask| {
+        if plain {
+            mask
+        } else {
+            mask.with_alpha_mode(alpha_mode)
+        }
+    })
 }
 
 /// Push the elements of a surface tree rooted at `root`, converting the surfaces that need it
@@ -278,13 +292,15 @@ pub fn wrap_surfaces(
 ) {
     note_content_light(root);
     let found = tree_conversions(root);
-    if found.is_empty() {
+    let modes = pixel_alpha::modes(root);
+    if found.is_empty() && modes.is_empty() {
         out.extend(elements.into_iter().map(JffElement::from));
         return;
     }
     for element in elements {
         let conversion = find(&found, element.id());
-        match masked(renderer, None, conversion) {
+        let alpha_mode = pixel_alpha::find(&modes, element.id());
+        match masked(renderer, None, conversion, alpha_mode) {
             Some(mask) => out.push(mask.wrap(element)),
             None => out.push(JffElement::from(element)),
         }

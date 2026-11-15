@@ -12,6 +12,8 @@
 //!
 //! * `yuv`: which surfaces need their YUV colors fixed (`color-representation { yuv }`), applied
 //!   by the same shader as `rounded`.
+//! * `pixel_alpha`: which surfaces declared straight or optical alpha, converted by the same
+//!   shader.
 //! * `gamut`: which surfaces need their colors converted to the monitor's (wp-color-management):
 //!   those a client tagged with other colors, and with `color-management { convert-srgb }` plain
 //!   sRGB ones too, converted by the same shader. Nothing runs for a surface that needs nothing,
@@ -41,6 +43,7 @@ pub mod border;
 pub mod framebuffer_effect;
 pub mod gamut;
 pub mod hdr;
+pub mod pixel_alpha;
 pub mod rounded;
 pub mod surface_alpha;
 pub mod yuv;

@@ -41,6 +41,7 @@ use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Transfo
 
 use crate::primitives::gamut::Conversion;
 use crate::primitives::yuv::Correction;
+use crate::protocol::color_representation::AlphaMode;
 use crate::render::elements::JffElement;
 
 const SHADER: &str = include_str!("shaders/rounded.frag");
@@ -68,6 +69,7 @@ fn program(renderer: &mut GlesRenderer) -> Option<GlesTexProgram> {
                 UniformName::new("ycc_b", UniformType::_3f),
                 UniformName::new("ycc_off", UniformType::_3f),
                 UniformName::new("ycc_on", UniformType::_1f),
+                UniformName::new("alpha_mode", UniformType::_1f),
                 UniformName::new("cm_r", UniformType::_3f),
                 UniformName::new("cm_g", UniformType::_3f),
                 UniformName::new("cm_b", UniformType::_3f),
@@ -134,6 +136,8 @@ pub struct Rounding {
     radius: i32,
     /// Fixes the colors of a YUV buffer the driver converted with another matrix or range.
     correction: Option<Correction>,
+    /// How the surface's alpha relates to its color, when it is not what the blending wants.
+    alpha_mode: AlphaMode,
     /// Converts the surface's colors to those of the output (wp-color-management).
     conversion: Option<Conversion>,
 }
@@ -147,6 +151,7 @@ impl Rounding {
             geo: Rectangle::new((-100_000, -100_000).into(), (200_000, 200_000).into()),
             radius: 0,
             correction: None,
+            alpha_mode: AlphaMode::default(),
             conversion: None,
         })
     }
@@ -154,6 +159,13 @@ impl Rounding {
     /// The same, and also fix the colors of a YUV buffer with `correction`.
     pub fn with_correction(mut self, correction: Correction) -> Self {
         self.correction = Some(correction);
+        self
+    }
+
+    /// The same, and also turn straight or optical alpha into the premultiplied electrical alpha
+    /// the blending expects.
+    pub fn with_alpha_mode(mut self, alpha_mode: AlphaMode) -> Self {
+        self.alpha_mode = alpha_mode;
         self
     }
 
@@ -184,6 +196,7 @@ impl Rounding {
             geo,
             radius,
             correction: None,
+            alpha_mode: AlphaMode::default(),
             conversion: None,
         })
     }
@@ -199,6 +212,7 @@ impl Rounding {
             thumb,
             self.radius
                 .wrapping_add(self.correction.map_or(0, |fix| fix.tag()))
+                .wrapping_add((self.alpha_mode.raw() as i32).wrapping_mul(7919))
                 .wrapping_add(self.conversion.map_or(0, |conversion| conversion.tag())),
         );
         // A live surface's content light counts under the id it is drawn as. A thumbnail's does not: it is not the window.
@@ -242,6 +256,7 @@ impl Rounding {
             ]),
             None => uniforms.push(Uniform::new("ycc_on", 0.0f32)),
         }
+        uniforms.push(Uniform::new("alpha_mode", self.alpha_mode.raw() as f32));
         match self.conversion {
             Some(conversion) => uniforms.extend([
                 Uniform::new("cm_r", conversion.rows[0]),

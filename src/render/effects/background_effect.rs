@@ -35,6 +35,7 @@ use crate::primitives::region::region_to_non_overlapping_rects;
 use crate::primitives::region::TransformedRegion;
 use crate::protocol::background_effect::get_cached_blur_region;
 use crate::protocol::color_management::OutputColor;
+use crate::protocol::color_representation::AlphaMode;
 use crate::render::elements::JffElement;
 
 #[derive(Debug)]
@@ -420,7 +421,11 @@ pub fn window_elements(
         }
         _ => Vec::new(),
     };
-    let fixing = !fixes.is_empty() || !conversions.is_empty();
+    // Surfaces with straight or optical alpha are converted to premultiplied by the shader.
+    let alpha_modes = toplevel
+        .map(|toplevel| super::pixel_alpha::modes(toplevel.wl_surface()))
+        .unwrap_or_default();
+    let fixing = !fixes.is_empty() || !conversions.is_empty() || !alpha_modes.is_empty();
 
     // Without blur, rounding and color fixes (or for an X11 window) there's nothing to
     // interleave.
@@ -467,10 +472,16 @@ pub fn window_elements(
             .iter()
             .find(|(id, _)| id == element.id())
             .map(|(_, conversion)| *conversion);
+        let alpha_mode = super::pixel_alpha::find(&alpha_modes, element.id());
         // A surface with nothing to fix or convert, on a square window, is drawn as it is.
         match rounding.as_ref().or(passthrough.as_ref()) {
-            Some(mask) if rounding.is_some() || fix.is_some() || conversion.is_some() => {
-                let mut mask = mask.clone();
+            Some(mask)
+                if rounding.is_some()
+                    || fix.is_some()
+                    || conversion.is_some()
+                    || alpha_mode != AlphaMode::default() =>
+            {
+                let mut mask = mask.clone().with_alpha_mode(alpha_mode);
                 if let Some(fix) = fix {
                     mask = mask.with_correction(fix);
                 }
@@ -544,10 +555,15 @@ fn scaled_window(
         }
         _ => Vec::new(),
     };
+    let alpha_modes = window
+        .toplevel()
+        .map(|toplevel| super::pixel_alpha::modes(toplevel.wl_surface()))
+        .unwrap_or_default();
     let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
         window.render_elements(&mut *renderer, from, scale, open.alpha);
     for surface in surfaces {
         let conversion = gamut::find(&conversions, surface.id());
+        let alpha_mode = super::pixel_alpha::find(&alpha_modes, surface.id());
         let shrunk = RescaleRenderElement::from_element(
             surface,
             Point::<i32, Physical>::from((0, 0)),
@@ -555,7 +571,7 @@ fn scaled_window(
         );
         let placed = RelocateRenderElement::from_element(shrunk, slot, Relocate::Relative);
         out.push(
-            match gamut::masked(&mut *renderer, rounding.as_ref(), conversion) {
+            match gamut::masked(&mut *renderer, rounding.as_ref(), conversion, alpha_mode) {
                 Some(mask) => mask.wrap_thumb(placed),
                 None => JffElement::Thumb(placed),
             },

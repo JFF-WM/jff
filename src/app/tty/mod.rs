@@ -1916,7 +1916,8 @@ impl JffState {
                         } else {
                             None
                         },
-                        effects: !crate::render::effects::yuv::corrections(&surface).is_empty(),
+                        effects: !crate::render::effects::yuv::corrections(&surface).is_empty()
+                            || !crate::render::effects::pixel_alpha::modes(&surface).is_empty(),
                         tag,
                         buffer_format,
                         swapchain_format: lit.compositor.format() as u32,
