@@ -67,7 +67,7 @@ use crate::feature::outputs::{output_rect, Monitor, MonitorMode};
 use crate::feature::overview_mode::{overview_drag_elements, overview_elements};
 use crate::feature::screenshot::screenshot_elements;
 use crate::primitives::color::ImageDescription;
-use crate::primitives::edid::{self, Edid};
+use crate::primitives::edid::{self, Edid, Identity};
 use crate::primitives::frame_clock::{next_presentation_time, wait_until, FALLBACK_REFRESH};
 use crate::primitives::hdr::{self, KernelSupport, OutputEotf, Status, Unavailable};
 use crate::primitives::hdr_output::{self, FinalPass};
@@ -485,7 +485,7 @@ fn pick_mode(info: &connector::Info, request: Option<ModeRequest>) -> Option<Drm
 }
 
 /// Mode list for output management, deduplicated (DRM can list a size and refresh twice).
-fn monitor_of(info: &connector::Info, name: String) -> Monitor {
+fn monitor_of(info: &connector::Info, name: String, identity: Identity) -> Monitor {
     let mut modes: Vec<MonitorMode> = Vec::new();
     for m in info.modes() {
         let refresh = Mode::from(m.clone()).refresh;
@@ -509,6 +509,7 @@ fn monitor_of(info: &connector::Info, name: String) -> Monitor {
         name,
         size_mm: (pw as i32, ph as i32),
         modes,
+        identity,
     }
 }
 
@@ -623,8 +624,8 @@ fn is_non_desktop(drm: &DrmDevice, connector: connector::Handle) -> bool {
     })
 }
 
-/// The connector's EDID, parsed. `None` when it has none or it is not an EDID.
-fn read_edid(drm: &DrmDevice, connector: connector::Handle) -> Option<Edid> {
+/// The connector's EDID as the kernel hands it over. `None` when the connector has none.
+fn read_edid_bytes(drm: &DrmDevice, connector: connector::Handle) -> Option<Vec<u8>> {
     let props = drm.get_properties(connector).ok()?;
     let (handles, values) = props.as_props_and_values();
     let blob = handles.iter().zip(values).find_map(|(&handle, &value)| {
@@ -634,8 +635,17 @@ fn read_edid(drm: &DrmDevice, connector: connector::Handle) -> Option<Edid> {
     if blob == 0 {
         return None;
     }
-    let bytes = drm.get_property_blob(blob).ok()?;
-    edid::parse(&bytes).ok()
+    drm.get_property_blob(blob).ok()
+}
+
+/// The connector's EDID, parsed. `None` when it has none or it is not an EDID.
+fn read_edid(drm: &DrmDevice, connector: connector::Handle) -> Option<Edid> {
+    edid::parse(&read_edid_bytes(drm, connector)?).ok()
+}
+
+/// Who made the monitor and which one it is. Empty when there is no usable EDID.
+fn read_identity(drm: &DrmDevice, connector: connector::Handle) -> Identity {
+    read_edid_bytes(drm, connector).map_or_else(Identity::default, |bytes| edid::identity(&bytes))
 }
 
 /// The connector state that signals HDR: BT.2020 RGB, PQ (or HLG), and the plan's metadata.
@@ -805,6 +815,15 @@ impl Tty {
             .any(|lit| lit.output == *output && lit.vrr_on)
     }
 
+    /// Whether the monitor and driver can do variable refresh rate on `output`. `None` if it
+    /// isn't lit: that is only known once there is a compositor for it.
+    pub fn vrr_capable(&self, output: &Output) -> Option<bool> {
+        self.outputs
+            .values()
+            .find(|lit| lit.output == *output)
+            .map(|lit| !matches!(lit.vrr_support, VrrSupport::NotSupported))
+    }
+
     /// Connected monitors as of the last scan, lit or not.
     pub fn monitors(&self) -> &[Monitor] {
         &self.monitors
@@ -961,7 +980,8 @@ impl Tty {
                 continue;
             }
             let name = connector_name(&info);
-            monitors.push(monitor_of(&info, name.clone()));
+            let identity = read_identity(&self.drm, conn);
+            monitors.push(monitor_of(&info, name.clone(), identity));
             let wanted = config.output(&name);
             if wanted.is_some_and(|c| c.off) {
                 continue;
@@ -1052,14 +1072,16 @@ impl Tty {
         );
 
         let (pw, ph) = info.size().unwrap_or((0, 0));
+        // What clients and output profiles (kanshi) match a monitor on.
+        let identity = read_identity(&self.drm, info.handle());
         let output = Output::new(
             name.to_string(),
             PhysicalProperties {
                 size: (pw as i32, ph as i32).into(),
                 subpixel: Subpixel::Unknown,
-                make: "jff".into(),
-                model: name.to_string(),
-                serial_number: "Unknown".into(),
+                make: identity.make().into(),
+                model: identity.model().into(),
+                serial_number: identity.serial().into(),
             },
         );
         let wl_mode = Mode::from(drm_mode.clone());

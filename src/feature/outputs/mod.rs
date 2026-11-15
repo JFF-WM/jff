@@ -12,6 +12,7 @@ use smithay::wayland::fractional_scale::with_fractional_scale;
 
 use crate::config::{ModeRequest, RuleOutput, WindowRule};
 use crate::desk::{Side, WindowMode};
+use crate::primitives::edid::Identity;
 use crate::primitives::geom;
 use crate::primitives::layout::{self, Rect};
 use crate::state::JffState;
@@ -35,16 +36,32 @@ pub struct MonitorMode {
 }
 
 /// A connected monitor, lit or not, and its modes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Monitor {
     /// Connector name, like `DP-1`.
     pub name: String,
     /// Physical size in mm, `(0, 0)` when unknown.
     pub size_mm: (i32, i32),
     pub modes: Vec<MonitorMode>,
+    /// Who made it and which one it is, from its EDID.
+    pub identity: Identity,
 }
 
 impl Monitor {
+    /// What a person would call the monitor: `make model (name)`, or just the connector name
+    /// when the EDID says neither make nor model.
+    pub fn description(&self) -> String {
+        if self.identity.make.is_none() && self.identity.model.is_none() {
+            return self.name.clone();
+        }
+        format!(
+            "{} {} ({})",
+            self.identity.make(),
+            self.identity.model(),
+            self.name
+        )
+    }
+
     /// Whether the monitor offers the requested size (and refresh, when one is given).
     pub fn has_mode(&self, request: &ModeRequest) -> bool {
         self.modes.iter().any(|m| {

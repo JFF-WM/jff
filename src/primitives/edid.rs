@@ -1,4 +1,5 @@
 //! What a monitor's EDID says about color: its primaries, the CTA colorimetry block and the HDR static metadata block.
+//! Also who made the monitor and which one it is (`identity`), which is what output profiles are matched on.
 
 /// Size of one EDID block.
 const BLOCK: usize = 128;
@@ -17,6 +18,18 @@ const EXT_COLORIMETRY: u8 = 5;
 
 /// Extended tag of the HDR static metadata data block.
 const EXT_HDR_STATIC_METADATA: u8 = 6;
+
+/// Where the four 18-byte descriptors start in the base block.
+const DESCRIPTORS: [usize; 4] = [54, 72, 90, 108];
+
+/// Descriptor tag of the monitor's product name.
+const DESC_NAME: u8 = 0xfc;
+
+/// Descriptor tag of the monitor's serial number as text.
+const DESC_SERIAL: u8 = 0xff;
+
+/// What an identity part says when the EDID has nothing for it, the word other compositors use.
+const UNKNOWN: &str = "Unknown";
 
 /// Why bytes are not an EDID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,4 +251,93 @@ fn parse_hdr_static_metadata(body: &[u8]) -> HdrStaticMetadata {
             .zip(body.get(4).copied())
             .map(|(max, code)| min_luminance_nits(code, max)),
     }
+}
+
+/// Who made a monitor and which one it is, from the base block of its EDID. Each part is `None`
+/// when the EDID leaves it out.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Identity {
+    /// The manufacturer's PNP ID, three capital letters like `DEL`. Not spelled out: that needs the
+    /// whole PNP registry.
+    pub make: Option<String>,
+    /// The product name.
+    pub model: Option<String>,
+    /// The serial number text, or the number of the base block when there is no text.
+    pub serial: Option<String>,
+}
+
+impl Identity {
+    /// The make, or what clients are told when there is none.
+    pub fn make(&self) -> &str {
+        self.make.as_deref().unwrap_or(UNKNOWN)
+    }
+
+    /// The model, or what clients are told when there is none.
+    pub fn model(&self) -> &str {
+        self.model.as_deref().unwrap_or(UNKNOWN)
+    }
+
+    /// The serial number, or what clients are told when there is none.
+    pub fn serial(&self) -> &str {
+        self.serial.as_deref().unwrap_or(UNKNOWN)
+    }
+}
+
+/// Read who made a monitor and which one it is. Bytes that are no EDID give an empty identity.
+pub fn identity(bytes: &[u8]) -> Identity {
+    if bytes.len() < BLOCK || bytes[..8] != HEADER {
+        return Identity::default();
+    }
+    let mut identity = Identity {
+        make: pnp_id([bytes[8], bytes[9]]),
+        ..Identity::default()
+    };
+    let number = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+    if number != 0 {
+        identity.serial = Some(number.to_string());
+    }
+    for start in DESCRIPTORS {
+        let descriptor = &bytes[start..start + 18];
+        // A display descriptor starts with three zero bytes, a detailed timing does not.
+        if descriptor[..3] != [0, 0, 0] {
+            continue;
+        }
+        let text = descriptor_text(&descriptor[5..]);
+        match descriptor[3] {
+            DESC_NAME => identity.model = text.or(identity.model),
+            // The text is the serial number when there is one, the number is a poor second.
+            DESC_SERIAL if text.is_some() => identity.serial = text,
+            _ => {}
+        }
+    }
+    identity
+}
+
+/// The three letters packed into two bytes, five bits each with `A` as 1. `None` for anything else.
+fn pnp_id(bytes: [u8; 2]) -> Option<String> {
+    let packed = u16::from_be_bytes(bytes);
+    [10, 5, 0]
+        .into_iter()
+        .map(|shift| {
+            let letter = ((packed >> shift) & 0x1f) as u8;
+            (1..=26)
+                .contains(&letter)
+                .then(|| char::from(b'A' + letter - 1))
+        })
+        .collect()
+}
+
+/// The text of a descriptor: it ends at a newline, is padded with spaces, and is plain ASCII.
+fn descriptor_text(bytes: &[u8]) -> Option<String> {
+    let end = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(bytes.len());
+    let text: String = bytes[..end]
+        .iter()
+        .filter(|b| (0x20..0x7f).contains(*b))
+        .map(|&b| char::from(b))
+        .collect();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }

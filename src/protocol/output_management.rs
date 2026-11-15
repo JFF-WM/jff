@@ -2,8 +2,17 @@
 //! change their mode, position, and on/off state while jff runs.
 //!
 //! Changes go through the in-memory `Config`, exactly as if they'd been written in the `outputs`
-//! block of the config file, so they last until the config is reloaded. Scale and adaptive sync
-//! aren't supported: a configuration asking for them is reported as failed.
+//! block of the config file, so they last until the config is reloaded. Scale isn't supported,
+//! jff draws every monitor at 1: a configuration asking for another one is reported as failed.
+//!
+//! Adaptive sync (version 4) is the config's `adaptive-sync`. A head says it is enabled for
+//! `fullscreen` as well as `always`, since VRR runs whenever a window wants it. A client that
+//! asks for what it was told leaves the setting alone, so one that sends every head back as it
+//! found it doesn't turn `fullscreen` into something else. Asking for `enabled` otherwise sets
+//! `always`, `disabled` sets `off`.
+//!
+//! Make, model and serial number are the monitor's EDID, the same strings `wl_output` has, so a
+//! profile keyed on them (kanshi) can match. The make is the three-letter PNP ID.
 //!
 //! Units: the protocol speaks mHz for refresh rates, the config speaks whole Hz. Conversion
 //! happens at the edge (see `mhz_to_hz`).
@@ -13,7 +22,7 @@ use std::sync::Mutex;
 use smithay::reexports::wayland_protocols_wlr::output_management::v1::server::{
     zwlr_output_configuration_head_v1::{self, ZwlrOutputConfigurationHeadV1},
     zwlr_output_configuration_v1::{self, ZwlrOutputConfigurationV1},
-    zwlr_output_head_v1::ZwlrOutputHeadV1,
+    zwlr_output_head_v1::{self, ZwlrOutputHeadV1},
     zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
     zwlr_output_mode_v1::ZwlrOutputModeV1,
 };
@@ -24,12 +33,13 @@ use smithay::reexports::wayland_server::{
 };
 
 use crate::app::Backend;
-use crate::config::{ModeRequest, OutputTransform};
+use crate::config::{ModeRequest, OutputTransform, Vrr};
 use crate::feature::outputs::{mhz_to_hz, Monitor, MonitorMode};
+use crate::primitives::edid::Identity;
 use crate::state::JffState;
 
-/// Highest version jff speaks. 4 adds adaptive sync, which we don't have.
-const VERSION: u32 = 3;
+/// Highest version jff speaks. 4 adds adaptive sync.
+const VERSION: u32 = 4;
 
 /// One manager object a client bound, and the heads announced on it.
 struct ManagerEntry {
@@ -68,6 +78,27 @@ struct HeadState {
     current: Option<usize>,
     position: (i32, i32),
     transform: Transform,
+    /// The `adaptive-sync` setting.
+    vrr: Vrr,
+    /// Whether the monitor can do VRR, `None` while it is dark and nothing says.
+    vrr_capable: Option<bool>,
+}
+
+/// Whether a head counts as having adaptive sync on, which is what `adaptive_sync` tells clients.
+pub fn adaptive_sync_enabled(vrr: Vrr, capable: Option<bool>) -> bool {
+    vrr != Vrr::Off && capable != Some(false)
+}
+
+/// The `adaptive-sync` setting after a client asked for VRR on or off, `None` when the monitor
+/// can't do what is asked. Asking for what the head already shows changes nothing.
+pub fn vrr_for_request(current: Vrr, capable: Option<bool>, want: bool) -> Option<Vrr> {
+    if want && capable == Some(false) {
+        return None;
+    }
+    if want == adaptive_sync_enabled(current, capable) {
+        return Some(current);
+    }
+    Some(if want { Vrr::Always } else { Vrr::Off })
 }
 
 /// User data of a mode object.
@@ -86,6 +117,8 @@ pub struct HeadRequest {
     mode: Option<ModeRequest>,
     position: Option<(i32, i32)>,
     transform: Option<Transform>,
+    /// Adaptive sync on or off.
+    adaptive_sync: Option<bool>,
     /// Something jff can't do (scale) was asked for.
     unsupported: bool,
 }
@@ -127,7 +160,13 @@ fn announce(
         };
         manager.head(&head);
         head.name(monitor.name.clone());
-        head.description(monitor.name.clone());
+        // Description, make, model and serial number came with version 2.
+        if version >= 2 {
+            head.description(monitor.description());
+            head.make(monitor.identity.make().to_string());
+            head.model(monitor.identity.model().to_string());
+            head.serial_number(monitor.identity.serial().to_string());
+        }
         if monitor.size_mm != (0, 0) {
             head.physical_size(monitor.size_mm.0, monitor.size_mm.1);
         }
@@ -162,6 +201,13 @@ fn announce(
             head.position(state.position.0, state.position.1);
             head.transform(state.transform);
             head.scale(1.0);
+            if version >= 4 {
+                head.adaptive_sync(if adaptive_sync_enabled(state.vrr, state.vrr_capable) {
+                    zwlr_output_head_v1::AdaptiveSyncState::Enabled
+                } else {
+                    zwlr_output_head_v1::AdaptiveSyncState::Disabled
+                });
+            }
         }
         announced.push((head, modes));
     }
@@ -191,6 +237,14 @@ impl JffState {
                             preferred: true,
                         })
                         .collect(),
+                    identity: {
+                        let props = output.physical_properties();
+                        Identity {
+                            make: Some(props.make),
+                            model: Some(props.model),
+                            serial: Some(props.serial_number),
+                        }
+                    },
                 })
                 .collect(),
         }
@@ -216,15 +270,32 @@ impl JffState {
                     })
                     .unwrap_or((0, 0));
                 let transform = output.map_or(Transform::Normal, |o| o.current_transform().into());
+                let (vrr, vrr_capable) = self.vrr_state(&monitor.name);
                 HeadState {
                     enabled: output.is_some(),
                     current,
                     position,
                     transform,
+                    vrr,
+                    vrr_capable,
                     monitor,
                 }
             })
             .collect()
+    }
+
+    /// The `adaptive-sync` setting of the monitor called `name`, and whether it can do VRR.
+    fn vrr_state(&self, name: &str) -> (Vrr, Option<bool>) {
+        let vrr = self.config.output(name).map(|c| c.vrr).unwrap_or_default();
+        let capable = match &self.backend {
+            Backend::Tty(tty) => self
+                .outputs
+                .iter()
+                .find(|o| o.name() == name)
+                .and_then(|o| tty.vrr_capable(o)),
+            Backend::Winit(_) => Some(false),
+        };
+        (vrr, capable)
     }
 
     /// Tell every client that bound the protocol how the monitors look now. Old heads are
@@ -267,6 +338,12 @@ impl JffState {
                 if request.unsupported {
                     return false;
                 }
+                if let (true, Some(want)) = (request.enabled, request.adaptive_sync) {
+                    let (vrr, capable) = self.vrr_state(&monitor.name);
+                    if vrr_for_request(vrr, capable, want).is_none() {
+                        return false;
+                    }
+                }
                 if let (true, Some(mode)) = (request.enabled, &request.mode) {
                     if !monitor.has_mode(mode) {
                         return false;
@@ -287,9 +364,16 @@ impl JffState {
             return false;
         }
         for request in requests {
+            let (current, capable) = self.vrr_state(&request.name);
+            let vrr = request
+                .adaptive_sync
+                .and_then(|want| vrr_for_request(current, capable, want));
             self.config.update_output(&request.name, |config| {
                 config.off = !request.enabled;
                 if request.enabled {
+                    if let Some(vrr) = vrr {
+                        config.vrr = vrr;
+                    }
                     if let Some(mode) = request.mode {
                         config.mode = Some(mode);
                     }
@@ -488,7 +572,7 @@ impl Dispatch<ZwlrOutputConfigurationHeadV1, HeadConfigData> for JffState {
     fn request(
         _state: &mut JffState,
         _client: &Client,
-        _resource: &ZwlrOutputConfigurationHeadV1,
+        resource: &ZwlrOutputConfigurationHeadV1,
         request: zwlr_output_configuration_head_v1::Request,
         data: &HeadConfigData,
         _display: &DisplayHandle,
@@ -537,6 +621,18 @@ impl Dispatch<ZwlrOutputConfigurationHeadV1, HeadConfigData> for JffState {
                     WEnum::Unknown(_) => head.unsupported = true,
                 }
             }
+            zwlr_output_configuration_head_v1::Request::SetAdaptiveSync { state } => match state {
+                WEnum::Value(zwlr_output_head_v1::AdaptiveSyncState::Enabled) => {
+                    head.adaptive_sync = Some(true)
+                }
+                WEnum::Value(zwlr_output_head_v1::AdaptiveSyncState::Disabled) => {
+                    head.adaptive_sync = Some(false)
+                }
+                _ => resource.post_error(
+                    zwlr_output_configuration_head_v1::Error::InvalidAdaptiveSyncState,
+                    "invalid adaptive sync state",
+                ),
+            },
             zwlr_output_configuration_head_v1::Request::SetScale { scale } => {
                 if (scale - 1.0).abs() > 1e-6 {
                     head.unsupported = true;

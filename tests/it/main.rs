@@ -33,6 +33,7 @@ mod layout;
 mod layout_template;
 mod logging;
 mod osd;
+mod output_management;
 mod outputs;
 mod overview_grid;
 mod overview_mode;

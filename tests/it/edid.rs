@@ -206,3 +206,79 @@ fn a_minimum_code_in_the_edid_reaches_the_infoframe() {
     assert_eq!(plan.max_luminance, 400);
     assert_eq!(plan.min_luminance, 1600);
 }
+
+/// Write a descriptor of `tag` with `text` into slot `slot` (0 to 3) of a base block.
+fn descriptor(bytes: &mut [u8], slot: usize, tag: u8, text: &str) {
+    let start = 54 + 18 * slot;
+    bytes[start..start + 18].fill(0);
+    bytes[start + 3] = tag;
+    // Text ends at a newline and is padded with spaces to 13 bytes.
+    let mut field = format!("{text}\n").into_bytes();
+    field.resize(13, b' ');
+    bytes[start + 5..start + 18].copy_from_slice(&field);
+}
+
+/// The two bytes of a three-letter PNP ID.
+fn pnp(letters: &str) -> [u8; 2] {
+    let packed = letters
+        .bytes()
+        .fold(0u16, |acc, b| (acc << 5) | u16::from(b - b'A' + 1));
+    packed.to_be_bytes()
+}
+
+#[test]
+fn the_identity_has_make_model_and_serial() {
+    let mut bytes = base(0);
+    bytes[8..10].copy_from_slice(&pnp("DEL"));
+    descriptor(&mut bytes, 1, 0xfc, "DELL U2720Q");
+    descriptor(&mut bytes, 2, 0xff, "ABC123");
+    let identity = edid::identity(&bytes);
+    assert_eq!(identity.make.as_deref(), Some("DEL"));
+    assert_eq!(identity.model.as_deref(), Some("DELL U2720Q"));
+    assert_eq!(identity.serial.as_deref(), Some("ABC123"));
+}
+
+#[test]
+fn the_serial_text_wins_over_the_number() {
+    let mut bytes = base(0);
+    bytes[12..16].copy_from_slice(&1234u32.to_le_bytes());
+    assert_eq!(edid::identity(&bytes).serial.as_deref(), Some("1234"));
+    descriptor(&mut bytes, 0, 0xff, "SN-77");
+    assert_eq!(edid::identity(&bytes).serial.as_deref(), Some("SN-77"));
+}
+
+#[test]
+fn what_the_edid_leaves_out_reads_as_unknown() {
+    // A base block with a header and nothing else: the PNP ID bytes are zero, which is no letters.
+    let identity = edid::identity(&base(0));
+    assert_eq!(identity.make, None);
+    assert_eq!(identity.model, None);
+    assert_eq!(identity.serial, None);
+    assert_eq!(identity.make(), "Unknown");
+    assert_eq!(identity.model(), "Unknown");
+    assert_eq!(identity.serial(), "Unknown");
+}
+
+#[test]
+fn a_detailed_timing_is_not_taken_for_a_descriptor() {
+    let mut bytes = base(0);
+    // A pixel clock in the first two bytes: this is a timing, whatever byte 3 holds.
+    bytes[54] = 0x01;
+    bytes[57] = 0xfc;
+    bytes[59..72].copy_from_slice(b"not a name   ");
+    assert_eq!(edid::identity(&bytes).model, None);
+}
+
+#[test]
+fn identity_text_is_trimmed_and_plain_ascii() {
+    let mut bytes = base(0);
+    // Padding around the name, and a control byte inside it.
+    descriptor(&mut bytes, 0, 0xfc, "  Odd\u{7}Name ");
+    assert_eq!(edid::identity(&bytes).model.as_deref(), Some("OddName"));
+}
+
+#[test]
+fn bytes_that_are_no_edid_have_no_identity() {
+    assert_eq!(edid::identity(&[0; 64]), edid::Identity::default());
+    assert_eq!(edid::identity(&[0; 128]), edid::Identity::default());
+}

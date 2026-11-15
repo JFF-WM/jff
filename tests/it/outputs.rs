@@ -22,6 +22,7 @@ fn monitor() -> Monitor {
                 preferred: false,
             },
         ],
+        ..Default::default()
     }
 }
 
