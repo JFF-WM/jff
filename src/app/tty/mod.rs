@@ -819,7 +819,11 @@ impl Tty {
                 return;
             }
         };
-        let mut state = match DrmLeaseState::new::<JffState>(display, &node) {
+        // A lease is direct access to the display: not for sandboxed apps.
+        let lease_state = DrmLeaseState::new_with_filter::<JffState, _>(display, &node, |client| {
+            !crate::state::is_sandboxed(client)
+        });
+        let mut state = match lease_state {
             Ok(state) => state,
             Err(err) => {
                 tracing::warn!("no DRM leasing: {err}");

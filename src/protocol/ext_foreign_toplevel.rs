@@ -17,7 +17,7 @@ use smithay::wayland::foreign_toplevel_list::{
     ForeignToplevelHandle, ForeignToplevelListHandler, ForeignToplevelListState,
 };
 
-use crate::state::JffState;
+use crate::state::{is_sandboxed, JffState};
 
 /// Everything the protocol needs to keep between requests.
 pub struct ExtForeignToplevel {
@@ -27,10 +27,13 @@ pub struct ExtForeignToplevel {
 }
 
 impl ExtForeignToplevel {
-    /// Create the protocol global.
+    /// Create the protocol global. Hidden from sandboxed clients: it lists every window's title
+    /// and app id, and a window capture source is made from one of its handles.
     pub fn new(display: &DisplayHandle) -> Self {
         Self {
-            list: ForeignToplevelListState::new::<JffState>(display),
+            list: ForeignToplevelListState::new_with_filter::<JffState>(display, |client| {
+                !is_sandboxed(client)
+            }),
             toplevels: Vec::new(),
         }
     }

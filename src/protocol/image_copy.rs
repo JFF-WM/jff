@@ -62,7 +62,7 @@ use crate::feature::screenshot::{Captured, HdrCaptured};
 use crate::ipc::ViewId;
 use crate::primitives::hdr_capture::{pack_row_2101010, pq_picture};
 use crate::protocol::presentation::monotonic_now;
-use crate::state::JffState;
+use crate::state::{is_sandboxed, JffState};
 
 /// One capture session and what jff keeps for it.
 pub struct CaptureSession {
@@ -129,13 +129,23 @@ pub struct ImageCopy {
 }
 
 impl ImageCopy {
-    /// Create the protocol globals.
+    /// Create the protocol globals. All three are hidden from sandboxed clients: together they
+    /// read the picture of any monitor or window.
     pub fn new(display: &DisplayHandle) -> Self {
         Self {
             image_capture_source: ImageCaptureSourceState::new(),
-            output_capture_source: OutputCaptureSourceState::new::<JffState>(display),
-            toplevel_capture_source: ToplevelCaptureSourceState::new::<JffState>(display),
-            image_copy_capture: ImageCopyCaptureState::new::<JffState>(display),
+            output_capture_source: OutputCaptureSourceState::new_with_filter::<JffState, _>(
+                display,
+                |client| !is_sandboxed(client),
+            ),
+            toplevel_capture_source: ToplevelCaptureSourceState::new_with_filter::<JffState, _>(
+                display,
+                |client| !is_sandboxed(client),
+            ),
+            image_copy_capture: ImageCopyCaptureState::new_with_filter::<JffState, _>(
+                display,
+                |client| !is_sandboxed(client),
+            ),
             sessions: Vec::new(),
             hdr_formats: Vec::new(),
         }

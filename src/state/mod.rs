@@ -554,8 +554,12 @@ impl JffState {
             ColorManagement::new(&display_handle, !config.color_management().off);
 
         // wlr-layer-shell: lets bars, launchers, wallpapers, and notification daemons place
-        // themselves on a monitor.
-        let layer_shell_state = WlrLayerShellState::new::<Self>(&display_handle);
+        // themselves on a monitor. Not for sandboxed apps: a layer surface draws above every
+        // window and can take the keyboard.
+        let layer_shell_state =
+            WlrLayerShellState::new_with_filter::<Self, _>(&display_handle, |client| {
+                !is_sandboxed(client)
+            });
 
         // A seat with a keyboard and pointer so clients see a normal wl_seat.
         let mut seat_state = SeatState::new();
@@ -716,7 +720,7 @@ pub struct ClientState {
 
 /// Did this client connect from inside a sandbox (a wp_security_context_v1 socket)?
 /// Privileged globals (screen capture, session lock, clipboard managers, output control,
-/// window lists) use this to hide themselves.
+/// window lists, layer-shell, DRM leases) use this to hide themselves.
 pub fn is_sandboxed(client: &Client) -> bool {
     client
         .get_data::<ClientState>()
