@@ -256,9 +256,7 @@ pub fn run() -> anyhow::Result<()> {
 
     // `jff <cmd>` launches a client right away.
     if let Some(cmd) = std::env::args().nth(1) {
-        if let Err(err) = std::process::Command::new(&cmd).spawn() {
-            tracing::warn!("could not spawn {cmd}: {err}");
-        }
+        spawn_command(&cmd, &[]);
     }
 
     state.start_rendering();

@@ -183,7 +183,7 @@ fn terminal_program() -> String {
 }
 
 /// Run `argv` so it outlives us and shares neither our terminal nor our process group.
-fn spawn_detached(argv: &[String], cwd: Option<&str>) -> std::io::Result<()> {
+pub(crate) fn spawn_detached(argv: &[String], cwd: Option<&str>) -> std::io::Result<()> {
     let Some((program, args)) = argv.split_first() else {
         return Err(std::io::Error::other("empty command"));
     };

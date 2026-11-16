@@ -57,9 +57,12 @@ enum Bind {
     ForwardRelease(WlSurface),
 }
 
-/// Run `command` with `args` as a detached child. Also used by the IPC (`spawn` / `spawn-sh`).
+/// Run `command` with `args` detached and reaped on exit, also for the IPC `spawn` and `spawn-sh`.
 pub(crate) fn spawn_command(command: &str, args: &[String]) {
-    if let Err(err) = std::process::Command::new(command).args(args).spawn() {
+    let argv: Vec<String> = std::iter::once(command.to_owned())
+        .chain(args.iter().cloned())
+        .collect();
+    if let Err(err) = crate::feature::app_index::spawn_detached(&argv, None) {
         tracing::warn!("could not start {command}: {err}");
     }
 }
@@ -68,9 +71,7 @@ fn spawn_terminal() {
     let term = std::env::var("JFF_TERMINAL")
         .or_else(|_| std::env::var("TERMINAL"))
         .unwrap_or_else(|_| "alacritty".to_string());
-    if let Err(err) = std::process::Command::new(&term).spawn() {
-        tracing::warn!("could not start {term}: {err}");
-    }
+    spawn_command(&term, &[]);
 }
 
 pub const BTN_LEFT: u32 = 0x110;
