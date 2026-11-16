@@ -1,5 +1,17 @@
 //! TTY backend: jff as the session compositor on bare DRM/KMS. Session and VT switching go
 //! through libseat (needs seatd or logind), input through libinput, hotplug through udev.
+//!
+//! Every GPU is opened. One (`render-device`, else the boot GPU) draws everything with its
+//! renderer, and clients, linux-dmabuf and the wl_display binding stay on it. Another GPU only
+//! scans out: the primary draws the frame of its monitors into a dmabuf and the other GPU shows
+//! it as one texture (`cross_gpu`), so those monitors are SDR only and have a software cursor.
+//! Those frames go through a copy, so a monitor on another GPU has no VRR and no content type.
+//! A GPU plugged in later is opened and lit like the others, one that is unplugged takes its
+//! monitors with it. The primary cannot go away: if it is unplugged jff stops. A connector
+//! name that two GPUs share (`DP-1`) is kept by the first one (the primary's) and the other is
+//! called `cardN-DP-1`.
+
+mod cross_gpu;
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -13,7 +25,8 @@ use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags, PrimaryPlaneE
 use smithay::backend::renderer::PresentationMode;
 use smithay::backend::drm::exporter::gbm::{GbmFramebufferExporter, NodeFilter};
 use smithay::backend::drm::{
-    Colorspace, ConnectorColorState, DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata,
+    Colorspace, ConnectorColorState, DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent,
+    DrmEventMetadata,
     DrmEventTime, DrmNode, Eotf, HdrOutputMetadata, VrrSupport,
 };
 use smithay::backend::egl::{EGLContext, EGLDevice, EGLDisplay};
@@ -22,10 +35,13 @@ use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface}
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
 use smithay::backend::renderer::element::utils::select_dmabuf_feedback;
+use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{
-    default_primary_scanout_output_compare, Kind,
+    default_primary_scanout_output_compare, Id, Kind,
     RenderElementStates,
 };
+use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::ImportDma;
 use smithay::backend::session::libseat::LibSeatSession;
@@ -48,7 +64,9 @@ use smithay::reexports::input::Libinput;
 use smithay::reexports::wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
-use smithay::utils::{DeviceFd, Logical, Monotonic, Physical, Point, Scale, Transform};
+use smithay::utils::{
+    DeviceFd, Logical, Monotonic, Physical, Point, Rectangle, Scale, Size, Transform,
+};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::compositor::{
     with_states, with_surface_tree_downward, SurfaceData, TraversalAction,
@@ -58,6 +76,8 @@ use smithay::wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder};
 use smithay::wayland::drm_lease::{DrmLease, DrmLeaseBuilder, DrmLeaseState, LeaseRejected};
 use smithay::wayland::presentation::Refresh;
 use smithay::reexports::wayland_server::DisplayHandle;
+
+use cross_gpu::{Cross, CrossElement};
 
 use crate::app::pacing::advance_frame_sequence;
 use crate::app::{Backend, BACKGROUND};
@@ -168,20 +188,40 @@ fn build_dmabuf_feedback(
     Some(SurfaceDmabufFeedback { render, scanout })
 }
 
+/// The feedback for the monitors of a secondary GPU: the formats the primary's renderer imports,
+/// and never a scanout tranche, since those monitors show a copy. It is also what takes a window
+/// back to the render tranche when it moves there from a monitor it was scanned out on.
+fn render_only_feedback(
+    renderer: &GlesRenderer,
+    render_node: Option<DrmNode>,
+) -> Option<SurfaceDmabufFeedback> {
+    let main_device = render_node?.dev_id();
+    let formats: FormatSet = renderer.dmabuf_formats().into_iter().collect();
+    let render = DmabufFeedbackBuilder::new(main_device, formats.iter().copied())
+        .build()
+        .ok()?;
+    Some(SurfaceDmabufFeedback {
+        render: render.clone(),
+        scanout: render,
+    })
+}
+
 /// After a frame: note which surfaces ended up on a plane and send each the matching feedback.
 /// A scanned-out fullscreen client gets the scanout tranche, and drops back to the render one
-/// once something covers it.
+/// once something covers it. Without `feedback` only the monitor a surface is shown on is noted.
 fn send_surface_feedback(
     desk: &Desk<Window>,
     output: &Output,
     states: &RenderElementStates,
-    feedback: &SurfaceDmabufFeedback,
+    feedback: Option<&SurfaceDmabufFeedback>,
     only_topmost: bool,
 ) {
     let rect = output_rect(output);
-    let select = |surface: &WlSurface, _: &SurfaceData| {
-        select_dmabuf_feedback(surface, states, &feedback.render, &feedback.scanout)
-    };
+    let select = feedback.map(|feedback| {
+        move |surface: &WlSurface, _: &SurfaceData| {
+            select_dmabuf_feedback(surface, states, &feedback.render, &feedback.scanout)
+        }
+    });
     for entry in desk.top_down() {
         let size = entry.window.geometry().size;
         let area = (entry.pos.0, entry.pos.1, size.w.max(1), size.h.max(1));
@@ -198,9 +238,11 @@ fn send_surface_feedback(
                 default_primary_scanout_output_compare,
             );
         });
-        entry
-            .window
-            .send_dmabuf_feedback(output, surface_primary_scanout_output, select);
+        if let Some(select) = &select {
+            entry
+                .window
+                .send_dmabuf_feedback(output, surface_primary_scanout_output, select);
+        }
         // Windows behind a covering fullscreen window were not in this frame.
         if only_topmost {
             break;
@@ -217,7 +259,9 @@ fn send_surface_feedback(
                 default_primary_scanout_output_compare,
             );
         });
-        layer.send_dmabuf_feedback(output, surface_primary_scanout_output, select);
+        if let Some(select) = &select {
+            layer.send_dmabuf_feedback(output, surface_primary_scanout_output, select);
+        }
     }
 }
 
@@ -292,12 +336,20 @@ struct HdrOutput {
     frame: Option<HdrFrame>,
 }
 
+/// What a monitor on a secondary GPU shows until the first frame of the primary reaches it.
+const SECONDARY_PLACEHOLDER: [f32; 4] = [0.0, 0.35, 0.45, 1.0];
+
 /// A lit monitor and its frame loop state.
 struct TtyOutput {
     compositor: GbmDrmCompositor,
     output: Output,
     connector: connector::Handle,
     mode: DrmMode,
+    /// The monitor is on a secondary GPU: the primary draws its frames and the secondary only
+    /// scans them out.
+    via_primary: bool,
+    /// How the frames of a monitor on a secondary GPU get there, `None` before the first one.
+    cross: Option<Cross>,
     /// Where the output is in its draw cycle, see [`RedrawState`].
     redraw: RedrawState,
     /// CLOCK_MONOTONIC time of the last vblank. The frame clock counts on from it.
@@ -425,25 +477,105 @@ impl TtyOutput {
     }
 }
 
+/// Which GPU a CRTC (or anything else numbered by the kernel) belongs to. Those handles are
+/// only unique per device, so they are never used alone as a key. A number is never given to
+/// another GPU, so a late event of a GPU that is gone finds nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct DeviceId(usize);
+
+impl DeviceId {
+    /// The GPU that composes everything.
+    const PRIMARY: DeviceId = DeviceId(0);
+}
+
+/// A lit monitor is found by its device and its CRTC.
+type OutputKey = (DeviceId, crtc::Handle);
+
+/// One opened GPU.
+struct GpuDevice {
+    // Field order is drop order: the renderer goes before the DRM and GBM devices it draws on,
+    // and the DRM device before the GBM device it works with.
+    /// A renderer on this GPU, only for secondary ones (the primary's is `Tty::renderer`). It
+    /// imports the frames the primary draws for the monitors of this GPU.
+    renderer: Option<GlesRenderer>,
+    render_node: Option<DrmNode>,
+    drm: DrmDevice,
+    gbm: GbmDevice<DeviceFd>,
+    path: std::path::PathBuf,
+    /// The source of its DRM events, taken out of the loop when the GPU goes away.
+    events: Option<RegistrationToken>,
+}
+
+/// [`pick_device`] for a caller that needs `&mut`: creating a DRM surface does.
+fn pick_device_mut<'a>(
+    primary: &'a mut GpuDevice,
+    secondary: &'a mut [Option<GpuDevice>],
+    id: DeviceId,
+) -> Option<&'a mut GpuDevice> {
+    match id.0 {
+        0 => Some(primary),
+        n => secondary.get_mut(n - 1)?.as_mut(),
+    }
+}
+
+/// The renderer of secondary device `id` (the primary's is `Tty::renderer`).
+fn secondary_renderer(
+    secondary: &mut [Option<GpuDevice>],
+    id: DeviceId,
+) -> Option<&mut GlesRenderer> {
+    secondary
+        .get_mut(id.0.checked_sub(1)?)?
+        .as_mut()?
+        .renderer
+        .as_mut()
+}
+
+/// The device behind `id`: 0 is the primary, `n` is `secondary[n - 1]`, `None` once it is gone.
+/// Takes the two fields instead of `&Tty` so it works while other fields of `Tty` are borrowed.
+fn pick_device<'a>(
+    primary: &'a GpuDevice,
+    secondary: &'a [Option<GpuDevice>],
+    id: DeviceId,
+) -> Option<&'a GpuDevice> {
+    match id.0 {
+        0 => Some(primary),
+        n => secondary.get(n - 1)?.as_ref(),
+    }
+}
+
 pub struct Tty {
-    // Field order is drop order: everything that uses the GPU goes before the devices.
+    // Field order is drop order: everything that uses a GPU goes before the devices.
     pub renderer: GlesRenderer,
-    outputs: HashMap<crtc::Handle, TtyOutput>,
+    outputs: HashMap<OutputKey, TtyOutput>,
     /// Leases clients hold right now. They go before `drm` so they are revoked first.
     active_leases: Vec<DrmLease>,
     /// wp_drm_lease_device_v1, `None` until [`Tty::init_leasing`] or if it could not be set up.
     lease_state: Option<DrmLeaseState>,
     /// Connected non-desktop connectors (VR headsets) with the CRTC kept for each. They are
     /// offered as leases and never become outputs.
+    /// Leasing stays on the primary GPU.
     non_desktop: HashMap<connector::Handle, crtc::Handle>,
     /// All connected monitors, lit or not.
     monitors: Vec<Monitor>,
     libinput: Libinput,
     session: LibSeatSession,
     loop_handle: LoopHandle<'static, JffState>,
-    render_node: Option<DrmNode>,
-    drm: DrmDevice,
-    gbm: GbmDevice<DeviceFd>,
+    /// GPUs that only scan out, `DeviceId(n)` is `secondary[n - 1]`. One that was unplugged
+    /// leaves `None`, so the others keep their number.
+    secondary: Vec<Option<GpuDevice>>,
+    /// The GPU `renderer` belongs to.
+    primary: GpuDevice,
+}
+
+/// The name a monitor goes by, taken into `names`. Connector names count per GPU, so `DP-1`
+/// exists on each of them: the first GPU to ask keeps it, the others get `card1-DP-1`. `None`
+/// when that is taken too.
+fn unique_name(names: &mut HashSet<String>, name: &str, card: &str) -> Option<String> {
+    if names.insert(name.to_string()) {
+        return Some(name.to_string());
+    }
+    let renamed = format!("{card}-{name}");
+    names.insert(renamed.clone()).then_some(renamed)
 }
 
 /// Connector name as clients see it, e.g. `DP-1`.
@@ -803,11 +935,16 @@ impl Tty {
     /// DRM device that client sync objects are imported on (wp_linux_drm_syncobj_v1).
     /// The render node of the GPU jff draws with, `None` when the driver has none.
     pub fn render_node(&self) -> Option<DrmNode> {
-        self.render_node
+        self.primary.render_node
     }
 
     pub fn drm_device_fd(&self) -> &DrmDeviceFd {
-        self.drm.device_fd()
+        self.primary.drm.device_fd()
+    }
+
+    /// The device behind `id`, `None` if it is gone.
+    fn device(&self, id: DeviceId) -> Option<&GpuDevice> {
+        pick_device(&self.primary, &self.secondary, id)
     }
 
     /// Whether the last frame on `output` was direct scanout. False if it isn't lit.
@@ -840,7 +977,7 @@ impl Tty {
 
     /// Offer the non-desktop connectors as leases. Runs once the Wayland display exists.
     pub fn init_leasing(&mut self, display: &DisplayHandle) {
-        let node = match DrmNode::from_file(self.drm.device_fd()) {
+        let node = match DrmNode::from_file(self.primary.drm.device_fd()) {
             Ok(node) => node,
             Err(err) => {
                 tracing::warn!("no DRM leasing, cannot identify the GPU: {err}");
@@ -860,7 +997,7 @@ impl Tty {
         };
         // headsets found by the first scan, before there was a global to tell
         for &conn in self.non_desktop.keys() {
-            if let Ok(info) = self.drm.get_connector(conn, false) {
+            if let Ok(info) = self.primary.drm.get_connector(conn, false) {
                 let name = connector_name(&info);
                 state.add_connector::<JffState>(conn, name.clone(), lease_description(&name));
             }
@@ -878,10 +1015,10 @@ impl Tty {
         &mut self,
         connectors: &[connector::Handle],
     ) -> Result<DrmLeaseBuilder, LeaseRejected> {
-        if !self.drm.is_active() {
+        if !self.primary.drm.is_active() {
             return Err(LeaseRejected::default());
         }
-        let mut builder = DrmLeaseBuilder::new(&self.drm);
+        let mut builder = DrmLeaseBuilder::new(&self.primary.drm);
         for &conn in connectors {
             let Some(&crtc) = self.non_desktop.get(&conn) else {
                 tracing::warn!("lease request for {conn:?}, which is not a non-desktop connector");
@@ -889,19 +1026,25 @@ impl Tty {
             };
             builder.add_connector(conn);
             builder.add_crtc(crtc);
-            let planes = self.drm.planes(&crtc).map_err(LeaseRejected::with_cause)?;
+            let planes = self
+                .primary
+                .drm
+                .planes(&crtc)
+                .map_err(LeaseRejected::with_cause)?;
             let (primary, claim) = planes
                 .primary
                 .iter()
                 .find_map(|plane| {
-                    self.drm
+                    self.primary
+                        .drm
                         .claim_plane(plane.handle, crtc)
                         .map(|claim| (plane, claim))
                 })
                 .ok_or_else(LeaseRejected::default)?;
             builder.add_plane(primary.handle, claim);
             if let Some((cursor, claim)) = planes.cursor.iter().find_map(|plane| {
-                self.drm
+                self.primary
+                    .drm
                     .claim_plane(plane.handle, crtc)
                     .map(|claim| (plane, claim))
             }) {
@@ -945,10 +1088,10 @@ impl Tty {
                 used.insert(crtc);
                 continue;
             }
-            let Ok(info) = self.drm.get_connector(conn, false) else {
+            let Ok(info) = self.primary.drm.get_connector(conn, false) else {
                 continue;
             };
-            let Some(crtc) = pick_crtc(&self.drm, resources, &info, used) else {
+            let Some(crtc) = pick_crtc(&self.primary.drm, resources, &info, used) else {
                 tracing::warn!("no free CRTC to lease {name}");
                 continue;
             };
@@ -962,34 +1105,88 @@ impl Tty {
     }
 
     /// Bring lit monitors in line with what's connected and the config: light new ones, drop
-    /// unplugged or disabled ones, redo those whose mode changed. Returns (removed, added).
+    /// unplugged or disabled ones, redo those whose mode changed. Goes over every GPU. Returns
+    /// (removed, added).
     fn reconcile(&mut self, config: &Config) -> anyhow::Result<(Vec<Output>, Vec<Output>)> {
-        let resources = self
+        let devices: Vec<DeviceId> = std::iter::once(DeviceId::PRIMARY)
+            .chain(
+                (1..=self.secondary.len())
+                    .filter(|&n| self.secondary[n - 1].is_some())
+                    .map(DeviceId),
+            )
+            .collect();
+        let mut monitors = Vec::new();
+        // Connector names are numbered per GPU, so two GPUs can both have an `HDMI-A-1`.
+        let mut names = HashSet::new();
+        let mut removed = Vec::new();
+        let mut added = Vec::new();
+        for dev in devices {
+            match self.reconcile_device(dev, config, &mut monitors, &mut names) {
+                Ok((gone, new)) => {
+                    removed.extend(gone);
+                    added.extend(new);
+                }
+                // without the primary there is no session, a secondary only loses its monitors
+                Err(err) if dev == DeviceId::PRIMARY => return Err(err),
+                Err(err) => tracing::warn!("GPU {}: error scanning monitors: {err:#}", dev.0),
+            }
+        }
+        self.monitors = monitors;
+        Ok((removed, added))
+    }
+
+    /// [`Tty::reconcile`] for the monitors of GPU `dev`. `monitors` and `names` collect what all
+    /// the GPUs have.
+    fn reconcile_device(
+        &mut self,
+        dev: DeviceId,
+        config: &Config,
+        monitors: &mut Vec<Monitor>,
+        names: &mut HashSet<String>,
+    ) -> anyhow::Result<(Vec<Output>, Vec<Output>)> {
+        let mut used: HashSet<crtc::Handle> = HashSet::new();
+        let mut candidates = Vec::new();
+        let mut leasable: Vec<(connector::Handle, String)> = Vec::new();
+        let device = self.device(dev).context("the GPU is gone")?;
+        let resources = device
             .drm
             .resource_handles()
             .context("error reading DRM resources")?;
-
-        let mut used: HashSet<crtc::Handle> = HashSet::new();
-        let mut candidates = Vec::new();
-        let mut monitors = Vec::new();
-        let mut leasable: Vec<(connector::Handle, String)> = Vec::new();
         for &conn in resources.connectors() {
-            let Ok(info) = self.drm.get_connector(conn, true) else {
+            let Ok(info) = device.drm.get_connector(conn, true) else {
                 continue;
             };
             if info.state() != connector::State::Connected {
                 continue;
             }
-            // A VR headset is no monitor: it is offered as a lease instead.
-            if is_non_desktop(&self.drm, conn) {
-                leasable.push((conn, connector_name(&info)));
+            // A VR headset is no monitor: it is offered as a lease instead, on the primary
+            // only. On another GPU it is left alone.
+            if is_non_desktop(&device.drm, conn) {
+                if dev == DeviceId::PRIMARY {
+                    leasable.push((conn, connector_name(&info)));
+                }
                 continue;
             }
             if info.modes().is_empty() {
                 continue;
             }
-            let name = connector_name(&info);
-            let identity = read_identity(&self.drm, conn);
+            let card = device
+                .path
+                .file_name()
+                .and_then(|file| file.to_str())
+                .unwrap_or("gpu");
+            let plain = connector_name(&info);
+            let Some(name) = unique_name(names, &plain, card) else {
+                tracing::warn!(
+                    "GPU {}: monitor {plain} is left dark, its name is taken and so is {card}-{plain}",
+                    dev.0
+                );
+                continue;
+            };
+            if name != plain {
+                tracing::info!("GPU {}: monitor {plain} is called {name}", dev.0);
+            }
+            let identity = read_identity(&device.drm, conn);
             monitors.push(monitor_of(&info, name.clone(), identity));
             let wanted = config.output(&name);
             if wanted.is_some_and(|c| c.off) {
@@ -998,22 +1195,30 @@ impl Tty {
             let Some(mode) = pick_mode(&info, wanted.and_then(|c| c.mode)) else {
                 continue;
             };
-            let hdr_wanted = wanted.is_some_and(|c| c.hdr);
-            match self.outputs.iter().find(|(_, o)| o.connector == conn) {
+            // HDR needs the primary's own scanout path, a secondary's monitor is SDR only
+            let hdr_wanted = wanted.is_some_and(|c| c.hdr) && dev == DeviceId::PRIMARY;
+            match self
+                .outputs
+                .iter()
+                .find(|(key, o)| key.0 == dev && o.connector == conn)
+            {
                 // a swapchain made without the 10-bit formats would band under PQ, so `hdr` turned on by a reload lights the monitor again
-                Some((&crtc, lit)) if lit.mode == mode && (lit.hdr_formats || !hdr_wanted) => {
+                // a monitor whose name changed (another GPU took it, or let it go) is lit again
+                Some((&(_, crtc), lit))
+                    if lit.mode == mode
+                        && (lit.hdr_formats || !hdr_wanted)
+                        && lit.output.name() == name =>
+                {
                     used.insert(crtc);
                 }
                 _ => candidates.push((info, name, mode)),
             }
         }
 
-        self.monitors = monitors;
-
         // A new `transform` needs no new mode: the monitor keeps showing, turned the other
         // way from the next frame on. The output's compositor takes the turn from the output,
         // and starts its buffers over, since what was drawn is the wrong way round now.
-        for lit in self.outputs.values_mut() {
+        for (_, lit) in self.outputs.iter_mut().filter(|(key, _)| key.0 == dev) {
             let wanted = output_transform(config, &lit.output.name());
             if lit.output.current_transform() != wanted {
                 tracing::info!(
@@ -1028,34 +1233,41 @@ impl Tty {
             }
         }
 
-        let stale: Vec<crtc::Handle> = self
+        let stale: Vec<OutputKey> = self
             .outputs
             .keys()
-            .filter(|crtc| !used.contains(*crtc))
+            .filter(|(d, crtc)| *d == dev && !used.contains(crtc))
             .copied()
             .collect();
         let removed: Vec<Output> = stale
             .into_iter()
-            .filter_map(|crtc| self.outputs.remove(&crtc))
+            .filter_map(|key| self.outputs.remove(&key))
             .map(|lit| lit.output)
             .collect();
 
-        // Before lighting new monitors, so a headset's CRTC isn't taken from under it.
-        self.sync_leasable(&resources, leasable, &mut used);
+        // Before lighting new monitors, so a headset's CRTC isn't taken from under it. Leasing
+        // is the primary's: this would withdraw its headsets when run for another GPU.
+        if dev == DeviceId::PRIMARY {
+            self.sync_leasable(&resources, leasable, &mut used);
+        }
 
         let mut added = Vec::new();
         for (info, name, mode) in candidates {
-            let Some(crtc) = pick_crtc(&self.drm, &resources, &info, &used) else {
+            let crtc = self
+                .device(dev)
+                .and_then(|device| pick_crtc(&device.drm, &resources, &info, &used));
+            let Some(crtc) = crtc else {
                 tracing::warn!("no free CRTC for monitor {name}");
                 continue;
             };
-            let hdr_wanted = config.output(&name).is_some_and(|c| c.hdr);
+            let hdr_wanted =
+                config.output(&name).is_some_and(|c| c.hdr) && dev == DeviceId::PRIMARY;
             let transform = output_transform(config, &name);
-            match self.light_up(&info, &name, crtc, mode, transform, hdr_wanted) {
+            match self.light_up(dev, &info, &name, crtc, mode, transform, hdr_wanted) {
                 Ok(lit) => {
                     used.insert(crtc);
                     added.push(lit.output.clone());
-                    self.outputs.insert(crtc, lit);
+                    self.outputs.insert((dev, crtc), lit);
                 }
                 Err(err) => tracing::warn!("could not use monitor {name}: {err:#}"),
             }
@@ -1066,6 +1278,7 @@ impl Tty {
     /// Create the output and scanout pipeline for a monitor.
     fn light_up(
         &mut self,
+        dev: DeviceId,
         info: &connector::Info,
         name: &str,
         crtc: crtc::Handle,
@@ -1073,16 +1286,28 @@ impl Tty {
         transform: Transform,
         hdr_wanted: bool,
     ) -> anyhow::Result<TtyOutput> {
+        let primary_node = self.primary.render_node;
+        let Tty {
+            renderer,
+            primary,
+            secondary,
+            ..
+        } = &mut *self;
+        let device = pick_device_mut(primary, secondary, dev).context("the GPU is gone")?;
+        let via_primary = dev != DeviceId::PRIMARY;
         tracing::info!(
             "monitor {name}: {}x{}@{}",
             drm_mode.size().0,
             drm_mode.size().1,
             drm_mode.vrefresh()
         );
+        if via_primary {
+            tracing::info!("monitor {name}: on a secondary GPU, SDR only");
+        }
 
         let (pw, ph) = info.size().unwrap_or((0, 0));
         // What clients and output profiles (kanshi) match a monitor on.
-        let identity = read_identity(&self.drm, info.handle());
+        let identity = read_identity(&device.drm, info.handle());
         let output = Output::new(
             name.to_string(),
             PhysicalProperties {
@@ -1097,16 +1322,25 @@ impl Tty {
         output.change_current_state(Some(wl_mode), Some(transform), None, Some((0, 0).into()));
         output.set_preferred(wl_mode);
 
-        let surface = self
+        let surface = device
             .drm
             .create_surface(crtc, drm_mode.clone(), &[info.handle()])
             .context("error creating the DRM surface")?;
         let allocator = GbmAllocator::new(
-            self.gbm.clone(),
+            device.gbm.clone(),
             GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
         );
-        let render_formats = self
-            .renderer
+        // What the DrmCompositor may render into is what the renderer that draws for it can do:
+        // the secondary's own for its monitors.
+        let formats_of: &GlesRenderer = if via_primary {
+            device
+                .renderer
+                .as_ref()
+                .context("the secondary GPU has no renderer")?
+        } else {
+            &*renderer
+        };
+        let render_formats = formats_of
             .egl_context()
             .dmabuf_render_formats()
             .iter()
@@ -1117,27 +1351,38 @@ impl Tty {
             surface,
             None,
             allocator,
-            GbmFramebufferExporter::new(self.gbm.clone(), NodeFilter::All),
+            GbmFramebufferExporter::new(device.gbm.clone(), NodeFilter::All),
             if hdr_wanted {
                 COLOR_FORMATS_HDR.iter().copied()
             } else {
                 COLOR_FORMATS.iter().copied()
             },
             render_formats,
-            self.drm.cursor_size(),
-            Some(self.gbm.clone()),
+            device.drm.cursor_size(),
+            Some(device.gbm.clone()),
         )
         .context("error creating the DRM compositor")?;
 
-        // only asks what's supported, `render_crtc` decides every frame whether VRR is on
-        let vrr_support = compositor
-            .vrr_supported(info.handle())
-            .unwrap_or(VrrSupport::NotSupported);
+        // Only asks what's supported, `render_crtc` decides every frame whether VRR is on. A
+        // monitor on a secondary GPU shows a copy of the frame and `render_secondary_crtc` never
+        // switches VRR or the content type, so `adaptive-sync` and `content-type-hint` do nothing
+        // there and it says it can't do VRR.
+        let vrr_support = if via_primary {
+            VrrSupport::NotSupported
+        } else {
+            compositor
+                .vrr_supported(info.handle())
+                .unwrap_or(VrrSupport::NotSupported)
+        };
         tracing::info!("monitor {name}: variable refresh rate {vrr_support:?}");
 
-        let dmabuf_feedback =
-            build_dmabuf_feedback(&compositor, &self.renderer, &self.drm, self.render_node);
-        if dmabuf_feedback.is_none() {
+        // Clients draw for the primary, a scanout tranche of the secondary's would be wrong.
+        let dmabuf_feedback = if via_primary {
+            render_only_feedback(renderer, primary_node)
+        } else {
+            build_dmabuf_feedback(&compositor, renderer, &device.drm, device.render_node)
+        };
+        if dmabuf_feedback.is_none() && !via_primary {
             tracing::warn!(
                 "monitor {name}: no scanout dmabuf feedback, clients get the render formats"
             );
@@ -1166,6 +1411,8 @@ impl Tty {
             output,
             connector: info.handle(),
             mode: drm_mode,
+            via_primary,
+            cross: None,
             redraw: RedrawState::Idle,
             last_vblank: None,
             gamma: None,
@@ -1175,6 +1422,48 @@ impl Tty {
             powered_off: false,
             locked_frame: false,
         })
+    }
+
+    /// Open the GPUs on the seat that are not in use yet: one that was plugged in, or could not
+    /// be opened before. Their monitors are lit by the next [`Tty::reconcile`]. Says whether
+    /// there is a new one.
+    fn open_new_gpus(&mut self) -> bool {
+        let Ok(all) = udev::all_gpus(self.session.seat()) else {
+            return false;
+        };
+        let mut added = false;
+        for path in all {
+            if self.primary.path == path || self.secondary.iter().flatten().any(|d| d.path == path)
+            {
+                continue;
+            }
+            let (mut device, notifier, renderer) = match open_gpu(&mut self.session, &path) {
+                Ok(opened) => opened,
+                Err(err) => {
+                    tracing::warn!("GPU {path:?} is not used, it could not be opened: {err:#}");
+                    continue;
+                }
+            };
+            let dev = DeviceId(self.secondary.len() + 1);
+            match self
+                .loop_handle
+                .insert_source(notifier, move |event, meta, state| {
+                    on_drm_event(state, dev, event, meta)
+                }) {
+                Ok(token) => {
+                    device.renderer = Some(renderer);
+                    device.events = Some(token);
+                    self.secondary.push(Some(device));
+                    tracing::info!("GPU {path:?} added");
+                    added = true;
+                }
+                Err(err) => tracing::warn!(
+                    "GPU {path:?} is not used, no DRM event source: {}",
+                    err.error
+                ),
+            }
+        }
+        added
     }
 
     /// Re-read each lit monitor's config (VRR, content hint, ICC profile) so `reload-config`
@@ -1206,15 +1495,23 @@ impl Tty {
     /// Re-read each lit monitor's EDID and HDR settings and work out what its connector should signal. Staged in [`JffState::render_crtc`].
     fn sync_hdr(&mut self, config: &Config) {
         let Tty {
-            drm,
+            primary,
+            secondary,
             outputs,
             renderer,
             ..
         } = &mut *self;
-        for lit in outputs.values_mut() {
+        for (&(dev, _), lit) in outputs.iter_mut() {
+            // a secondary GPU's monitors are SDR only, see `light_up`
+            if dev != DeviceId::PRIMARY {
+                continue;
+            }
+            let Some(device) = pick_device(primary, secondary, dev) else {
+                continue;
+            };
             let name = lit.output.name();
             lit.hdr_fault = None;
-            let edid = read_edid(drm, lit.connector);
+            let edid = read_edid(&device.drm, lit.connector);
             if edid != lit.edid {
                 if let Some(info) = &edid {
                     tracing::debug!(
@@ -1377,8 +1674,16 @@ impl Tty {
     /// Apply pending curves, only on monitors that have shown a frame and have no flip in
     /// flight. The first modeset resets the display's colour state, so this has to come after it.
     fn apply_gamma(&mut self) {
-        let Tty { drm, outputs, .. } = &mut *self;
-        for (&crtc, lit) in outputs.iter_mut() {
+        let Tty {
+            primary,
+            secondary,
+            outputs,
+            ..
+        } = &mut *self;
+        for (&(dev, crtc), lit) in outputs.iter_mut() {
+            let Some(device) = pick_device(primary, secondary, dev) else {
+                continue;
+            };
             if !lit.gamma_pending || lit.waiting_for_vblank() || lit.last_vblank.is_none() {
                 continue;
             }
@@ -1395,7 +1700,7 @@ impl Tty {
             if wanted.is_none() && !lit.gamma_applied {
                 continue;
             }
-            match set_gamma(drm, crtc, wanted) {
+            match set_gamma(&device.drm, crtc, wanted) {
                 Ok(()) => lit.gamma_applied = wanted.is_some(),
                 Err(err) => tracing::warn!(
                     "monitor {}: cannot set the calibration curves: {err:#}",
@@ -1407,8 +1712,8 @@ impl Tty {
 
     /// The redraw of `crtc` had nothing to queue, so no vblank is coming: wait for the one it
     /// would have been (see [`RedrawState::WaitingForEstimatedVBlank`]).
-    fn queue_estimated_vblank(&mut self, crtc: crtc::Handle) {
-        let Some(lit) = self.outputs.get_mut(&crtc) else {
+    fn queue_estimated_vblank(&mut self, dev: DeviceId, crtc: crtc::Handle) {
+        let Some(lit) = self.outputs.get_mut(&(dev, crtc)) else {
             return;
         };
         // The redraw that just had nothing to show was asked for while a timer was already
@@ -1423,7 +1728,7 @@ impl Tty {
         let delay = wait_until(lit.next_presentation_time(), now);
         let timer = Timer::from_duration(delay);
         match self.loop_handle.insert_source(timer, move |_, _, state| {
-            state.on_estimated_vblank(crtc);
+            state.on_estimated_vblank(dev, crtc);
             TimeoutAction::Drop
         }) {
             Ok(token) => lit.redraw = RedrawState::WaitingForEstimatedVBlank { token },
@@ -1438,11 +1743,13 @@ impl Tty {
     }
 }
 
-/// The GPU to open: the one `render-device` names, else the primary one (the one the machine
-/// booted on), else the first there is. jff drives the monitors of this one GPU only, so it says
-/// so in the log when another GPU has monitors connected that it leaves dark.
-fn choose_gpu(seat: &str, wanted: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
-    let all = udev::all_gpus(seat).context("error listing the GPUs")?;
+/// The primary GPU, the one that composes everything: the one `render-device` names, else the
+/// primary one (the one the machine booted on), else the first there is.
+fn choose_gpu(
+    all: &[std::path::PathBuf],
+    seat: &str,
+    wanted: Option<&str>,
+) -> anyhow::Result<std::path::PathBuf> {
     let mut chosen = None;
     if let Some(wanted) = wanted {
         let wanted_real = std::fs::canonicalize(wanted).ok();
@@ -1459,44 +1766,65 @@ fn choose_gpu(seat: &str, wanted: Option<&str>) -> anyhow::Result<std::path::Pat
             );
         }
     }
-    let chosen = chosen
+    chosen
         .or_else(|| udev::primary_gpu(seat).ok().flatten())
         .or_else(|| all.first().cloned())
-        .context("no GPU found")?;
-    warn_ignored_gpus(&all, &chosen);
-    Ok(chosen)
+        .context("no GPU found")
 }
 
-/// Log a warning for each GPU other than `chosen` that has a monitor connected: jff has no
-/// multi-GPU support, so those monitors stay dark. Reads `/sys/class/drm`, so it needs no
-/// access to the other devices.
-fn warn_ignored_gpus(all: &[std::path::PathBuf], chosen: &std::path::Path) {
-    for other in all.iter().filter(|path| path.as_path() != chosen) {
-        let Some(card) = other.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let prefix = format!("{card}-");
-        let mut connected: Vec<String> = std::fs::read_dir("/sys/class/drm")
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| {
-                let name = entry.file_name().into_string().ok()?;
-                let connector = name.strip_prefix(&prefix)?.to_owned();
-                let status = std::fs::read_to_string(entry.path().join("status")).ok()?;
-                (status.trim() == "connected").then_some(connector)
-            })
-            .collect();
-        connected.sort();
-        if connected.is_empty() {
-            tracing::debug!("GPU {other:?} is not used, it has no monitor connected");
-        } else {
-            tracing::warn!(
-                "GPU {other:?} has monitors connected ({}) that jff leaves dark: it uses only {chosen:?} and has no multi-GPU support. Put `render-device \"{}\"` in the config to use that GPU instead",
-                connected.join(", "),
-                other.display()
-            );
-        }
+/// The GPUs on the seat other than the primary. They only scan out for their own monitors.
+fn other_gpus(all: &[std::path::PathBuf], primary: &std::path::Path) -> Vec<std::path::PathBuf> {
+    all.iter()
+        .filter(|path| path.as_path() != primary)
+        .cloned()
+        .collect()
+}
+
+/// Open a GPU: the DRM and GBM devices and a renderer on them, plus the source of its DRM
+/// events. The renderer is returned apart: the primary's lives in `Tty::renderer`, a
+/// secondary's goes into its `GpuDevice`.
+fn open_gpu(
+    session: &mut LibSeatSession,
+    path: &std::path::Path,
+) -> anyhow::Result<(GpuDevice, DrmDeviceNotifier, GlesRenderer)> {
+    let fd = session
+        .open(
+            path,
+            OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
+        )
+        .map_err(|e| anyhow!("could not open {path:?}: {e:?}"))?;
+    let device_fd = DrmDeviceFd::new(DeviceFd::from(fd));
+
+    let (drm, notifier) =
+        DrmDevice::new(device_fd.clone(), false).context("error opening the DRM device")?;
+    let gbm = GbmDevice::new(device_fd.device_fd()).context("error creating the GBM device")?;
+
+    let display = unsafe { EGLDisplay::new(gbm.clone()) }.context("error creating EGL display")?;
+    let egl_device = EGLDevice::device_for_display(&display).context("no EGL device")?;
+    let render_node = egl_device.try_get_render_node().ok().flatten();
+    let context = EGLContext::new(&display).context("error creating the EGL context")?;
+    let renderer = unsafe { GlesRenderer::new(context) }.context("error creating the renderer")?;
+    let device = GpuDevice {
+        renderer: None,
+        render_node,
+        drm,
+        gbm,
+        path: path.to_path_buf(),
+        events: None,
+    };
+    Ok((device, notifier, renderer))
+}
+
+/// One DRM event of the device `dev`.
+fn on_drm_event(
+    state: &mut JffState,
+    dev: DeviceId,
+    event: DrmEvent,
+    meta: &mut Option<DrmEventMetadata>,
+) {
+    match event {
+        DrmEvent::VBlank(crtc) => state.on_vblank(dev, crtc, meta.take()),
+        DrmEvent::Error(err) => tracing::warn!("DRM error: {err}"),
     }
 }
 
@@ -1510,27 +1838,24 @@ pub fn init(
     )?;
     let seat = session.seat();
 
-    // ---- GPU ----
-    let gpu_path = choose_gpu(&seat, config.render_device())?;
-    tracing::info!("using GPU {gpu_path:?}");
-
-    let fd = session
-        .open(
-            &gpu_path,
-            OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
-        )
-        .map_err(|e| anyhow!("could not open {gpu_path:?}: {e:?}"))?;
-    let device_fd = DrmDeviceFd::new(DeviceFd::from(fd));
-
-    let (drm, drm_notifier) =
-        DrmDevice::new(device_fd.clone(), false).context("error opening the DRM device")?;
-    let gbm = GbmDevice::new(device_fd.device_fd()).context("error creating the GBM device")?;
-
-    let display = unsafe { EGLDisplay::new(gbm.clone()) }.context("error creating EGL display")?;
-    let egl_device = EGLDevice::device_for_display(&display).context("no EGL device")?;
-    let render_node = egl_device.try_get_render_node().ok().flatten();
-    let context = EGLContext::new(&display).context("error creating the EGL context")?;
-    let renderer = unsafe { GlesRenderer::new(context) }.context("error creating the renderer")?;
+    // ---- GPUs ----
+    // The primary composes everything. The others are opened to scan out their monitors, and
+    // one that fails to open is left out: it must not take the session down.
+    let all = udev::all_gpus(&seat).context("error listing the GPUs")?;
+    let gpu_path = choose_gpu(&all, &seat, config.render_device())?;
+    let (primary, drm_notifier, renderer) = open_gpu(&mut session, &gpu_path)?;
+    let mut opened = Vec::new();
+    for path in other_gpus(&all, &gpu_path) {
+        match open_gpu(&mut session, &path) {
+            Ok((mut device, notifier, renderer)) => {
+                device.renderer = Some(renderer);
+                opened.push((path, device, notifier));
+            }
+            Err(err) => {
+                tracing::warn!("GPU {path:?} is not used, it could not be opened: {err:#}")
+            }
+        }
+    }
 
     // ---- input ----
     let mut libinput = Libinput::new_with_udev(LibinputSessionInterface::from(session.clone()));
@@ -1562,17 +1887,44 @@ pub fn init(
         .insert_source(notifier, |event, _, state| state.on_session_event(event))
         .map_err(|e| anyhow!("failed to insert the session source: {}", e.error))?;
     handle
-        .insert_source(drm_notifier, |event, meta, state| match event {
-            DrmEvent::VBlank(crtc) => state.on_vblank(crtc, meta.take()),
-            DrmEvent::Error(err) => tracing::warn!("DRM error: {err}"),
+        .insert_source(drm_notifier, |event, meta, state| {
+            on_drm_event(state, DeviceId::PRIMARY, event, meta)
         })
         .map_err(|e| anyhow!("failed to insert the DRM source: {}", e.error))?;
+    // One source per device: a CRTC is only known by its device's events.
+    let mut secondary = Vec::new();
+    for (path, mut device, notifier) in opened {
+        let dev = DeviceId(secondary.len() + 1);
+        match handle.insert_source(notifier, move |event, meta, state| {
+            on_drm_event(state, dev, event, meta)
+        }) {
+            Ok(token) => {
+                device.events = Some(token);
+                secondary.push((path, device));
+            }
+            Err(err) => tracing::warn!(
+                "GPU {path:?} is not used, no DRM event source: {}",
+                err.error
+            ),
+        }
+    }
+    if secondary.is_empty() {
+        tracing::info!("using GPU {gpu_path:?}");
+    } else {
+        let names: Vec<&std::path::Path> =
+            secondary.iter().map(|(path, _)| path.as_path()).collect();
+        tracing::info!("using GPU {gpu_path:?} (primary), also open: {names:?}");
+    }
+    let secondary: Vec<Option<GpuDevice>> = secondary
+        .into_iter()
+        .map(|(_, device)| Some(device))
+        .collect();
     let udev_backend = udev::UdevBackend::new(&seat).context("error creating the udev backend")?;
     handle
-        .insert_source(udev_backend, |event, _, state| {
-            if let udev::UdevEvent::Changed { .. } = event {
-                state.scan_tty_outputs();
-            }
+        .insert_source(udev_backend, |event, _, state| match event {
+            udev::UdevEvent::Added { .. } => state.on_gpu_added(),
+            udev::UdevEvent::Removed { device_id } => state.on_gpu_removed(device_id),
+            _ => state.scan_tty_outputs(),
         })
         .map_err(|e| anyhow!("failed to insert the udev source: {}", e.error))?;
 
@@ -1587,9 +1939,8 @@ pub fn init(
         libinput,
         session,
         loop_handle: handle.clone(),
-        render_node,
-        drm,
-        gbm,
+        secondary,
+        primary,
     };
     let (_, outputs) = tty.reconcile(config)?;
     if outputs.is_empty() {
@@ -1615,17 +1966,17 @@ impl JffState {
     /// Draw a frame on every monitor that asked for one. The event loop calls it after each
     /// pass, once everything the pass did (commits, input, vblanks) has been applied.
     pub fn redraw_queued_outputs(&mut self) {
-        let crtcs: Vec<crtc::Handle> = match &self.backend {
+        let keys: Vec<OutputKey> = match &self.backend {
             Backend::Tty(tty) => tty
                 .outputs
                 .iter()
                 .filter(|(_, lit)| lit.redraw_is_queued())
-                .map(|(&crtc, _)| crtc)
+                .map(|(&key, _)| key)
                 .collect(),
             _ => return,
         };
-        for crtc in crtcs {
-            self.render_crtc(crtc);
+        for (dev, crtc) in keys {
+            self.render_crtc(dev, crtc);
         }
     }
 
@@ -1646,8 +1997,8 @@ impl JffState {
         let Backend::Tty(tty) = &self.backend else {
             return None;
         };
-        let (&crtc, _) = tty.outputs.iter().find(|(_, lit)| lit.output == *output)?;
-        crtc_gamma_property(&tty.drm, crtc).map(|(_, size)| size as u32)
+        let (&(dev, crtc), _) = tty.outputs.iter().find(|(_, lit)| lit.output == *output)?;
+        crtc_gamma_property(&tty.device(dev)?.drm, crtc).map(|(_, size)| size as u32)
     }
 
     /// Use `table` on `output` instead of the config's ICC profile, or go back to the profile
@@ -1674,18 +2025,23 @@ impl JffState {
         let Backend::Tty(tty) = &mut self.backend else {
             return false;
         };
-        if !tty.drm.is_active() {
-            return false;
-        }
         let Tty {
             outputs,
-            drm,
+            primary,
+            secondary,
             loop_handle,
             ..
         } = &mut *tty;
-        let Some((_, lit)) = outputs.iter_mut().find(|(_, lit)| lit.output == *output) else {
+        let Some((&(dev, _), lit)) = outputs.iter_mut().find(|(_, lit)| lit.output == *output)
+        else {
             return false;
         };
+        let Some(drm) = pick_device(primary, secondary, dev).map(|d| &d.drm) else {
+            return false;
+        };
+        if !drm.is_active() {
+            return false;
+        }
         if lit.powered_off == !on {
             return true;
         }
@@ -1718,12 +2074,12 @@ impl JffState {
 
     /// Draw one frame to the monitor on `crtc` and queue it for the next vblank. Does nothing
     /// unless a frame was asked for (`Queued`, or `WaitingForEstimatedVBlankAndQueued`).
-    fn render_crtc(&mut self, crtc: crtc::Handle) {
+    fn render_crtc(&mut self, dev: DeviceId, crtc: crtc::Handle) {
         let Backend::Tty(tty) = &mut self.backend else {
             return;
         };
-        let active = tty.drm.is_active();
-        let Some(lit) = tty.outputs.get_mut(&crtc) else {
+        let active = tty.device(dev).is_some_and(|d| d.drm.is_active());
+        let Some(lit) = tty.outputs.get_mut(&(dev, crtc)) else {
             return;
         };
         if !lit.redraw_is_queued() {
@@ -1733,6 +2089,10 @@ impl JffState {
         // when it comes back. This also stops the estimated vblank timer, if one is running.
         if !active || lit.powered_off {
             lit.reset_redraw(&tty.loop_handle);
+            return;
+        }
+        if lit.via_primary {
+            self.render_secondary_crtc(dev, crtc);
             return;
         }
         // When this frame reaches the screen. Timed commits due by then belong in it, and
@@ -1756,11 +2116,15 @@ impl JffState {
         let Tty {
             renderer,
             outputs,
-            drm,
+            primary,
+            secondary,
             loop_handle,
             ..
         } = &mut *tty;
-        let Some(lit) = outputs.get_mut(&crtc) else {
+        let Some(drm) = pick_device(primary, secondary, dev).map(|d| &d.drm) else {
+            return;
+        };
+        let Some(lit) = outputs.get_mut(&(dev, crtc)) else {
             return;
         };
 
@@ -2451,7 +2815,7 @@ impl JffState {
                                 &self.desk,
                                 &lit.output,
                                 hdr_states.as_ref().unwrap_or(&res.states),
-                                dmabuf_feedback,
+                                Some(dmabuf_feedback),
                                 scanout,
                             );
                         }
@@ -2578,9 +2942,9 @@ impl JffState {
         } else {
             // Nothing went to the display, so no vblank is coming. What clients committed is
             // already on screen: their barriers go, their callbacks wait for the estimated vblank.
-            tty.queue_estimated_vblank(crtc);
+            tty.queue_estimated_vblank(dev, crtc);
             if retry {
-                if let Some(lit) = tty.outputs.get_mut(&crtc) {
+                if let Some(lit) = tty.outputs.get_mut(&(dev, crtc)) {
                     lit.queue_redraw();
                 }
             }
@@ -2599,12 +2963,154 @@ impl JffState {
         }
     }
 
-    /// The timer that stands in for a vblank went off (see [`RedrawState::WaitingForEstimatedVBlank`]).
-    fn on_estimated_vblank(&mut self, crtc: crtc::Handle) {
+    /// Draw one frame to a monitor on a secondary GPU: the primary draws it, the secondary shows it.
+    fn render_secondary_crtc(&mut self, dev: DeviceId, crtc: crtc::Handle) {
         let Backend::Tty(tty) = &mut self.backend else {
             return;
         };
-        let Some(lit) = tty.outputs.get_mut(&crtc) else {
+        let Some(lit) = tty.outputs.get_mut(&(dev, crtc)) else {
+            return;
+        };
+        let presented_at = lit.next_presentation_time();
+        let output = lit.output.clone();
+        self.release_commit_timers(&output, presented_at);
+        // the primary draws the monitor's frame into a buffer the secondary can read
+        self.update_cross_frame(dev, crtc, &output);
+
+        let Backend::Tty(tty) = &mut self.backend else {
+            return;
+        };
+        tty.apply_gamma();
+        let Tty {
+            outputs,
+            secondary,
+            loop_handle,
+            ..
+        } = &mut *tty;
+        let Some(lit) = outputs.get_mut(&(dev, crtc)) else {
+            return;
+        };
+        let Some(renderer) = secondary_renderer(secondary, dev) else {
+            tracing::warn!("monitor {}: its GPU has no renderer", output.name());
+            lit.reset_redraw(loop_handle);
+            return;
+        };
+
+        // After a VT switch `reset_state` read back what the other VT left on the connector: SDR
+        // is signalled again with the next frame, as on the primary.
+        if lit.color_dirty {
+            lit.color_dirty = false;
+            if let Err(err) = lit.compositor.use_color_state(lit.color_target) {
+                tracing::warn!("monitor {}: cannot signal SDR: {err}", lit.output.name());
+            }
+        }
+
+        // The frame that came across, or a plain color until the first one does. An unchanged
+        // frame is the same texture, so the compositor finds nothing new to show.
+        let element: CrossElement = match lit.cross.as_ref().and_then(|c| c.shown.as_ref()) {
+            Some(buffer) => TextureRenderElement::from_texture_render_buffer(
+                (0.0, 0.0),
+                buffer,
+                None,
+                None,
+                None,
+                Kind::Unspecified,
+            )
+            .into(),
+            None => {
+                let (width, height) = lit.mode.size();
+                let size = output
+                    .current_transform()
+                    .transform_size(Size::<i32, Physical>::from((width as i32, height as i32)));
+                SolidColorRenderElement::new(
+                    Id::new(),
+                    Rectangle::<i32, Physical>::new((0, 0).into(), size),
+                    CommitCounter::default(),
+                    SECONDARY_PLACEHOLDER,
+                    Kind::Unspecified,
+                )
+                .into()
+            }
+        };
+
+        let locked = self.session_lock.is_locked();
+        let mut queued = false;
+        match lit.compositor.render_frame(
+            &mut *renderer,
+            &[element],
+            SECONDARY_PLACEHOLDER,
+            FrameFlags::empty(),
+            PresentationMode::VSync,
+        ) {
+            Ok(res) => {
+                if res.needs_sync() {
+                    if let PrimaryPlaneElement::Swapchain(element) = res.primary_element {
+                        if let Err(err) = element.sync.wait() {
+                            tracing::warn!("error waiting for frame completion: {err:?}");
+                        }
+                    }
+                }
+                if res.is_empty {
+                    // nothing of the desktop is on this monitor yet: a lock is already in place
+                    if locked {
+                        self.session_lock.presented_locked(&lit.output);
+                    }
+                } else {
+                    // what the primary drew says which surfaces were shown, the secondary only has the one texture
+                    let states = lit
+                        .cross
+                        .as_ref()
+                        .and_then(|c| c.states.as_ref())
+                        .unwrap_or(&res.states);
+                    // the monitor a surface is shown on, which color management and callbacks go by
+                    send_surface_feedback(
+                        &self.desk,
+                        &lit.output,
+                        states,
+                        lit.dmabuf_feedback.as_ref(),
+                        false,
+                    );
+                    let feedback = crate::protocol::presentation::take_feedback(
+                        &self.desk,
+                        &lit.output,
+                        states,
+                    );
+                    match lit.compositor.queue_frame(feedback) {
+                        Ok(()) => {
+                            queued = true;
+                            lit.locked_frame = locked;
+                        }
+                        Err(err) => tracing::warn!("error queueing frame: {err}"),
+                    }
+                }
+            }
+            Err(err) => tracing::warn!("error rendering frame: {err}"),
+        }
+
+        if queued {
+            if let RedrawState::WaitingForEstimatedVBlankAndQueued { token } = lit.redraw {
+                loop_handle.remove(token);
+            }
+            lit.redraw = RedrawState::WaitingForVBlank {
+                redraw_needed: false,
+            };
+            advance_frame_sequence(&output);
+            self.image_copy.output_drawn(&output);
+            self.wlr_screencopy.output_drawn(&output);
+            self.send_frame_callbacks(&output);
+        } else {
+            // no vblank is coming: the timer stands in for it, as on the primary
+            tty.queue_estimated_vblank(dev, crtc);
+            self.release_fifo_barriers(&output);
+        }
+    }
+
+    /// The timer that stands in for a vblank went off (see [`RedrawState::WaitingForEstimatedVBlank`]).
+    fn on_estimated_vblank(&mut self, dev: DeviceId, crtc: crtc::Handle) {
+        let Backend::Tty(tty) = &mut self.backend else {
+            return;
+        };
+        let Some(lit) = tty.outputs.get_mut(&(dev, crtc)) else {
             return;
         };
         match lit.redraw {
@@ -2626,7 +3132,7 @@ impl JffState {
 
         let ongoing = self.animations_ongoing();
         if let Backend::Tty(tty) = &mut self.backend {
-            if let Some(lit) = tty.outputs.get_mut(&crtc) {
+            if let Some(lit) = tty.outputs.get_mut(&(dev, crtc)) {
                 if ongoing {
                     lit.queue_redraw();
                 }
@@ -2635,14 +3141,14 @@ impl JffState {
     }
 
     /// The display showed the frame queued on `crtc`.
-    fn on_vblank(&mut self, crtc: crtc::Handle, meta: Option<DrmEventMetadata>) {
+    fn on_vblank(&mut self, dev: DeviceId, crtc: crtc::Handle, meta: Option<DrmEventMetadata>) {
         // The frame that just reached the screen says which monitor each surface is on: a window
         // that moved to a monitor with other colors learns its new preferred description.
         crate::protocol::color_management::refresh_feedbacks(self);
         let Backend::Tty(tty) = &mut self.backend else {
             return;
         };
-        let Some(lit) = tty.outputs.get_mut(&crtc) else {
+        let Some(lit) = tty.outputs.get_mut(&(dev, crtc)) else {
             return;
         };
         // Out of the waiting state for the rest of this handler. A commit that comes in while
@@ -2659,7 +3165,7 @@ impl JffState {
                 redraw_needed: true
             }
         );
-        let Some(lit) = tty.outputs.get_mut(&crtc) else {
+        let Some(lit) = tty.outputs.get_mut(&(dev, crtc)) else {
             return;
         };
         // kernel flip timestamp, if it gave one on the monotonic clock
@@ -2705,7 +3211,7 @@ impl JffState {
         let Backend::Tty(tty) = &mut self.backend else {
             return;
         };
-        let Some(lit) = tty.outputs.get_mut(&crtc) else {
+        let Some(lit) = tty.outputs.get_mut(&(dev, crtc)) else {
             return;
         };
         if redraw_needed || ongoing {
@@ -2717,13 +3223,74 @@ impl JffState {
         }
     }
 
+    /// A DRM node appeared: open the GPU if it is one, and light its monitors.
+    fn on_gpu_added(&mut self) {
+        let Backend::Tty(tty) = &mut self.backend else {
+            return;
+        };
+        if tty.open_new_gpus() {
+            self.scan_tty_outputs();
+        }
+    }
+
+    /// A DRM node went away. If it was a secondary GPU, its monitors go first (clients are told
+    /// they are gone), then the GPU is closed. The primary cannot be replaced.
+    fn on_gpu_removed(&mut self, device_id: libc::dev_t) {
+        let Backend::Tty(tty) = &mut self.backend else {
+            return;
+        };
+        let is = |device: &GpuDevice| device.drm.device_fd().dev_id().ok() == Some(device_id);
+        let Some(slot) = tty
+            .secondary
+            .iter()
+            .position(|device| device.as_ref().is_some_and(is))
+        else {
+            if is(&tty.primary) {
+                // nothing can be drawn without it, and every frame would only fail
+                tracing::error!("the primary GPU was removed, jff cannot draw any more: stopping");
+                self.loop_signal.stop();
+            }
+            return;
+        };
+        let dev = DeviceId(slot + 1);
+        let keys: Vec<OutputKey> = tty
+            .outputs
+            .keys()
+            .filter(|key| key.0 == dev)
+            .copied()
+            .collect();
+        let mut lits: Vec<TtyOutput> = keys
+            .iter()
+            .filter_map(|key| tty.outputs.remove(key))
+            .collect();
+        for lit in &mut lits {
+            lit.reset_redraw(&tty.loop_handle);
+        }
+        let outputs: Vec<Output> = lits.iter().map(|lit| lit.output.clone()).collect();
+        for output in outputs {
+            tracing::info!("monitor {} removed", output.name());
+            self.remove_output(&output);
+        }
+        // the compositors hold the GPU's buffers, they go before it
+        drop(lits);
+        if let Backend::Tty(tty) = &mut self.backend {
+            if let Some(token) = tty.secondary[slot].as_ref().and_then(|d| d.events) {
+                tty.loop_handle.remove(token);
+            }
+            tty.secondary[slot] = None;
+            tracing::info!("GPU removed");
+        }
+        // forgets the monitors of the GPU and tells output management
+        self.scan_tty_outputs();
+    }
+
     /// Rescan for plugged, unplugged or reconfigured monitors and update the outputs.
     pub fn scan_tty_outputs(&mut self) {
         let Backend::Tty(tty) = &mut self.backend else {
             return;
         };
         // on another VT, the scan happens when the session comes back
-        if !tty.drm.is_active() {
+        if !tty.primary.drm.is_active() {
             return;
         }
         let known = tty.monitors().to_vec();
@@ -2776,7 +3343,10 @@ impl JffState {
             SessionEvent::PauseSession => {
                 tracing::info!("session paused");
                 tty.libinput.suspend();
-                tty.drm.pause();
+                tty.primary.drm.pause();
+                for device in tty.secondary.iter_mut().flatten() {
+                    device.drm.pause();
+                }
                 // the kernel took the leases back with the device
                 tty.active_leases.clear();
                 if let Some(state) = tty.lease_state.as_mut() {
@@ -2791,9 +3361,16 @@ impl JffState {
                 if tty.libinput.resume().is_err() {
                     tracing::warn!("error resuming libinput");
                 }
-                if let Err(err) = tty.drm.activate(false) {
+                if let Err(err) = tty.primary.drm.activate(false) {
                     tracing::warn!("error activating the DRM device: {err:?}");
                 }
+                for device in tty.secondary.iter_mut().flatten() {
+                    if let Err(err) = device.drm.activate(false) {
+                        tracing::warn!("error activating a secondary DRM device: {err:?}");
+                    }
+                }
+                // a GPU that appeared while another VT was in front could not be opened then
+                tty.open_new_gpus();
                 if let Some(state) = tty.lease_state.as_mut() {
                     state.resume::<JffState>();
                 }
@@ -2826,5 +3403,41 @@ impl JffState {
                 tracing::warn!("error changing VT: {err}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_gpu_keeps_the_connector_name() {
+        let mut names = HashSet::new();
+        assert_eq!(
+            unique_name(&mut names, "DP-1", "card0").as_deref(),
+            Some("DP-1")
+        );
+        assert_eq!(
+            unique_name(&mut names, "DP-1", "card1").as_deref(),
+            Some("card1-DP-1")
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_taken_twice_is_given_up() {
+        let mut names = HashSet::new();
+        names.insert("DP-1".to_string());
+        names.insert("card1-DP-1".to_string());
+        assert_eq!(unique_name(&mut names, "DP-1", "card1"), None);
+    }
+
+    #[test]
+    fn different_connectors_do_not_clash() {
+        let mut names = HashSet::new();
+        assert!(unique_name(&mut names, "DP-1", "card0").is_some());
+        assert_eq!(
+            unique_name(&mut names, "HDMI-A-1", "card1").as_deref(),
+            Some("HDMI-A-1")
+        );
     }
 }

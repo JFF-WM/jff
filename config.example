@@ -68,9 +68,14 @@ focus-follows-mouse #true
 // moves the pointer to the keyboard, so the two never disagree after Alt+Tab.
 warp-mouse-to-focus #true
 
-// The GPU jff uses (read at startup). By default it is the primary one, the GPU the machine
-// booted on. jff drives only the monitors of that one GPU: monitors wired to another GPU stay
-// dark, and the log says so. Name the other GPU here when that is where your monitors are.
+// The GPU that draws everything (read at startup). By default it is the primary one, the GPU
+// the machine booted on. Every other GPU is opened too and lights the monitors wired to it, with
+// no setting needed: they are named and set up in `outputs` like any other monitor. A name
+// that two GPUs share (`DP-1` is on every GPU) stays with the primary's, and the other monitor
+// is called after its GPU, `card1-DP-1`. The primary draws their frames and the other GPU only
+// shows them, so they are SDR only, the cursor is drawn in software and `adaptive-sync` and
+// `content-type-hint` do nothing there. A GPU plugged in while jff runs is picked up too. Name
+// the GPU you want as primary here, usually the strongest one.
 // List them with `ls /dev/dri/card*`.
 // render-device "/dev/dri/card1"
 

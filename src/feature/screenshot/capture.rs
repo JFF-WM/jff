@@ -37,7 +37,9 @@ use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
 };
-use smithay::backend::renderer::element::{AsRenderElements, Element, Id, Kind, RenderElement};
+use smithay::backend::renderer::element::{
+    AsRenderElements, Element, Id, Kind, RenderElement, RenderElementStates,
+};
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::{Bind, ExportMem, Offscreen, TextureMapping};
@@ -58,6 +60,7 @@ use smithay::utils::{
 
 use crate::app::{Backend, BACKGROUND};
 use crate::feature::outputs::{frame_size, output_rect};
+use crate::feature::overview_mode::{overview_drag_elements, overview_elements};
 use crate::feature::screenshot::area::{
     crop_channels, crop_rgba, flip_rows, physical_rect, screenshot_dir, Selector,
 };
@@ -70,6 +73,7 @@ use crate::protocol::color_management::{OutputColor, WorkingSpace};
 use crate::protocol::layer_shell::{
     layer_body_elements, layer_elements, layer_popup_elements, layers_above, BELOW_WINDOWS,
 };
+use crate::protocol::session_lock::{lock_surface_elements, LOCKED_BACKGROUND};
 use crate::render::cursor::RenderCursor;
 use crate::render::effects::background_effect::window_elements;
 use crate::render::effects::border::BorderPaint;
@@ -451,7 +455,7 @@ impl JffState {
         output: &Output,
         with_cursor: bool,
     ) -> Result<Captured, String> {
-        let frame = self.output_frame(output, with_cursor, None)?;
+        let frame = self.output_frame(output, with_cursor, None, false)?;
         render_to_rgba(
             self.backend.renderer(),
             frame.size,
@@ -470,7 +474,7 @@ impl JffState {
         with_cursor: bool,
         dmabuf: &mut Dmabuf,
     ) -> Result<Size<i32, BufferCoords>, String> {
-        let frame = self.output_frame(output, with_cursor, None)?;
+        let frame = self.output_frame(output, with_cursor, None, false)?;
         let size = dmabuf.size();
         if (size.w, size.h) != frame.size {
             return Err(format!(
@@ -487,6 +491,99 @@ impl JffState {
             BACKGROUND,
         )?;
         Ok(size)
+    }
+
+    /// Draw `output` as its monitor shows it into `dmabuf`, for a monitor on a GPU that only scans out.
+    pub(crate) fn draw_output_for_scanout(
+        &mut self,
+        output: &Output,
+        dmabuf: &mut Dmabuf,
+        tracker: &mut OutputDamageTracker,
+        age: usize,
+    ) -> Result<(bool, RenderElementStates), String> {
+        let locked = self.session_lock.is_locked();
+        let pointer: Point<f64, Logical> = self
+            .seat
+            .get_pointer()
+            .map(|p| p.current_location())
+            .unwrap_or_default();
+        let mut frame = if locked {
+            // the lock screen and the cursor, as `render_crtc` draws a locked monitor
+            let size = frame_size(output).ok_or("the monitor has no mode (it is off)")?;
+            let scale_factor = output.current_scale().fractional_scale();
+            let scale = Scale::from(scale_factor);
+            let rect = output_rect(output);
+            let origin: Point<i32, Logical> = (rect.0, rect.1).into();
+            let color_scope = gamut::enter(crate::protocol::color_management::output_color(
+                &self.config,
+                &self.color_management,
+                &output.name(),
+            ));
+            let near = layout::contains(layout::grow(rect, CURSOR_MARGIN), (pointer.x, pointer.y));
+            let cursor = near.then(|| self.cursor.render_cursor());
+            let millis = self.start_time.elapsed().as_millis() as u32;
+            let renderer = self.backend.renderer();
+            let mut elements: Vec<JffElement> = Vec::new();
+            if let Some(cursor) = cursor {
+                elements.extend(cursor_elements(
+                    &mut *renderer,
+                    cursor,
+                    pointer,
+                    origin,
+                    scale,
+                    millis,
+                ));
+            }
+            elements.extend(lock_surface_elements(
+                &mut *renderer,
+                &self.session_lock,
+                output,
+                scale,
+            ));
+            OutputFrame {
+                elements,
+                size,
+                scale: scale_factor,
+                _color_scope: color_scope,
+            }
+        } else {
+            self.output_frame(output, true, None, true)?
+        };
+        // TODO: the stats overlay is not drawn on a monitor of another GPU yet. It needs the
+        // snapshot `render_crtc` stores from what the output compositor did, which a monitor
+        // shown through a copy has no equivalent of.
+        if !locked && !self.osd.is_empty() {
+            let mut toasts = Vec::new();
+            self.osd
+                .elements(self.backend.renderer(), output, pointer, &mut toasts);
+            frame.elements.splice(0..0, toasts);
+        }
+
+        let size = dmabuf.size();
+        if (size.w, size.h) != frame.size {
+            return Err(format!(
+                "the buffer is {}x{}, the frame {}x{}",
+                size.w, size.h, frame.size.0, frame.size.1
+            ));
+        }
+        let clear = if locked {
+            LOCKED_BACKGROUND
+        } else {
+            BACKGROUND
+        };
+        let renderer = self.backend.renderer();
+        let mut target = renderer
+            .bind(dmabuf)
+            .map_err(|err| format!("could not draw into the buffer: {err:?}"))?;
+        let result = tracker
+            .render_output(renderer, &mut target, age, &frame.elements, clear)
+            .map_err(|err| format!("could not render the frame: {err:?}"))?;
+        let changed = result.damage.is_some_and(|damage| !damage.is_empty());
+        if changed {
+            // the other GPU reads this next: it has to be done
+            let _ = result.sync.wait();
+        }
+        Ok((changed, result.states))
     }
 
     /// The working space and final pass of `output` while it is shown as HDR, `None` when it is
@@ -509,7 +606,7 @@ impl JffState {
         let (space, pass) = self
             .hdr_capture(output)
             .ok_or("the monitor is not shown as HDR")?;
-        let frame = self.output_frame(output, with_cursor, Some(space))?;
+        let frame = self.output_frame(output, with_cursor, Some(space), false)?;
         let renderer = self.backend.renderer();
         let elements = hdr_frame::linearize(&mut *renderer, frame.elements, space);
         let half_rgba = render_to_working(
@@ -538,12 +635,13 @@ impl JffState {
 
     /// Build what a picture of `output` draws. `hdr` is the working space of a monitor in HDR
     /// mode: the elements are then converted to it, and a picture in the sRGB of a file is not
-    /// what comes out.
+    /// what comes out. `screen` converts to the colors of the monitor instead of sRGB.
     fn output_frame(
         &mut self,
         output: &Output,
         with_cursor: bool,
         hdr: Option<WorkingSpace>,
+        screen: bool,
     ) -> Result<OutputFrame, String> {
         self.refuse_when_locked()?;
         let size = frame_size(output).ok_or("the monitor has no mode (it is off)")?;
@@ -558,9 +656,22 @@ impl JffState {
             .unwrap_or_default();
         let millis = self.start_time.elapsed().as_millis() as u32;
         let fullscreen = self.fullscreen_rects();
+        // A monitor on another GPU is drawn here, so it shows what `render_crtc` shows: the
+        // overview, the animations and everything that floats above the windows. A picture in a
+        // file is the desktop as it is, without them. May end the overview, so before anything borrows.
+        let overview = if screen { self.overview_plan() } else { None };
+        let overview_here = overview.as_ref().filter(|plan| plan.output == *output);
         // A picture in a file is sRGB: everything drawn below, layers and menus included, is
         // converted to that, not to the panel. An HDR picture is the working space instead.
-        let color = crate::protocol::color_management::capture_color(&self.config);
+        let color = if screen {
+            crate::protocol::color_management::output_color(
+                &self.config,
+                &self.color_management,
+                &output.name(),
+            )
+        } else {
+            crate::protocol::color_management::capture_color(&self.config)
+        };
         let color = match hdr {
             Some(space) => Some(crate::protocol::color_management::hdr_color(color, space)),
             None => color,
@@ -585,13 +696,69 @@ impl JffState {
                 millis,
             ));
         }
+        if screen {
+            // a dragged item sits under the cursor, above everything else
+            if cursor_near {
+                let loc: Point<i32, Physical> =
+                    (pointer.to_i32_round() - origin).to_physical_precise_round(scale);
+                elements.extend(crate::feature::dnd::icon_elements(
+                    self.dnd_icon.as_ref(),
+                    &mut *renderer,
+                    loc,
+                    scale,
+                ));
+            }
+            elements.extend(crate::feature::containers::tile_carry_elements(
+                self.tile_carry.as_ref(),
+                pointer,
+                self.config.radius(),
+                &mut *renderer,
+                origin,
+                rect,
+            ));
+            // input method candidates sit above windows and panels
+            let input_popups = crate::protocol::text_input::place_input_popups(
+                &self.text_input,
+                &self.desk,
+                &self.outputs,
+            );
+            elements.extend(crate::protocol::text_input::input_popup_elements(
+                &mut *renderer,
+                &input_popups,
+                rect,
+                scale,
+            ));
+            // while an area screenshot is open here, the frozen frame replaces layers and windows
+            if let Some(ui) = self.screenshot.as_ref().filter(|ui| ui.shows(output)) {
+                elements.extend(screenshot_elements(&mut *renderer, ui));
+                return Ok(OutputFrame {
+                    elements,
+                    size,
+                    scale: scale_factor,
+                    _color_scope: color_scope,
+                });
+            }
+        }
         // The same pieces in the same order as `render_crtc`, so the picture has what the screen
         // has: blur behind translucent windows and panels, rounded corners, borders.
         let blur_config = (!self.config.blur().off).then(|| self.config.blur());
         let snapshot = blur_config
             .filter(|b| !b.behind_windows)
             .map(|_| WallpaperSnapshot::for_output(&output.name()));
-        let above = layers_above(&fullscreen, rect, false);
+        // a thumbnail dragged onto another monitor stays on top there
+        if overview_here.is_none() {
+            if let Some(plan) = &overview {
+                elements.extend(overview_drag_elements(
+                    &mut *renderer,
+                    plan,
+                    origin,
+                    rect,
+                    blur_config,
+                    snapshot.as_ref(),
+                ));
+            }
+        }
+        let above = layers_above(&fullscreen, rect, overview_here.is_some());
         elements.extend(layer_elements(
             &mut *renderer,
             output,
@@ -611,37 +778,75 @@ impl JffState {
         let radius = self.config.radius();
         let popup_radius = self.config.popup_radius();
         let border = self.config.border();
-        for entry in self.desk.top_down() {
-            let geo = entry.window.geometry();
-            let window_origin: Point<i32, Logical> = Point::from(entry.pos) - geo.loc;
-            let bbox = entry.window.bbox();
-            let area = (
-                window_origin.x + bbox.loc.x,
-                window_origin.y + bbox.loc.y,
-                bbox.size.w,
-                bbox.size.h,
-            );
-            // Windows on other monitors don't belong here.
-            if !layout::intersects(area, rect) {
-                continue;
-            }
-            // A window is a picture of itself as it is now: no opening animation.
-            window_elements(
+        // Animations are only for the screen: a picture of a window is it as it is now. The
+        // clock is the moment of drawing, not of the flip, which is within a frame of it.
+        let animate = screen && self.config.window_animations();
+        let (open_time, close_time) = self.config.window_animation_times();
+        let open_style = self.config.window_open_style();
+        let now = std::time::Instant::now();
+        if let Some(plan) = overview_here {
+            // the monitor showing the overview draws thumbnails instead of windows
+            elements.extend(overview_elements(
                 &mut *renderer,
-                &entry.window,
-                window_origin - origin,
-                self.config.blur_for_window(
-                    blur_config,
-                    &crate::feature::overview_mode::app_id_of(&entry.window),
-                ),
+                plan,
+                origin,
+                blur_config,
                 snapshot.as_ref(),
-                radius,
-                popup_radius,
-                color,
-                BorderPaint::of(border, &entry.window, self.focused_window.as_ref()),
-                OpenFrame::DONE.with_opacity(entry.opacity),
-                &mut elements,
-            );
+            ));
+        } else {
+            if screen {
+                // windows that were just closed, fading out, are on top
+                crate::feature::window_anim::ghost_elements(
+                    &mut *renderer,
+                    &mut self.closing,
+                    self.desk.current_on(&output.name()),
+                    origin,
+                    close_time,
+                    now,
+                    &mut elements,
+                );
+            }
+            for entry in self.desk.top_down() {
+                let geo = entry.window.geometry();
+                let window_origin: Point<i32, Logical> = Point::from(entry.pos) - geo.loc;
+                let bbox = entry.window.bbox();
+                let area = (
+                    window_origin.x + bbox.loc.x,
+                    window_origin.y + bbox.loc.y,
+                    bbox.size.w,
+                    bbox.size.h,
+                );
+                // Windows on other monitors don't belong here.
+                if !layout::intersects(area, rect) {
+                    continue;
+                }
+                window_elements(
+                    &mut *renderer,
+                    &entry.window,
+                    window_origin - origin,
+                    self.config.blur_for_window(
+                        blur_config,
+                        &crate::feature::overview_mode::app_id_of(&entry.window),
+                    ),
+                    snapshot.as_ref(),
+                    radius,
+                    popup_radius,
+                    color,
+                    BorderPaint::of(border, &entry.window, self.focused_window.as_ref()),
+                    (if animate {
+                        crate::feature::window_anim::open_frame(
+                            open_style,
+                            entry.shown,
+                            now,
+                            open_time,
+                        )
+                    } else {
+                        OpenFrame::DONE
+                    })
+                    .with_opacity(entry.opacity),
+                    &mut elements,
+                );
+            }
         }
         // Fills the wallpaper copy the window blurs read: right after the background layers.
         if let Some(snapshot) = &snapshot {

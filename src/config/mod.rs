@@ -1340,7 +1340,7 @@ pub struct Config {
     allow_tearing: bool,
     /// `global-hotkeys`: clients may bind their own global hotkeys (xx-hotkey-v1). Off by default.
     global_hotkeys: bool,
-    /// `render-device "/dev/dri/cardN"`: the GPU jff opens, `None` for the primary one.
+    /// `render-device "/dev/dri/cardN"`: the GPU that draws everything, `None` for the primary one.
     render_device: Option<String>,
     /// `restore-apps`: start the apps that were open in the last session, and remember the ones
     /// open now. Off by default.
@@ -2104,8 +2104,7 @@ impl Config {
         self.global_hotkeys
     }
 
-    /// The GPU to use (`render-device`), `None` for the primary one. Read when jff starts. jff
-    /// drives the monitors of this one GPU only.
+    /// The GPU that draws everything (`render-device`), `None` for the primary one. Read when jff starts.
     pub fn render_device(&self) -> Option<&str> {
         self.render_device.as_deref()
     }
