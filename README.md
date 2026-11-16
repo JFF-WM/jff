@@ -1,28 +1,48 @@
 # jff
 
-A minimal stacking Wayland compositor, just for fun. Written in Rust, built on
-[Smithay](https://github.com/Smithay/smithay). GPL-3.0-or-later.
+A stacking Wayland compositor that started as "just for fun" and kept growing:
+real HDR, tiling when you want it, touchscreens and gestures that just work, and
+rules that decide what every app does the moment it opens. Written in Rust,
+built on [Smithay](https://github.com/Smithay/smithay). GPL-3.0-or-later.
 
 ![jff](resources/jff.svg)
 
 ## What it does
 
 - **Windows:** stacking, click-to-focus, Alt+drag to move or resize anything,
-  maximize, fullscreen, snap to a half of the monitor, and an Alt+Tab switcher.
+  maximize, fullscreen, snap to a half of the monitor, minimize, a scratchpad,
+  and an Alt+Tab switcher.
+- **Tiling when you want it:** windows float by default. Turn on
+  `tiling-containers` and any group of windows can tile among themselves, with
+  splits you drag, names you give them, and layouts you save and bring back.
+  Everything else stays floating, so you never have to pick a side.
 - **Workspaces:** nine by default, shared across monitors, or one set per
   monitor.
 - **Overview:** every window of the current monitor as a thumbnail, with a
   built-in app launcher search. Drag a window to another monitor or workspace.
-- **Window rules:** open an app on a given monitor or workspace, maximized,
-  floating or at a fixed size.
-- **Multi-monitor:** positions, modes, hotplug, adaptive sync, and an ICC
-  calibration profile per monitor. Works with wlr-randr and kanshi.
+- **Window rules:** decide what an app does the moment it opens. Send it to a
+  monitor or a workspace, maximize it, float it, give it a size, drop it in the
+  middle of the screen or at an exact spot, make it a little see-through, put it
+  in a named container, or set how bright its whites are on an HDR monitor. Match
+  by app id, title, tag or dialog, and the first rule that fits wins.
+- **Touchscreens and gestures:** fingers reach apps as real touch, and three
+  fingers belong to jff: swipe sideways to change workspace, up to open the
+  overview, down to close it, just like on a touchpad. Pick which monitor each
+  touchscreen covers, rotated and scaled screens line up on their own, and apps
+  that have never heard of touch still get your taps as clicks. Pens and
+  graphics tablets work too.
+- **Multi-monitor:** positions, modes, hotplug, rotation, scaling, adaptive sync,
+  HDR, and an ICC calibration profile per monitor. Works with wlr-randr and
+  kanshi.
 - **Screenshots:** full monitor, single window, or a dragged rectangle, saved
   as PNG and optionally copied to the clipboard.
 - **Looks:** gaps, rounded corners, focus borders, open/close animations, and
   background blur for translucent windows and panels (off until you enable it,
   and it needs a wallpaper set).
 - **Hot corner** that opens the overview.
+- **Scriptable:** `jff msg` talks to the running compositor (list monitors, start
+  programs, click, switch layouts), and an event stream tells your scripts what
+  jff is doing.
 - **X11 apps** (Steam, Wine, older games and tools): jff has no X server of its
   own. Install [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite)
   (it needs `Xwayland` too) and jff starts it for you and sets `DISPLAY` for
@@ -36,6 +56,26 @@ A minimal stacking Wayland compositor, just for fun. Written in Rust, built on
   grim), `wtype` and `wlrctl`, graphics tablets.
 - **Sandboxed apps** (Flatpak) don't get access to the clipboard managers,
   virtual keyboard or pointer.
+
+## Colour and HDR
+
+jff takes colour seriously. Switch on `hdr` for a monitor and jff drives it in
+HDR, with the desktop at a white level you choose (`sdr-white`) and everything
+else mapped to what the screen can really show.
+
+- **HDR and normal windows side by side.** Ordinary apps are shown as sRGB at
+  your desktop brightness. HDR apps keep their extra light, tone-mapped to the
+  monitor.
+- **Per-app brightness.** A window rule can give a game or a video player its
+  own SDR white, brighter or dimmer than the desktop, or force a window to be
+  read as plain sRGB whatever it claims.
+- **Apps tell jff the truth.** The colour-management protocol lets players and
+  games say exactly what colour space and brightness they use, and jff shows it
+  right instead of guessing.
+- **Wide gamut and calibration.** An ICC profile per monitor, and gamut mapping
+  for screens that are wider (or narrower) than sRGB.
+- **HDR you can keep.** Screenshots of HDR content can stay HDR instead of being
+  squashed to SDR.
 
 ## Made for games and speed
 
@@ -64,6 +104,7 @@ separate path only when you turn them on.
 | Keyboard shortcuts inhibit                       | A game can take every key. `Super+Escape` always gives them back                                                                      |
 | Idle inhibit                                     | Screen stays awake during games and video                                                                                             |
 | DRM lease                                        | VR headsets are handed straight to the VR runtime                                                                                     |
+| `wp_color_management`                            | HDR and wide-gamut games and video are shown in their own colours and brightness, not flattened to sRGB                               |
 | `wp_color_representation`                        | Video is drawn with the colour matrix and range it declares (`color-representation { yuv }`), but such a surface skips direct scanout |
 
 ## Build
