@@ -4,8 +4,10 @@ use std::time::Duration;
 
 use jff_wm::primitives::color::{ImageDescription, NamedPrimaries, NamedTf, TransferFunction};
 use jff_wm::primitives::stats::{
-    fourcc, primaries_name, sections, tf_name, to_json, BufferKind, Path, Row, Snapshot, Ticks,
-    Tone, Vrr, Why,
+    blame, budget_of, ClientSync, commit_latency, countable_prediction, drift_ms, fourcc, missed_vblank,
+    modifier_name, primaries_name, sections, tf_name, to_json, Blame, BufferKind, Costs, FrameCost, Latencies,
+    Path, Presented, Row, Snapshot, SyncSummary, Syncs, Ticks, Timing, Tone, Vrr, Why,
+    SYNC_TARGET, MODIFIER_INVALID,
 };
 
 fn ms(n: u64) -> Duration {
@@ -119,10 +121,14 @@ fn snapshot() -> Snapshot {
         client: None,
         shown: None,
         display_hz: 144.0,
+        cost: None,
+        sync: None,
+        latency: None,
         fullscreen: true,
         wants_tearing: false,
         says_game: false,
-        buffer: BufferKind::Dmabuf(0x3432_5258),
+        client_sync: ClientSync::default(),
+        buffer: BufferKind::Dmabuf(0x3432_5258, 0),
         buffer_size: Some((2560, 1440)),
         window_size: (2560, 1440),
         color: None,
@@ -253,7 +259,6 @@ fn an_idle_display_says_so() {
 
 #[test]
 fn shown_below_client_is_a_warning() {
-    use jff_wm::primitives::stats::Timing;
     let timing = |fps| Timing {
         fps,
         avg_ms: 1000.0 / fps,
@@ -298,4 +303,631 @@ fn json_has_the_three_columns_and_is_balanced() {
     let close = json.matches('}').count();
     assert_eq!(open, close);
     assert!(!json.contains('\n'));
+}
+
+fn cost(cpu_us: u64, gpu_us: Option<u64>) -> FrameCost {
+    FrameCost {
+        cpu: Duration::from_micros(cpu_us),
+        gpu_wait: gpu_us.map(Duration::from_micros),
+    }
+}
+
+/// `count` frames of `cost`, one every `every_us` microseconds from 1 s on.
+fn frames(count: u64, every_us: u64, each: FrameCost) -> Costs {
+    let mut costs = Costs::default();
+    for i in 0..count {
+        costs.push(ms(1000) + Duration::from_micros(i * every_us), each);
+    }
+    costs
+}
+
+fn timing_at(fps: f64) -> Timing {
+    Timing {
+        fps,
+        avg_ms: 1000.0 / fps,
+        worst_ms: 1000.0 / fps,
+        low1_fps: fps,
+        jitter_ms: 0.1,
+    }
+}
+
+#[test]
+fn the_budget_is_the_refresh_interval() {
+    let b = budget_of(60_000).unwrap();
+    assert!((b.as_secs_f64() * 1000.0 - 16.667).abs() < 0.01);
+    assert_eq!(budget_of(0), None);
+    assert_eq!(budget_of(-1), None);
+}
+
+#[test]
+fn costs_are_averaged_and_the_worst_is_kept() {
+    let mut costs = Costs::default();
+    costs.push(ms(1000), cost(2000, Some(4000)));
+    costs.push(ms(1017), cost(4000, Some(8000)));
+    let sum = costs.summary(ms(1100), budget_of(60_000)).unwrap();
+    assert_eq!(sum.frames, 2);
+    assert!((sum.cpu_avg_ms - 3.0).abs() < 1e-9);
+    assert!((sum.cpu_worst_ms - 4.0).abs() < 1e-9);
+    assert!((sum.gpu_avg_ms.unwrap() - 6.0).abs() < 1e-9);
+    assert!((sum.gpu_worst_ms.unwrap() - 8.0).abs() < 1e-9);
+    assert!((sum.total_avg_ms - 9.0).abs() < 1e-9);
+    assert!((sum.total_worst_ms - 12.0).abs() < 1e-9);
+    assert_eq!(sum.late, 0);
+    assert!((sum.avg_share().unwrap() - 9.0 / 16.667).abs() < 0.01);
+}
+
+#[test]
+fn a_frame_over_the_refresh_interval_is_late() {
+    let mut costs = Costs::default();
+    costs.push(ms(1000), cost(6000, None));
+    costs.push(ms(1017), cost(10_000, Some(9000)));
+    let sum = costs.summary(ms(1100), budget_of(60_000)).unwrap();
+    assert_eq!(sum.late, 1);
+    assert_eq!(sum.gpu_avg_ms, Some(9.0));
+}
+
+#[test]
+fn frames_without_a_gpu_wait_have_none() {
+    let costs = frames(10, 6_944, cost(1500, None));
+    let sum = costs.summary(ms(1100), budget_of(144_000)).unwrap();
+    assert_eq!(sum.gpu_avg_ms, None);
+    assert_eq!(sum.gpu_worst_ms, None);
+    assert_eq!(sum.late, 0);
+}
+
+#[test]
+fn old_frames_fall_out_of_the_span_and_nothing_is_none() {
+    let costs = frames(10, 6_944, cost(1500, None));
+    assert!(costs.summary(ms(60_000), budget_of(144_000)).is_none());
+    assert!(Costs::default().summary(ms(1000), None).is_none());
+}
+
+#[test]
+fn an_unknown_mode_has_no_budget_and_no_late_frames() {
+    let costs = frames(10, 6_944, cost(50_000, None));
+    let sum = costs.summary(ms(1100), None).unwrap();
+    assert_eq!(sum.budget_ms, None);
+    assert_eq!(sum.late, 0);
+    assert_eq!(sum.avg_share(), None);
+}
+
+#[test]
+fn the_cost_rows_show_the_share_of_the_budget() {
+    let mut s = snapshot();
+    s.cost = frames(100, 6_944, cost(2000, Some(4000))).summary(ms(1700), budget_of(144_000));
+    let budget = find(&s, "Budget");
+    assert!(budget.value.contains("6.0 of 6.9 ms"), "{}", budget.value);
+    assert!(budget.value.contains("(86%)"), "{}", budget.value);
+    assert_eq!(budget.tone, Tone::Warn);
+    assert_eq!(find(&s, "CPU").value, "2.0 ms avg, 2.0 worst");
+    assert_eq!(find(&s, "GPU wait").value, "4.0 ms avg, 4.0 worst");
+    assert_eq!(find(&s, "Late frames").value, "none of 100");
+
+    s.cost = frames(100, 6_944, cost(1000, Some(1000))).summary(ms(1700), budget_of(144_000));
+    assert_eq!(find(&s, "Budget").tone, Tone::Good);
+}
+
+#[test]
+fn no_cost_yet_says_so() {
+    let row = find(&snapshot(), "Frame cost");
+    assert!(row.value.contains("no frames"), "{}", row.value);
+}
+
+#[test]
+fn late_frames_are_jffs_fault() {
+    let mut s = snapshot();
+    s.vrr = Vrr::Off;
+    s.client = Some(timing_at(144.0));
+    let mut costs = frames(99, 6_944, cost(2000, None));
+    costs.push(ms(1700), cost(9000, Some(3000)));
+    s.cost = costs.summary(ms(1701), budget_of(144_000));
+    assert_eq!(blame(&s), Some(Blame::Compositor));
+    let verdict = find(&s, "Verdict");
+    assert!(verdict.value.starts_with("jff"), "{}", verdict.value);
+    assert_eq!(verdict.tone, Tone::Warn);
+    assert_eq!(find(&s, "Late frames").tone, Tone::Warn);
+}
+
+#[test]
+fn a_slow_client_with_jff_inside_its_budget_is_the_clients_fault() {
+    let mut s = snapshot();
+    s.vrr = Vrr::Off;
+    s.client = Some(timing_at(90.0));
+    s.cost = frames(100, 6_944, cost(1500, Some(500))).summary(ms(1700), budget_of(144_000));
+    assert_eq!(blame(&s), Some(Blame::Client));
+    assert!(find(&s, "Verdict").value.starts_with("the client"));
+}
+
+#[test]
+fn a_client_that_keeps_up_and_a_jff_within_budget_blame_nobody() {
+    let mut s = snapshot();
+    s.vrr = Vrr::Off;
+    s.client = Some(timing_at(144.0));
+    s.cost = frames(100, 6_944, cost(1500, Some(500))).summary(ms(1700), budget_of(144_000));
+    assert_eq!(blame(&s), Some(Blame::Nobody));
+    assert_eq!(find(&s, "Verdict").tone, Tone::Good);
+}
+
+#[test]
+fn a_slow_client_is_not_a_lost_sync_under_vrr() {
+    let mut s = snapshot();
+    s.vrr = Vrr::On;
+    s.client = Some(timing_at(60.0));
+    s.cost = frames(100, 6_944, cost(1500, None)).summary(ms(1700), budget_of(144_000));
+    assert_eq!(blame(&s), Some(Blame::Nobody));
+}
+
+#[test]
+fn there_is_no_verdict_without_costs_or_a_client_rate() {
+    let mut s = snapshot();
+    s.vrr = Vrr::Off;
+    assert_eq!(blame(&s), None);
+    s.cost = frames(100, 6_944, cost(1500, None)).summary(ms(1700), budget_of(144_000));
+    s.client = None;
+    assert_eq!(blame(&s), None);
+    let rows: Vec<_> = sections(&s).into_iter().flat_map(|x| x.rows).collect();
+    assert!(rows.iter().all(|row| row.label != "Verdict"));
+}
+
+#[test]
+fn json_carries_the_cost_and_the_verdict() {
+    let mut s = snapshot();
+    s.vrr = Vrr::Off;
+    s.client = Some(timing_at(144.0));
+    let json = to_json(&s);
+    assert!(json.contains("\"cost\":null"), "{json}");
+    assert!(json.contains("\"blame\":null"), "{json}");
+
+    s.cost = frames(100, 6_944, cost(1500, Some(500))).summary(ms(1700), budget_of(144_000));
+    let json = to_json(&s);
+    for key in [
+        "\"cpu_avg_ms\":1.500",
+        "\"gpu_wait_avg_ms\":0.500",
+        "\"total_worst_ms\":2.000",
+        "\"late_frames\":0",
+        "\"blame\":\"nobody\"",
+    ] {
+        assert!(json.contains(key), "{key} missing in {json}");
+    }
+    assert_eq!(json.matches('{').count(), json.matches('}').count());
+}
+
+// ---- flips that missed the predicted vblank ----------------------------------------------
+
+fn refresh_60() -> Duration {
+    Duration::from_nanos(16_666_667)
+}
+
+#[test]
+fn a_flip_on_the_predicted_vblank_is_on_time() {
+    let predicted = ms(1000);
+    assert!(!missed_vblank(predicted, predicted, refresh_60()));
+    // a little jitter in the kernel's timestamp is not a miss
+    assert!(!missed_vblank(predicted, predicted + Duration::from_micros(300), refresh_60()));
+    assert!(!missed_vblank(predicted, predicted - Duration::from_micros(300), refresh_60()));
+}
+
+#[test]
+fn a_flip_a_refresh_late_missed() {
+    let predicted = ms(1000);
+    assert!(missed_vblank(predicted, predicted + refresh_60(), refresh_60()));
+    assert!(missed_vblank(predicted, predicted + refresh_60() * 3, refresh_60()));
+}
+
+#[test]
+fn only_a_fresh_frame_clock_is_counted() {
+    let refresh = refresh_60();
+    // no vblank seen yet
+    assert_eq!(countable_prediction(None, ms(1000), refresh), None);
+    // the usual case: drawn a refresh after the last vblank
+    let last = ms(1000);
+    assert_eq!(countable_prediction(Some(last), last + refresh, refresh), Some(last + refresh));
+    // the monitor idled for a second: the grid has drifted
+    assert_eq!(countable_prediction(Some(last), last + ms(1000), refresh), None);
+}
+
+#[test]
+fn syncs_count_flips_and_misses() {
+    let mut syncs = Syncs::default();
+    assert_eq!(syncs.summary(ms(1000)), None);
+    for i in 0..10u64 {
+        syncs.push(ms(1000 + i * 16), i == 4);
+    }
+    let sum = syncs.summary(ms(1200)).expect("flips counted");
+    assert_eq!((sum.flips, sum.missed), (10, 1));
+    assert_eq!((sum.recent_flips, sum.recent_missed), (10, 1));
+    assert!((sum.percent() - 90.0).abs() < 1e-9);
+}
+
+#[test]
+fn old_misses_leave_the_recent_figure_but_not_the_total() {
+    let mut syncs = Syncs::default();
+    syncs.push(ms(1000), true);
+    for i in 0..10u64 {
+        syncs.push(ms(10_000 + i * 16), false);
+    }
+    let sum = syncs.summary(ms(10_200)).expect("flips counted");
+    assert_eq!((sum.flips, sum.missed), (11, 1));
+    assert_eq!((sum.recent_flips, sum.recent_missed), (10, 0));
+}
+
+#[test]
+fn the_totals_outlast_the_rolling_window() {
+    let mut syncs = Syncs::default();
+    for i in 0..3000u64 {
+        syncs.push(ms(i * 16), false);
+    }
+    let sum = syncs.summary(ms(2999 * 16)).expect("flips counted");
+    assert_eq!(sum.flips, 3000);
+}
+
+#[test]
+fn syncs_start_over_when_the_clock_goes_back() {
+    let mut syncs = Syncs::default();
+    syncs.push(ms(5000), true);
+    syncs.push(ms(100), false);
+    let sum = syncs.summary(ms(200)).expect("flips counted");
+    assert_eq!((sum.flips, sum.missed), (1, 0));
+}
+
+#[test]
+fn the_target_is_one_miss_in_a_thousand() {
+    let at = |flips, missed| SyncSummary { flips, missed, recent_flips: 0, recent_missed: 0 };
+    assert!(at(1000, 1).on_target());
+    assert!(!at(1000, 2).on_target());
+    assert!(at(0, 0).on_target());
+    assert_eq!(SYNC_TARGET, 99.9);
+}
+
+fn with_sync(flips: u64, missed: u64, recent_missed: usize) -> Snapshot {
+    let mut s = snapshot();
+    s.vrr = Vrr::Off;
+    s.sync = Some(SyncSummary { flips, missed, recent_flips: 300, recent_missed });
+    s
+}
+
+#[test]
+fn the_overlay_shows_the_sync_against_the_target() {
+    let s = with_sync(5000, 2, 0);
+    let sync = find(&s, "Vblank sync");
+    assert_eq!(sync.value, "99.96% on time (target 99.9%)");
+    assert_eq!(sync.tone, Tone::Good);
+    let missed = find(&s, "Missed vblank");
+    assert_eq!(missed.value, "2 of 5000 flips, 0 in the last 5 s");
+    assert_eq!(missed.tone, Tone::Neutral);
+}
+
+#[test]
+fn below_the_target_is_a_warning() {
+    let s = with_sync(1000, 20, 3);
+    assert_eq!(find(&s, "Vblank sync").tone, Tone::Warn);
+    assert_eq!(find(&s, "Missed vblank").tone, Tone::Warn);
+}
+
+#[test]
+fn no_misses_is_good_news() {
+    let s = with_sync(1000, 0, 0);
+    assert_eq!(find(&s, "Vblank sync").value, "100.00% on time (target 99.9%)");
+    assert_eq!(find(&s, "Missed vblank").tone, Tone::Good);
+}
+
+#[test]
+fn a_miss_never_rounds_up_to_a_hundred_percent() {
+    let s = with_sync(1_000_000, 1, 0);
+    assert_eq!(find(&s, "Vblank sync").value, "99.99% on time (target 99.9%)");
+}
+
+#[test]
+fn there_is_no_sync_to_miss_under_vrr_or_tearing() {
+    let mut s = with_sync(1000, 5, 1);
+    s.vrr = Vrr::On;
+    assert!(find(&s, "Vblank sync").value.starts_with("n/a"));
+    assert_eq!(find(&s, "Vblank sync").tone, Tone::Neutral);
+    s.vrr = Vrr::Off;
+    s.async_flip = true;
+    assert!(find(&s, "Vblank sync").value.starts_with("n/a"));
+    let rows: Vec<_> = sections(&s).into_iter().flat_map(|x| x.rows).collect();
+    assert!(rows.iter().all(|row| row.label != "Missed vblank"));
+}
+
+#[test]
+fn before_the_first_flip_the_overlay_says_so() {
+    let mut s = snapshot();
+    s.vrr = Vrr::Off;
+    assert_eq!(find(&s, "Vblank sync").value, "no flips counted yet");
+}
+
+#[test]
+fn json_carries_the_sync() {
+    let mut s = snapshot();
+    assert!(to_json(&s).contains("\"sync\":null"));
+    s.sync = Some(SyncSummary { flips: 5000, missed: 2, recent_flips: 300, recent_missed: 0 });
+    let json = to_json(&s);
+    for key in [
+        "\"sync\":{\"flips\":5000,\"missed\":2",
+        "\"recent_missed\":0",
+        "\"percent\":99.960",
+        "\"target_percent\":99.9",
+        "\"on_target\":true",
+    ] {
+        assert!(json.contains(key), "{key} missing in {json}");
+    }
+    assert_eq!(json.matches('{').count(), json.matches('}').count());
+}
+
+// ---- commit to screen and the drift from the vblank ---------------------------------------
+
+fn us(n: u64) -> Duration {
+    Duration::from_micros(n)
+}
+
+fn shown(latency_us: u64, drift: f64) -> Presented {
+    Presented {
+        latency: Some(us(latency_us)),
+        drift_ms: Some(drift),
+    }
+}
+
+#[test]
+fn latency_is_the_time_from_commit_to_flip() {
+    assert_eq!(commit_latency(ms(1000), ms(1012)), Some(ms(12)));
+    assert_eq!(commit_latency(ms(1000), ms(1000)), Some(Duration::ZERO));
+    // a flip stamped before the commit says nothing
+    assert_eq!(commit_latency(ms(1012), ms(1000)), None);
+}
+
+#[test]
+fn drift_is_signed() {
+    assert!((drift_ms(ms(1000), us(1_000_300)) - 0.3).abs() < 1e-9);
+    assert!((drift_ms(ms(1000), us(999_700)) + 0.3).abs() < 1e-9);
+    assert_eq!(drift_ms(ms(1000), ms(1000)), 0.0);
+}
+
+#[test]
+fn latencies_have_nothing_to_say_before_a_flip() {
+    assert_eq!(Latencies::default().summary(ms(1000), None), None);
+}
+
+#[test]
+fn latency_figures_are_mean_best_and_worst() {
+    let mut l = Latencies::default();
+    for (i, lat) in [8_000u64, 12_000, 20_000].into_iter().enumerate() {
+        l.push(ms(1000 + i as u64 * 16), shown(lat, 0.0));
+    }
+    let sum = l.summary(ms(1100), budget_of(60_000)).expect("flips");
+    let f = sum.latency.expect("latency");
+    assert_eq!(f.frames, 3);
+    assert!((f.avg_ms - 13.333).abs() < 0.01, "avg was {}", f.avg_ms);
+    assert!((f.min_ms - 8.0).abs() < 1e-9);
+    assert!((f.worst_ms - 20.0).abs() < 1e-9);
+    assert!((sum.budget_ms.expect("budget") - 16.667).abs() < 0.01);
+}
+
+#[test]
+fn the_worst_drift_keeps_its_sign_and_the_mean_is_a_bias() {
+    let mut l = Latencies::default();
+    for (i, d) in [0.2, -0.4, 5.0, -9.0].into_iter().enumerate() {
+        l.push(ms(1000 + i as u64 * 16), shown(10_000, d));
+    }
+    let d = l.summary(ms(1100), None).expect("flips").drift.expect("drift");
+    assert_eq!(d.flips, 4);
+    assert_eq!(d.worst_ms, -9.0);
+    assert!((d.avg_ms - (-1.05)).abs() < 1e-9, "avg was {}", d.avg_ms);
+}
+
+#[test]
+fn a_flip_without_new_content_still_counts_for_the_drift() {
+    let mut l = Latencies::default();
+    l.push(ms(1000), Presented { latency: None, drift_ms: Some(0.5) });
+    let sum = l.summary(ms(1100), None).expect("flips");
+    assert!(sum.latency.is_none());
+    assert_eq!(sum.drift.expect("drift").flips, 1);
+}
+
+#[test]
+fn a_flip_with_nothing_to_report_is_no_figure() {
+    let mut l = Latencies::default();
+    l.push(ms(1000), Presented { latency: None, drift_ms: None });
+    assert_eq!(l.summary(ms(1100), None), None);
+}
+
+#[test]
+fn old_flips_leave_the_latency_figures() {
+    let mut l = Latencies::default();
+    l.push(ms(1000), shown(90_000, 3.0));
+    for i in 0..5u64 {
+        l.push(ms(10_000 + i * 16), shown(10_000, 0.0));
+    }
+    let f = l.summary(ms(10_100), None).expect("flips").latency.expect("latency");
+    assert_eq!(f.frames, 5);
+    assert!((f.worst_ms - 10.0).abs() < 1e-9);
+    // and nothing at all once they are all old
+    assert_eq!(l.summary(ms(60_000), None), None);
+}
+
+#[test]
+fn latencies_start_over_when_the_clock_goes_back() {
+    let mut l = Latencies::default();
+    l.push(ms(50_000), shown(10_000, 0.0));
+    l.push(ms(1_000), shown(20_000, 0.0));
+    let f = l.summary(ms(1_100), None).expect("flips").latency.expect("latency");
+    assert_eq!(f.frames, 1);
+    assert!((f.avg_ms - 20.0).abs() < 1e-9);
+}
+
+#[test]
+fn ticks_know_their_newest_event() {
+    let mut ticks = Ticks::default();
+    assert_eq!(ticks.last(), None);
+    ticks.push(ms(10));
+    ticks.push(ms(30));
+    assert_eq!(ticks.last(), Some(ms(30)));
+    ticks.clear();
+    assert_eq!(ticks.last(), None);
+}
+
+fn with_latency(drift: f64, latency_ms: f64) -> Snapshot {
+    let mut l = Latencies::default();
+    for i in 0..5u64 {
+        l.push(
+            ms(1000 + i * 7),
+            Presented {
+                latency: Some(Duration::from_secs_f64(latency_ms / 1000.0)),
+                drift_ms: Some(drift),
+            },
+        );
+    }
+    let mut s = snapshot();
+    s.vrr = Vrr::Off;
+    s.latency = l.summary(ms(1100), budget_of(60_000));
+    s
+}
+
+#[test]
+fn latency_rows_show_the_delay_and_the_drift() {
+    let s = with_latency(0.25, 14.0);
+    let latency = find(&s, "Latency");
+    assert!(latency.value.contains("commit to screen 14.0 ms avg"), "{}", latency.value);
+    assert_eq!(latency.tone, Tone::Neutral);
+    let drift = find(&s, "Drift");
+    assert!(drift.value.starts_with("+0.25 ms avg"), "{}", drift.value);
+    assert_eq!(drift.tone, Tone::Good);
+}
+
+#[test]
+fn a_drift_of_half_a_refresh_is_a_warning() {
+    // 60 Hz: half a refresh is 8.3 ms, where a flip counts as a missed vblank
+    assert_eq!(find(&with_latency(9.0, 14.0), "Drift").tone, Tone::Warn);
+    assert_eq!(find(&with_latency(-9.0, 14.0), "Drift").tone, Tone::Warn);
+    assert_eq!(find(&with_latency(8.0, 14.0), "Drift").tone, Tone::Good);
+}
+
+#[test]
+fn content_that_waited_two_refreshes_is_a_warning() {
+    assert_eq!(find(&with_latency(0.0, 40.0), "Latency").tone, Tone::Warn);
+    assert_eq!(find(&with_latency(0.0, 30.0), "Latency").tone, Tone::Neutral);
+}
+
+#[test]
+fn there_is_no_drift_to_report_under_vrr_or_tearing() {
+    let mut s = with_latency(0.0, 14.0);
+    s.vrr = Vrr::On;
+    assert!(find(&s, "Drift").value.starts_with("n/a"));
+    // the delay itself still holds
+    assert!(find(&s, "Latency").value.contains("ms avg"));
+    s.vrr = Vrr::Off;
+    s.async_flip = true;
+    assert!(find(&s, "Drift").value.starts_with("n/a"));
+}
+
+#[test]
+fn latency_rows_say_when_there_is_nothing_yet() {
+    let row = find(&snapshot(), "Latency");
+    assert!(row.value.starts_with("no new frame"));
+    assert_eq!(row.tone, Tone::Neutral);
+}
+
+#[test]
+fn the_json_has_the_latency_and_stays_balanced() {
+    let none = to_json(&snapshot());
+    assert!(none.contains("\"latency\":null"), "{none}");
+    let json = to_json(&with_latency(0.25, 14.0));
+    for key in [
+        "\"commit_to_screen\":{\"frames\":5,\"avg_ms\":14.000",
+        "\"vblank_drift\":{\"flips\":5,\"avg_ms\":0.250,\"worst_ms\":0.250}",
+    ] {
+        assert!(json.contains(key), "{key} missing in {json}");
+    }
+    assert_eq!(json.matches('{').count(), json.matches('}').count());
+}
+
+// ---- the buffer's modifier -----------------------------------------------------------------
+
+#[test]
+fn modifiers_have_names() {
+    assert_eq!(modifier_name(0), "LINEAR");
+    assert_eq!(modifier_name(MODIFIER_INVALID), "INVALID (implicit)");
+    assert_eq!(modifier_name(0x0100_0000_0000_0001), "Intel 0x0100000000000001");
+    assert_eq!(modifier_name(0x0200_0000_0000_0001), "AMD 0x0200000000000001");
+    assert!(modifier_name(0x7f00_0000_0000_0001).starts_with("unknown vendor"));
+}
+
+#[test]
+fn a_dmabuf_shows_its_modifier() {
+    let mut s = snapshot();
+    s.buffer = BufferKind::Dmabuf(0x3432_5258, 0x0200_0000_0000_0001);
+    let row = find(&s, "Modifier");
+    assert_eq!(row.value, "AMD 0x0200000000000001");
+    assert_eq!(row.tone, Tone::Neutral);
+}
+
+#[test]
+fn an_implicit_modifier_is_a_warning() {
+    let mut s = snapshot();
+    s.buffer = BufferKind::Dmabuf(0x3432_5258, MODIFIER_INVALID);
+    let row = find(&s, "Modifier");
+    assert!(row.value.starts_with("implicit"), "{}", row.value);
+    assert_eq!(row.tone, Tone::Warn);
+}
+
+#[test]
+fn shm_and_no_buffer_have_no_modifier() {
+    let mut s = snapshot();
+    for buffer in [BufferKind::Shm, BufferKind::None] {
+        s.buffer = buffer;
+        let rows: Vec<_> = sections(&s).into_iter().flat_map(|x| x.rows).collect();
+        assert!(rows.iter().all(|row| row.label != "Modifier"));
+        assert!(to_json(&s).contains("\"buffer_modifier\":null"));
+    }
+}
+
+#[test]
+fn json_carries_the_modifier() {
+    let mut s = snapshot();
+    s.buffer = BufferKind::Dmabuf(0x3432_5258, 0x0200_0000_0000_0001);
+    let json = to_json(&s);
+    assert!(json.contains("\"buffer\":\"dmabuf:XR24\""), "{json}");
+    assert!(
+        json.contains("\"buffer_modifier\":{\"code\":\"0x0200000000000001\",\"name\":\"AMD 0x0200000000000001\"}"),
+        "{json}"
+    );
+    assert_eq!(json.matches('{').count(), json.matches('}').count());
+}
+
+// ---- fifo, commit timing and explicit sync -------------------------------------------------
+
+#[test]
+fn the_protocols_in_use_have_names() {
+    assert!(ClientSync::default().names().is_empty());
+    let all = ClientSync { fifo: true, commit_timing: true, explicit_sync: true };
+    assert_eq!(all.names(), ["explicit sync (syncobj)", "fifo", "commit timing"]);
+}
+
+#[test]
+fn the_overlay_lists_what_the_client_uses() {
+    let mut s = snapshot();
+    s.client_sync = ClientSync { fifo: true, commit_timing: false, explicit_sync: true };
+    assert_eq!(find(&s, "Sync").value, "explicit sync (syncobj), fifo");
+    s.client_sync.commit_timing = true;
+    assert_eq!(find(&s, "Sync").value, "explicit sync (syncobj), fifo, commit timing");
+}
+
+#[test]
+fn a_dmabuf_client_with_none_is_on_implicit_sync() {
+    let s = snapshot();
+    let row = find(&s, "Sync");
+    assert!(row.value.starts_with("implicit"), "{}", row.value);
+    let mut s = snapshot();
+    s.buffer = BufferKind::Shm;
+    assert!(find(&s, "Sync").value.starts_with("none"));
+}
+
+#[test]
+fn json_carries_the_sync_protocols() {
+    let mut s = snapshot();
+    assert!(to_json(&s).contains("\"sync_protocols\":{\"fifo\":false,\"commit_timing\":false,\"explicit_sync\":false}"));
+    s.client_sync = ClientSync { fifo: true, commit_timing: false, explicit_sync: true };
+    let json = to_json(&s);
+    assert!(json.contains("\"sync_protocols\":{\"fifo\":true,\"commit_timing\":false,\"explicit_sync\":true}"), "{json}");
+    assert_eq!(json.matches('{').count(), json.matches('}').count());
 }

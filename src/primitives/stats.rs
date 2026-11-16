@@ -8,6 +8,20 @@
 //! - client: how often the window committed a new buffer,
 //! - shown: how often a frame carrying a new buffer of the window reached the screen,
 //! - display: how often the monitor flipped at all (it varies under VRR, and is 0 while idle).
+//!
+//! Next to them is what each frame cost jff itself ([`Costs`]): the CPU time it took to build
+//! and queue the frame, the time it then waited for the GPU, and how much of the refresh interval
+//! that is. A frame that took longer than the interval is one jff made late. With the client's
+//! rate beside it, that says whether a lost sync comes from jff or from the client ([`Blame`]).
+//!
+//! The sync itself is counted too ([`Syncs`]): every frame is drawn for the vblank the frame
+//! clock predicts, and a flip that comes more than half a refresh after it missed it. The share
+//! of flips that did not is held against [`SYNC_TARGET`].
+//!
+//! Last is the latency of the content itself ([`Latencies`]): the time from the commit that
+//! carried it to the flip that showed it, and how far that flip was from the vblank predicted
+//! for it (the drift). The flip time is the one jff reports to the client in `wp_presentation`'s
+//! `presented`, so the delay here is the one a video player or a game is told about.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -76,6 +90,11 @@ impl Ticks {
         self.times.is_empty()
     }
 
+    /// When the newest event happened.
+    pub fn last(&self) -> Option<Duration> {
+        self.times.back().copied()
+    }
+
     /// Events per second over the last [`RATE_SPAN`] before `now`.
     pub fn rate(&self, now: Duration) -> f64 {
         let from = now.saturating_sub(RATE_SPAN);
@@ -125,15 +144,398 @@ impl Ticks {
     }
 }
 
+/// What one frame cost jff, from the start of the redraw to the frame being queued.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameCost {
+    /// Time spent on the CPU: bookkeeping, building the elements, recording the draw calls.
+    pub cpu: Duration,
+    /// Time spent waiting for the GPU to finish the frame, `None` when nothing was waited for.
+    pub gpu_wait: Option<Duration>,
+}
+
+impl FrameCost {
+    /// From the start of the redraw until the frame was ready to be flipped.
+    pub fn total(&self) -> Duration {
+        self.cpu + self.gpu_wait.unwrap_or_default()
+    }
+}
+
+/// What [`Costs::summary`] found.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CostSummary {
+    /// Frames the figures are over.
+    pub frames: usize,
+    pub cpu_avg_ms: f64,
+    pub cpu_worst_ms: f64,
+    /// `None` when no frame in the span waited for the GPU.
+    pub gpu_avg_ms: Option<f64>,
+    pub gpu_worst_ms: Option<f64>,
+    /// Mean and longest CPU time plus GPU wait of a frame, ms.
+    pub total_avg_ms: f64,
+    pub total_worst_ms: f64,
+    /// The refresh interval the frames are held against, ms. `None` when the mode is unknown.
+    pub budget_ms: Option<f64>,
+    /// Frames that took longer than the budget: they missed their flip.
+    pub late: usize,
+}
+
+impl CostSummary {
+    /// The mean frame as a share of the budget, 0 to 1 and over.
+    pub fn avg_share(&self) -> Option<f64> {
+        self.budget_ms.map(|b| self.total_avg_ms / b)
+    }
+
+    /// The longest frame as a share of the budget.
+    pub fn worst_share(&self) -> Option<f64> {
+        self.budget_ms.map(|b| self.total_worst_ms / b)
+    }
+}
+
+/// What frames cost, newest last. Times are on one clock (CLOCK_MONOTONIC).
+#[derive(Clone, Debug, Default)]
+pub struct Costs {
+    frames: VecDeque<(Duration, FrameCost)>,
+}
+
+impl Costs {
+    /// A frame queued at `at` cost `cost`.
+    pub fn push(&mut self, at: Duration, cost: FrameCost) {
+        if self.frames.back().is_some_and(|(last, _)| at < *last) {
+            // the clock went back (a new session): start over
+            self.frames.clear();
+        }
+        self.frames.push_back((at, cost));
+        while self.frames.len() > KEEP {
+            self.frames.pop_front();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.frames.clear();
+    }
+
+    /// The frames of the last [`TIMING_SPAN`] before `now` against `budget`, `None` with no frame.
+    pub fn summary(&self, now: Duration, budget: Option<Duration>) -> Option<CostSummary> {
+        let from = now.saturating_sub(TIMING_SPAN);
+        let inside: Vec<FrameCost> = self
+            .frames
+            .iter()
+            .filter(|(at, _)| *at > from)
+            .map(|(_, cost)| *cost)
+            .collect();
+        if inside.is_empty() {
+            return None;
+        }
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let n = inside.len() as f64;
+        let cpu: Vec<f64> = inside.iter().map(|c| ms(c.cpu)).collect();
+        let gpu: Vec<f64> = inside.iter().filter_map(|c| c.gpu_wait).map(ms).collect();
+        let total: Vec<f64> = inside.iter().map(|c| ms(c.total())).collect();
+        let worst = |v: &[f64]| v.iter().copied().fold(0.0, f64::max);
+        let budget_ms = budget.filter(|b| !b.is_zero()).map(ms);
+        Some(CostSummary {
+            frames: inside.len(),
+            cpu_avg_ms: cpu.iter().sum::<f64>() / n,
+            cpu_worst_ms: worst(&cpu),
+            gpu_avg_ms: (!gpu.is_empty()).then(|| gpu.iter().sum::<f64>() / gpu.len() as f64),
+            gpu_worst_ms: (!gpu.is_empty()).then(|| worst(&gpu)),
+            total_avg_ms: total.iter().sum::<f64>() / n,
+            total_worst_ms: worst(&total),
+            budget_ms,
+            late: budget_ms.map_or(0, |b| total.iter().filter(|t| **t > b).count()),
+        })
+    }
+}
+
+/// The refresh interval of a mode refresh in mHz.
+pub fn budget_of(refresh_mhz: i32) -> Option<Duration> {
+    (refresh_mhz > 0).then(|| Duration::from_secs_f64(1000.0 / f64::from(refresh_mhz)))
+}
+
+/// The share of flips, in percent, that should land on the vblank predicted for them.
+pub const SYNC_TARGET: f64 = 99.9;
+
+/// Whether a flip at `actual` missed the vblank `predicted` for it: it came more than half a
+/// refresh late, so the frame went out with a later vblank than the one it was drawn for.
+pub fn missed_vblank(predicted: Duration, actual: Duration, refresh: Duration) -> bool {
+    actual > predicted + refresh / 2
+}
+
+/// The vblank a frame is counted against, `None` when it is not worth counting: with no vblank
+/// seen yet there is no grid, and when the last one is more than two refreshes before the
+/// prediction the monitor idled and the grid has drifted off the real one.
+pub fn countable_prediction(
+    last_vblank: Option<Duration>,
+    predicted: Duration,
+    refresh: Duration,
+) -> Option<Duration> {
+    let last = last_vblank?;
+    (predicted.saturating_sub(last) <= refresh * 2).then_some(predicted)
+}
+
+/// What [`Syncs::summary`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SyncSummary {
+    /// Flips counted since the counters started.
+    pub flips: u64,
+    /// Of those, the ones that missed the vblank predicted for them.
+    pub missed: u64,
+    /// The same over the last [`TIMING_SPAN`].
+    pub recent_flips: usize,
+    pub recent_missed: usize,
+}
+
+impl SyncSummary {
+    /// The share of flips that were on time, in percent. 100 with nothing counted.
+    pub fn percent(&self) -> f64 {
+        if self.flips == 0 {
+            return 100.0;
+        }
+        (self.flips - self.missed.min(self.flips)) as f64 * 100.0 / self.flips as f64
+    }
+
+    /// Whether [`SYNC_TARGET`] is kept.
+    pub fn on_target(&self) -> bool {
+        self.percent() >= SYNC_TARGET
+    }
+}
+
+/// Which flips were on the predicted vblank, newest last. Times are on one clock
+/// (CLOCK_MONOTONIC). The totals count from the last `clear`: a 99.9% target is a thousand
+/// flips, which is longer than the rolling window keeps.
+#[derive(Clone, Debug, Default)]
+pub struct Syncs {
+    /// (when it flipped, whether it missed), for the recent figures.
+    recent: VecDeque<(Duration, bool)>,
+    flips: u64,
+    missed: u64,
+}
+
+impl Syncs {
+    /// A flip at `at`, `missed` or not.
+    pub fn push(&mut self, at: Duration, missed: bool) {
+        if self.recent.back().is_some_and(|(last, _)| at < *last) {
+            // the clock went back (a new session): start over
+            self.clear();
+        }
+        self.recent.push_back((at, missed));
+        self.flips = self.flips.saturating_add(1);
+        if missed {
+            self.missed = self.missed.saturating_add(1);
+        }
+        while self.recent.len() > KEEP {
+            self.recent.pop_front();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.recent.clear();
+        self.flips = 0;
+        self.missed = 0;
+    }
+
+    /// The counts, `None` before the first flip.
+    pub fn summary(&self, now: Duration) -> Option<SyncSummary> {
+        if self.flips == 0 {
+            return None;
+        }
+        let from = now.saturating_sub(TIMING_SPAN);
+        let (recent_flips, recent_missed) = self
+            .recent
+            .iter()
+            .filter(|(at, _)| *at > from)
+            .fold((0usize, 0usize), |(n, m), (_, missed)| {
+                (n + 1, m + usize::from(*missed))
+            });
+        Some(SyncSummary {
+            flips: self.flips,
+            missed: self.missed,
+            recent_flips,
+            recent_missed,
+        })
+    }
+}
+
+/// One flip, as far as the window's content is concerned.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Presented {
+    /// From the commit of the newest content the frame carried to the flip that showed it.
+    /// `None` when the flip carried nothing new of the window.
+    pub latency: Option<Duration>,
+    /// The flip minus the vblank predicted for it, ms: positive is late. `None` when there was
+    /// no vblank to miss (see [`countable_prediction`]).
+    pub drift_ms: Option<f64>,
+}
+
+/// Time from a commit to the flip that showed it, `None` when the flip is stamped before the
+/// commit (clocks that disagree: nothing sensible to say).
+pub fn commit_latency(committed: Duration, shown: Duration) -> Option<Duration> {
+    shown.checked_sub(committed)
+}
+
+/// How far a flip at `actual` was from the vblank `predicted` for it, ms. Positive is late.
+pub fn drift_ms(predicted: Duration, actual: Duration) -> f64 {
+    if actual >= predicted {
+        (actual - predicted).as_secs_f64() * 1000.0
+    } else {
+        -((predicted - actual).as_secs_f64() * 1000.0)
+    }
+}
+
+/// Commit to screen, over the last [`TIMING_SPAN`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LatencyFigures {
+    /// Flips of new content the figures are over.
+    pub frames: usize,
+    pub avg_ms: f64,
+    pub min_ms: f64,
+    pub worst_ms: f64,
+}
+
+/// Flip against its predicted vblank, over the last [`TIMING_SPAN`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DriftFigures {
+    pub flips: usize,
+    /// The mean of the signed drift: a bias, not a size. Near 0 when the prediction is right.
+    pub avg_ms: f64,
+    /// The drift of largest size, with its sign.
+    pub worst_ms: f64,
+}
+
+/// What [`Latencies::summary`] found.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LatencySummary {
+    pub latency: Option<LatencyFigures>,
+    pub drift: Option<DriftFigures>,
+    /// The refresh interval the figures are held against, ms. `None` when the mode is unknown.
+    pub budget_ms: Option<f64>,
+}
+
+/// What each flip did for the window, newest last. Times are on one clock (CLOCK_MONOTONIC).
+#[derive(Clone, Debug, Default)]
+pub struct Latencies {
+    flips: VecDeque<(Duration, Presented)>,
+}
+
+impl Latencies {
+    /// A flip at `at`.
+    pub fn push(&mut self, at: Duration, sample: Presented) {
+        if self.flips.back().is_some_and(|(last, _)| at < *last) {
+            // the clock went back (a new session): start over
+            self.flips.clear();
+        }
+        self.flips.push_back((at, sample));
+        while self.flips.len() > KEEP {
+            self.flips.pop_front();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.flips.clear();
+    }
+
+    /// The flips of the last [`TIMING_SPAN`] before `now`, `None` when there were none.
+    pub fn summary(&self, now: Duration, budget: Option<Duration>) -> Option<LatencySummary> {
+        let from = now.saturating_sub(TIMING_SPAN);
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let inside: Vec<Presented> = self
+            .flips
+            .iter()
+            .filter(|(at, _)| *at > from)
+            .map(|(_, sample)| *sample)
+            .collect();
+        let latencies: Vec<f64> = inside.iter().filter_map(|p| p.latency).map(ms).collect();
+        let drifts: Vec<f64> = inside.iter().filter_map(|p| p.drift_ms).collect();
+        if latencies.is_empty() && drifts.is_empty() {
+            return None;
+        }
+        Some(LatencySummary {
+            latency: (!latencies.is_empty()).then(|| LatencyFigures {
+                frames: latencies.len(),
+                avg_ms: latencies.iter().sum::<f64>() / latencies.len() as f64,
+                min_ms: latencies.iter().copied().fold(f64::INFINITY, f64::min),
+                worst_ms: latencies.iter().copied().fold(0.0, f64::max),
+            }),
+            drift: (!drifts.is_empty()).then(|| DriftFigures {
+                flips: drifts.len(),
+                avg_ms: drifts.iter().sum::<f64>() / drifts.len() as f64,
+                worst_ms: drifts
+                    .iter()
+                    .copied()
+                    .fold(0.0, |w, d| if d.abs() > w.abs() { d } else { w }),
+            }),
+            budget_ms: budget.filter(|b| !b.is_zero()).map(ms),
+        })
+    }
+}
+
+/// Where a lost sync comes from, as far as the numbers say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Blame {
+    /// Frames were not ready by the flip.
+    Compositor,
+    /// jff kept its budget and the client commits fewer frames than the monitor shows.
+    Client,
+    /// jff kept its budget and the client keeps up with the monitor.
+    Nobody,
+}
+
+/// Who is to blame for missed refreshes, `None` while there are no cost figures or client rate.
+pub fn blame(s: &Snapshot) -> Option<Blame> {
+    let cost = s.cost.as_ref()?;
+    let budget_ms = cost.budget_ms?;
+    if cost.late > 0 {
+        return Some(Blame::Compositor);
+    }
+    if s.vrr == Vrr::On {
+        return Some(Blame::Nobody);
+    }
+    let client = s.client.as_ref()?;
+    let refresh_hz = 1000.0 / budget_ms;
+    if client.fps > 1.0 && client.fps < refresh_hz * 0.95 {
+        Some(Blame::Client)
+    } else {
+        Some(Blame::Nobody)
+    }
+}
+
 /// What the window's buffer is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BufferKind {
-    /// A dmabuf, with its DRM fourcc.
-    Dmabuf(u32),
+    /// A dmabuf, with its DRM fourcc and its format modifier.
+    Dmabuf(u32, u64),
     /// Shared memory: the GPU has to copy it, and the plane can not take it.
     Shm,
     /// No buffer attached yet.
     None,
+}
+
+/// Which of the frame-pacing and sync protocols the window's surface uses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClientSync {
+    /// wp_fifo_v1: the client sets barriers so its commits are queued vsync-style.
+    pub fifo: bool,
+    /// wp_commit_timing_v1: the client asks for commits to show up at a given time.
+    pub commit_timing: bool,
+    /// wp_linux_drm_syncobj_v1: the client's commits carry acquire and release points.
+    pub explicit_sync: bool,
+}
+
+impl ClientSync {
+    /// The protocols in use, by name.
+    pub fn names(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.explicit_sync {
+            names.push("explicit sync (syncobj)");
+        }
+        if self.fifo {
+            names.push("fifo");
+        }
+        if self.commit_timing {
+            names.push("commit timing");
+        }
+        names
+    }
 }
 
 /// Why the window is not on the primary plane as it is.
@@ -207,11 +609,20 @@ pub struct Snapshot {
     pub client: Option<Timing>,
     pub shown: Option<Timing>,
     pub display_hz: f64,
+    /// What the frames cost jff over [`TIMING_SPAN`].
+    pub cost: Option<CostSummary>,
+    /// How many flips landed on the vblank predicted for them. `None` before the first one
+    /// that can be told.
+    pub sync: Option<SyncSummary>,
+    /// Commit to screen and the drift from the predicted vblank over [`TIMING_SPAN`].
+    pub latency: Option<LatencySummary>,
 
     // what the client asked for
     pub fullscreen: bool,
     pub wants_tearing: bool,
     pub says_game: bool,
+    /// fifo, commit timing and explicit sync, as far as the window's surface uses them.
+    pub client_sync: ClientSync,
     pub buffer: BufferKind,
     /// The buffer's size and the window's, logical pixels.
     pub buffer_size: Option<(i32, i32)>,
@@ -268,6 +679,34 @@ pub fn fourcc(code: u32) -> String {
         .collect()
 }
 
+/// `DRM_FORMAT_MOD_INVALID`: the modifier is implicit, the driver picks the layout.
+pub const MODIFIER_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
+
+/// A DRM format modifier as a name: `LINEAR`, `INVALID` (implicit), or the vendor and the code.
+/// The overlay's JSON carries the plain code as well.
+pub fn modifier_name(modifier: u64) -> String {
+    match modifier {
+        0 => "LINEAR".to_owned(),
+        MODIFIER_INVALID => "INVALID (implicit)".to_owned(),
+        m => {
+            let vendor = match (m >> 56) as u8 {
+                0x01 => "Intel",
+                0x02 => "AMD",
+                0x03 => "NVIDIA",
+                0x04 => "Samsung",
+                0x05 => "Qualcomm",
+                0x06 => "Vivante",
+                0x07 => "Broadcom",
+                0x08 => "ARM",
+                0x09 => "Allwinner",
+                0x0a => "Amlogic",
+                _ => "unknown vendor",
+            };
+            format!("{vendor} 0x{m:016x}")
+        }
+    }
+}
+
 /// The primaries of `color` by name, or "custom primaries".
 pub fn primaries_name(color: &ImageDescription) -> &'static str {
     NamedPrimaries::ALL
@@ -320,6 +759,216 @@ fn row(label: &'static str, value: impl Into<String>, tone: Tone) -> Row {
     }
 }
 
+fn ms_text(ms: f64) -> String {
+    if ms >= 100.0 {
+        format!("{ms:.0}")
+    } else {
+        format!("{ms:.1}")
+    }
+}
+
+/// The lines about what frames cost jff, and whether that explains a lost sync.
+fn cost_rows(s: &Snapshot) -> Vec<Row> {
+    let Some(c) = &s.cost else {
+        return vec![row("Frame cost", "no frames drawn yet", Tone::Neutral)];
+    };
+    let mut rows = vec![row(
+        "CPU",
+        format!(
+            "{} ms avg, {} worst",
+            ms_text(c.cpu_avg_ms),
+            ms_text(c.cpu_worst_ms)
+        ),
+        Tone::Neutral,
+    )];
+    rows.push(match (c.gpu_avg_ms, c.gpu_worst_ms) {
+        (Some(avg), Some(worst)) => row(
+            "GPU wait",
+            format!("{} ms avg, {} worst", ms_text(avg), ms_text(worst)),
+            Tone::Neutral,
+        ),
+        _ => row("GPU wait", "none: nothing was waited for", Tone::Neutral),
+    });
+    let Some(budget) = c.budget_ms else {
+        rows.push(row(
+            "Frame",
+            format!(
+                "{} ms avg, {} worst",
+                ms_text(c.total_avg_ms),
+                ms_text(c.total_worst_ms)
+            ),
+            Tone::Neutral,
+        ));
+        return rows;
+    };
+    let avg_share = c.total_avg_ms / budget;
+    let worst_share = c.total_worst_ms / budget;
+    rows.push(row(
+        "Budget",
+        format!(
+            "{} of {} ms ({:.0}%) avg, {} worst ({:.0}%)",
+            ms_text(c.total_avg_ms),
+            ms_text(budget),
+            avg_share * 100.0,
+            ms_text(c.total_worst_ms),
+            worst_share * 100.0
+        ),
+        if c.late > 0 || avg_share > 0.8 {
+            Tone::Warn
+        } else {
+            Tone::Good
+        },
+    ));
+    rows.push(row(
+        "Late frames",
+        if c.late == 0 {
+            format!("none of {}", c.frames)
+        } else {
+            format!("{} of {} took longer than the refresh", c.late, c.frames)
+        },
+        if c.late == 0 { Tone::Good } else { Tone::Warn },
+    ));
+    match blame(s) {
+        Some(Blame::Compositor) => rows.push(row(
+            "Verdict",
+            "jff: frames were not ready in time",
+            Tone::Warn,
+        )),
+        Some(Blame::Client) => rows.push(row(
+            "Verdict",
+            "the client: it commits fewer frames than the monitor shows, jff kept its budget",
+            Tone::Warn,
+        )),
+        Some(Blame::Nobody) => rows.push(row(
+            "Verdict",
+            "jff kept its budget, and the client keeps up",
+            Tone::Good,
+        )),
+        None => {}
+    }
+    rows
+}
+
+/// The lines about flips that missed the vblank predicted for them, and the sync target.
+fn sync_rows(s: &Snapshot) -> Vec<Row> {
+    // under VRR a flip comes when the frame is ready, and a tearing one does not wait for the
+    // vblank: there is no predicted vblank to miss
+    if s.vrr == Vrr::On {
+        return vec![row(
+            "Vblank sync",
+            "n/a: VRR flips when the frame is ready",
+            Tone::Neutral,
+        )];
+    }
+    if s.async_flip {
+        return vec![row(
+            "Vblank sync",
+            "n/a: tearing flips do not wait for the vblank",
+            Tone::Neutral,
+        )];
+    }
+    let Some(sync) = &s.sync else {
+        return vec![row("Vblank sync", "no flips counted yet", Tone::Neutral)];
+    };
+    // 100.00 would say nothing was missed
+    let percent = if sync.missed > 0 {
+        sync.percent().min(99.99)
+    } else {
+        sync.percent()
+    };
+    vec![
+        row(
+            "Vblank sync",
+            format!("{percent:.2}% on time (target {SYNC_TARGET}%)"),
+            if sync.on_target() {
+                Tone::Good
+            } else {
+                Tone::Warn
+            },
+        ),
+        row(
+            "Missed vblank",
+            format!(
+                "{} of {} flips, {} in the last {} s",
+                sync.missed,
+                sync.flips,
+                sync.recent_missed,
+                TIMING_SPAN.as_secs()
+            ),
+            if sync.missed == 0 {
+                Tone::Good
+            } else if sync.recent_missed > 0 {
+                Tone::Warn
+            } else {
+                Tone::Neutral
+            },
+        ),
+    ]
+}
+
+/// The lines about the time from a commit to the screen, and the drift of the flip that
+/// showed it from the vblank predicted for it.
+fn latency_rows(s: &Snapshot) -> Vec<Row> {
+    let Some(l) = &s.latency else {
+        return vec![row(
+            "Latency",
+            format!("no new frame in the last {} s", TIMING_SPAN.as_secs()),
+            Tone::Neutral,
+        )];
+    };
+    let mut rows = Vec::new();
+    rows.push(match &l.latency {
+        // more than two refreshes: the content waited behind another frame
+        Some(f) => row(
+            "Latency",
+            format!(
+                "commit to screen {} ms avg, {} best, {} worst",
+                ms_text(f.avg_ms),
+                ms_text(f.min_ms),
+                ms_text(f.worst_ms)
+            ),
+            if l.budget_ms.is_some_and(|b| f.avg_ms > b * 2.0) {
+                Tone::Warn
+            } else {
+                Tone::Neutral
+            },
+        ),
+        None => row("Latency", "no new frame of the window shown", Tone::Neutral),
+    });
+    // the same cases as the vblank sync rows: there is no predicted vblank to drift from
+    if s.vrr == Vrr::On {
+        rows.push(row(
+            "Drift",
+            "n/a: VRR flips when the frame is ready",
+            Tone::Neutral,
+        ));
+    } else if s.async_flip {
+        rows.push(row(
+            "Drift",
+            "n/a: tearing flips do not wait for the vblank",
+            Tone::Neutral,
+        ));
+    } else {
+        rows.push(match &l.drift {
+            Some(d) => row(
+                "Drift",
+                format!(
+                    "{:+.2} ms avg, {:+.2} worst from the predicted vblank",
+                    d.avg_ms, d.worst_ms
+                ),
+                // half a refresh is where a flip counts as a missed vblank
+                match l.budget_ms {
+                    Some(b) if d.worst_ms.abs() > b / 2.0 => Tone::Warn,
+                    Some(_) => Tone::Good,
+                    None => Tone::Neutral,
+                },
+            ),
+            None => row("Drift", "no flips counted yet", Tone::Neutral),
+        });
+    }
+    rows
+}
+
 /// The lines of the overlay, in groups: the frame rates, what the client asked for, what the
 /// compositor decided and what the hardware did.
 pub fn sections(s: &Snapshot) -> Vec<Section> {
@@ -370,9 +1019,22 @@ pub fn sections(s: &Snapshot) -> Vec<Section> {
         },
         Tone::Neutral,
     ));
+    frames.extend(sync_rows(s));
     out.push(Section {
         title: "Frames",
         rows: frames,
+    });
+
+    // ---- commit to screen ---------------------------------------------------------------
+    out.push(Section {
+        title: "Latency",
+        rows: latency_rows(s),
+    });
+
+    // ---- what the frames cost jff -------------------------------------------------------
+    out.push(Section {
+        title: "Compositor cost",
+        rows: cost_rows(s),
     });
 
     // ---- what the client asked for ------------------------------------------------------
@@ -395,7 +1057,9 @@ pub fn sections(s: &Snapshot) -> Vec<Section> {
         asked.push(row("Content", "says it is a game", Tone::Neutral));
     }
     let buffer = match s.buffer {
-        BufferKind::Dmabuf(code) => row("Buffer", format!("dmabuf {}", fourcc(code)), Tone::Good),
+        BufferKind::Dmabuf(code, _) => {
+            row("Buffer", format!("dmabuf {}", fourcc(code)), Tone::Good)
+        }
         BufferKind::Shm => row(
             "Buffer",
             "shared memory: copied by the GPU, can not go to the plane",
@@ -404,6 +1068,32 @@ pub fn sections(s: &Snapshot) -> Vec<Section> {
         BufferKind::None => row("Buffer", "none yet", Tone::Neutral),
     };
     asked.push(buffer);
+    // the layout of the dmabuf: the plane takes only the modifiers it lists, so a refusal
+    // ("format, modifier or size") is most often this one
+    if let BufferKind::Dmabuf(_, modifier) = s.buffer {
+        asked.push(if modifier == MODIFIER_INVALID {
+            row(
+                "Modifier",
+                "implicit: the driver picks the layout, the plane may refuse it",
+                Tone::Warn,
+            )
+        } else {
+            row("Modifier", modifier_name(modifier), Tone::Neutral)
+        });
+    }
+    let used = s.client_sync.names();
+    asked.push(row(
+        "Sync",
+        if !used.is_empty() {
+            used.join(", ")
+        } else if matches!(s.buffer, BufferKind::Dmabuf(..)) {
+            // no explicit sync: the buffer's own fences are what the compositor waits on
+            "implicit (the dmabuf's fences), no fifo, no commit timing".to_owned()
+        } else {
+            "none of fifo, commit timing, explicit sync".to_owned()
+        },
+        Tone::Neutral,
+    ));
     if let Some((bw, bh)) = s.buffer_size {
         let (ww, wh) = s.window_size;
         if (bw, bh) == (ww, wh) || ww == 0 || wh == 0 {
@@ -595,6 +1285,62 @@ fn json_timing(timing: &Option<Timing>) -> String {
     }
 }
 
+fn json_cost(cost: &Option<CostSummary>) -> String {
+    let opt = |v: Option<f64>| v.map_or("null".to_owned(), |v| format!("{v:.3}"));
+    match cost {
+        None => "null".to_owned(),
+        Some(c) => format!(
+            "{{\"frames\":{},\"cpu_avg_ms\":{:.3},\"cpu_worst_ms\":{:.3},\"gpu_wait_avg_ms\":{},\"gpu_wait_worst_ms\":{},\"total_avg_ms\":{:.3},\"total_worst_ms\":{:.3},\"budget_ms\":{},\"budget_avg_share\":{},\"budget_worst_share\":{},\"late_frames\":{}}}",
+            c.frames,
+            c.cpu_avg_ms,
+            c.cpu_worst_ms,
+            opt(c.gpu_avg_ms),
+            opt(c.gpu_worst_ms),
+            c.total_avg_ms,
+            c.total_worst_ms,
+            opt(c.budget_ms),
+            opt(c.avg_share()),
+            opt(c.worst_share()),
+            c.late
+        ),
+    }
+}
+
+fn json_sync(sync: &Option<SyncSummary>) -> String {
+    match sync {
+        None => "null".to_owned(),
+        Some(y) => format!(
+            "{{\"flips\":{},\"missed\":{},\"recent_flips\":{},\"recent_missed\":{},\"percent\":{:.3},\"target_percent\":{:.1},\"on_target\":{}}}",
+            y.flips,
+            y.missed,
+            y.recent_flips,
+            y.recent_missed,
+            y.percent(),
+            SYNC_TARGET,
+            y.on_target()
+        ),
+    }
+}
+
+fn json_latency(latency: &Option<LatencySummary>) -> String {
+    let Some(l) = latency else {
+        return "null".to_owned();
+    };
+    let commit = l.latency.map_or("null".to_owned(), |f| {
+        format!(
+            "{{\"frames\":{},\"avg_ms\":{:.3},\"min_ms\":{:.3},\"worst_ms\":{:.3}}}",
+            f.frames, f.avg_ms, f.min_ms, f.worst_ms
+        )
+    });
+    let drift = l.drift.map_or("null".to_owned(), |d| {
+        format!(
+            "{{\"flips\":{},\"avg_ms\":{:.3},\"worst_ms\":{:.3}}}",
+            d.flips, d.avg_ms, d.worst_ms
+        )
+    });
+    format!("{{\"commit_to_screen\":{commit},\"vblank_drift\":{drift}}}")
+}
+
 /// The snapshot as one JSON object, for `jff msg stats`.
 pub fn to_json(s: &Snapshot) -> String {
     let (path, reason) = match &s.path {
@@ -602,10 +1348,21 @@ pub fn to_json(s: &Snapshot) -> String {
         Path::Composited(why) => ("composited", json_str(&why.text())),
     };
     let buffer = match s.buffer {
-        BufferKind::Dmabuf(code) => format!("\"dmabuf:{}\"", fourcc(code)),
+        BufferKind::Dmabuf(code, _) => format!("\"dmabuf:{}\"", fourcc(code)),
         BufferKind::Shm => "\"shm\"".to_owned(),
         BufferKind::None => "null".to_owned(),
     };
+    let buffer_modifier = match s.buffer {
+        BufferKind::Dmabuf(_, modifier) => format!(
+            "{{\"code\":\"0x{modifier:016x}\",\"name\":{}}}",
+            json_str(&modifier_name(modifier))
+        ),
+        _ => "null".to_owned(),
+    };
+    let sync_protocols = format!(
+        "{{\"fifo\":{},\"commit_timing\":{},\"explicit_sync\":{}}}",
+        s.client_sync.fifo, s.client_sync.commit_timing, s.client_sync.explicit_sync
+    );
     let vrr = match s.vrr {
         Vrr::Unsupported => "unsupported",
         Vrr::Off => "off",
@@ -621,8 +1378,8 @@ pub fn to_json(s: &Snapshot) -> String {
         )
     });
     format!(
-        "{{\"app_id\":{},\"output\":{},\"client\":{},\"shown\":{},\"display_hz\":{:.2},\
-         \"client_asked\":{{\"fullscreen\":{},\"tearing\":{},\"game\":{},\"buffer\":{},\"buffer_size\":{},\"window_size\":{},\"colors\":{}}},\
+        "{{\"app_id\":{},\"output\":{},\"client\":{},\"shown\":{},\"display_hz\":{:.2},\"cost\":{},\"sync\":{},\"latency\":{},\"blame\":{},\
+         \"client_asked\":{{\"fullscreen\":{},\"tearing\":{},\"game\":{},\"buffer\":{},\"buffer_modifier\":{},\"sync_protocols\":{},\"buffer_size\":{},\"window_size\":{},\"colors\":{}}},\
          \"compositor\":{{\"path\":\"{}\",\"reason\":{},\"scanout_without_overlay\":{},\"allow_tearing\":{},\"adaptive_sync_policy\":{}}},\
          \"hardware\":{{\"vrr\":\"{}\",\"hdr\":{},\"async_flip\":{},\"content_type_game\":{}}}}}",
         json_str(&s.app_id),
@@ -630,10 +1387,21 @@ pub fn to_json(s: &Snapshot) -> String {
         json_timing(&s.client),
         json_timing(&s.shown),
         s.display_hz,
+        json_cost(&s.cost),
+        json_sync(&s.sync),
+        json_latency(&s.latency),
+        match blame(s) {
+            Some(Blame::Compositor) => "\"compositor\"",
+            Some(Blame::Client) => "\"client\"",
+            Some(Blame::Nobody) => "\"nobody\"",
+            None => "null",
+        },
         s.fullscreen,
         s.wants_tearing,
         s.says_game,
         buffer,
+        buffer_modifier,
+        sync_protocols,
         size(s.buffer_size),
         size(Some(s.window_size)),
         colors,

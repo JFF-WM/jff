@@ -34,7 +34,11 @@
 //! click left|right|middle    press and release that button where the pointer is
 //! toggle-overview            open the window overview, or close it when it is open
 //! stats                      what happened to the focused window on its way to the screen, as
-//!                            JSON (client, shown and display frame rates, sync, VRR, HDR,
+//!                            JSON (client, shown and display frame rates, what the frames cost
+//!                            jff against the refresh interval, sync, commit-to-screen latency
+//!                            and drift from the predicted vblank, the buffer's format and
+//!                            modifier, whether the client uses fifo, commit timing or explicit
+//!                            sync, VRR, HDR,
 //!                            direct scanout and why not). Starts counting for 10 seconds after
 //!                            each request without drawing anything, so the first reply can have
 //!                            `"stats":null`

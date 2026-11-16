@@ -2,6 +2,13 @@
 //! to the screen, and why. Toggled with the `toggle-stats` action (or `jff msg toggle-stats`),
 //! read as JSON with `jff msg stats`.
 //!
+//! The frame cost rows say what each frame cost jff (CPU time, GPU wait, share of the refresh
+//! interval) and so whether a lost sync is jff's or the client's. The frame rows count the
+//! flips that missed the vblank predicted when the frame was drawn, against the sync target.
+//! The latency rows give the time from the window's commit to the flip that showed it (the
+//! timestamp `wp_presentation` reports as `presented`) and the drift of that flip from the
+//! vblank predicted for it.
+//!
 //! Cost when off: nothing is kept and nothing is drawn. The hooks in `commit` and `on_vblank`
 //! test one bool. While on, the text is repainted at most [`REFRESH`] times a second and a
 //! timer keeps the monitor redrawing at that rate, so an idle desktop does not stay idle.
@@ -31,7 +38,10 @@ use smithay::utils::{Physical, Point, Transform};
 use crate::feature::osd::{
     draw_text, elide, half_line, over, sd_round_box, text_width, Fonts, Picture, Pixel,
 };
-use crate::primitives::stats::{Section, Snapshot, Ticks, Tone};
+use crate::primitives::stats::{
+    budget_of, commit_latency, drift_ms, missed_vblank, Costs, FrameCost, Latencies, Presented,
+    Section, Snapshot, Syncs, Ticks, Tone,
+};
 use crate::render::elements::JffElement;
 use crate::state::JffState;
 
@@ -96,10 +106,21 @@ pub struct StatsOverlay {
     client: Ticks,
     shown: Ticks,
     flips: Ticks,
+    /// What the frames queued on `output` cost.
+    costs: Costs,
+    /// Which flips of `output` landed on the vblank predicted for them.
+    syncs: Syncs,
+    /// Commit to screen and drift of the flips of `output`.
+    latencies: Latencies,
+    /// The vblank the frame in flight was drawn for and the refresh interval it is counted
+    /// with. `None` when it can not be told (VRR, tearing, no fresh frame clock).
+    predicted: Option<(Duration, Duration)>,
     /// `client.total()` when the frame in flight was drawn.
     seen_total: u64,
     /// A frame is in flight on `output`: does it carry something new of the window.
     in_flight: Option<bool>,
+    /// When the newest content of the window in the frame in flight was committed.
+    in_flight_commit: Option<Duration>,
     /// When the snapshot was last rebuilt.
     built: Option<Instant>,
     last: Option<Snapshot>,
@@ -124,8 +145,13 @@ impl StatsOverlay {
             client: Ticks::default(),
             shown: Ticks::default(),
             flips: Ticks::default(),
+            costs: Costs::default(),
+            syncs: Syncs::default(),
+            latencies: Latencies::default(),
+            predicted: None,
             seen_total: 0,
             in_flight: None,
+            in_flight_commit: None,
             built: None,
             last: None,
             painted: None,
@@ -188,8 +214,13 @@ impl StatsOverlay {
         self.client.clear();
         self.shown.clear();
         self.flips.clear();
+        self.costs.clear();
+        self.syncs.clear();
+        self.latencies.clear();
+        self.predicted = None;
         self.seen_total = 0;
         self.in_flight = None;
+        self.in_flight_commit = None;
         self.built = None;
         self.last = None;
         self.painted = None;
@@ -204,13 +235,23 @@ impl StatsOverlay {
             self.client.clear();
             self.shown.clear();
             self.flips.clear();
+            self.costs.clear();
+            self.syncs.clear();
+            self.latencies.clear();
+            self.predicted = None;
             self.seen_total = 0;
             self.in_flight = None;
+            self.in_flight_commit = None;
             self.built = None;
         } else if self.output != output {
-            // moved to another monitor: its flips are another series
+            // moved to another monitor: its flips and frame costs are another series
             self.flips.clear();
+            self.costs.clear();
+            self.syncs.clear();
+            self.latencies.clear();
+            self.predicted = None;
             self.in_flight = None;
+            self.in_flight_commit = None;
         }
         if self.output != output {
             self.output = output.to_owned();
@@ -233,14 +274,25 @@ impl StatsOverlay {
     }
 
     /// A frame was queued on `output`. It carries something new of the window if the window
-    /// committed since the last frame.
-    pub fn note_queued(&mut self, output: &str) {
+    /// committed since the last frame. `predicted` is the vblank it was drawn for and `refresh`
+    /// the monitor's interval; `predicted` is `None` when there is no vblank to miss.
+    pub fn note_queued(&mut self, output: &str, predicted: Option<Duration>, refresh: Duration) {
         if output != self.output {
             return;
         }
         let new = self.client.total() != self.seen_total;
         self.seen_total = self.client.total();
         self.in_flight = Some(new);
+        // the newest commit is what the frame shows: older ones were replaced before it was drawn
+        self.in_flight_commit = if new { self.client.last() } else { None };
+        self.predicted = predicted.map(|at| (at, refresh));
+    }
+
+    /// A frame queued on `output` at `at` cost `cost`.
+    pub fn note_cost(&mut self, output: &str, at: Duration, cost: FrameCost) {
+        if output == self.output {
+            self.costs.push(at, cost);
+        }
     }
 
     /// `output` flipped at `at`.
@@ -249,8 +301,25 @@ impl StatsOverlay {
             return;
         }
         self.flips.push(at);
-        if self.in_flight.take() == Some(true) {
+        let predicted = self.predicted.take();
+        if let Some((predicted, refresh)) = predicted {
+            self.syncs.push(at, missed_vblank(predicted, at, refresh));
+        }
+        let carried = self.in_flight.take() == Some(true);
+        let committed = self.in_flight_commit.take();
+        if carried {
             self.shown.push(at);
+        }
+        let latency = committed.and_then(|committed| commit_latency(committed, at));
+        let drift = predicted.map(|(predicted, _)| drift_ms(predicted, at));
+        if latency.is_some() || drift.is_some() {
+            self.latencies.push(
+                at,
+                Presented {
+                    latency,
+                    drift_ms: drift,
+                },
+            );
         }
     }
 
@@ -265,6 +334,10 @@ impl StatsOverlay {
         snapshot.client = self.client.timing(mono);
         snapshot.shown = self.shown.timing(mono);
         snapshot.display_hz = self.flips.rate(mono);
+        let budget = snapshot.mode.and_then(|(_, _, mhz)| budget_of(mhz));
+        snapshot.cost = self.costs.summary(mono, budget);
+        snapshot.sync = self.syncs.summary(mono);
+        snapshot.latency = self.latencies.summary(mono, budget);
         self.built = Some(now);
         self.last = Some(snapshot);
     }

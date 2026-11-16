@@ -33,12 +33,14 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, Resource};
 use smithay::utils::{Clock, Monotonic, Time};
 use smithay::wayland::commit_timing::CommitTimerBarrierStateUserData;
-use smithay::wayland::compositor::{CompositorHandler, SurfaceData};
+use smithay::wayland::compositor::{with_states, CompositorHandler, SurfaceData};
+use smithay::wayland::drm_syncobj::DrmSyncobjCachedState;
 use smithay::wayland::fifo::FifoBarrierCachedState;
 
 use crate::desk::Desk;
 use crate::feature::outputs::output_rect;
 use crate::primitives::layout;
+use crate::primitives::stats::ClientSync;
 
 /// The presentation clock (`CLOCK_MONOTONIC`) right now. Timestamps given to clients are on this
 /// clock.
@@ -173,11 +175,42 @@ impl crate::state::JffState {
     }
 }
 
+/// Set on a surface the first time a fifo barrier of it is released: it uses wp_fifo_v1.
+/// (The barrier itself is gone once released, so this is what remembers it.)
+struct FifoSeen;
+
+/// Which of wp_fifo_v1, wp_commit_timing_v1 and wp_linux_drm_syncobj_v1 `surface` uses, for the
+/// stats overlay. Explicit sync is judged by the last commit having an acquire point, the other
+/// two by what the surface has shown of them so far: a fifo barrier set or released, a commit
+/// timer made. Only the surface itself is looked at, not its subsurfaces.
+pub fn surface_sync_use(surface: &WlSurface) -> ClientSync {
+    with_states(surface, |states| ClientSync {
+        fifo: states.data_map.get::<FifoSeen>().is_some()
+            || states
+                .cached_state
+                .get::<FifoBarrierCachedState>()
+                .current()
+                .barrier
+                .is_some(),
+        commit_timing: states
+            .data_map
+            .get::<CommitTimerBarrierStateUserData>()
+            .is_some(),
+        explicit_sync: states
+            .cached_state
+            .get::<DrmSyncobjCachedState>()
+            .current()
+            .acquire_point
+            .is_some(),
+    })
+}
+
 /// Signal the barrier a surface set with its last commit. True when there was one.
 fn signal_fifo_barrier(states: &SurfaceData) -> bool {
     let mut cached = states.cached_state.get::<FifoBarrierCachedState>();
     match cached.current().barrier.take() {
         Some(barrier) => {
+            states.data_map.insert_if_missing_threadsafe(|| FifoSeen);
             tracing::trace!("fifo barrier released");
             barrier.signal();
             true

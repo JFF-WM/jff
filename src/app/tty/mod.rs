@@ -317,6 +317,17 @@ fn surface_scanout_facts(surface: &WlSurface) -> (Option<ImageDescription>, Opti
     (tag, format)
 }
 
+/// The format modifier of the surface's dmabuf, `None` when it is not one.
+fn surface_buffer_modifier(surface: &WlSurface) -> Option<u64> {
+    smithay::backend::renderer::utils::with_renderer_surface_state(surface, |state| {
+        state
+            .buffer()
+            .and_then(|buffer| get_dmabuf(buffer).ok())
+            .map(|dmabuf| u64::from(dmabuf.format().modifier))
+    })
+    .flatten()
+}
+
 // The decision compares the fourccs it knows by number.
 const _: () = {
     assert!(Fourcc::Argb2101010 as u32 == hdr_scanout::ARGB2101010);
@@ -2095,6 +2106,8 @@ impl JffState {
             self.render_secondary_crtc(dev, crtc);
             return;
         }
+        // Where the cost of this frame is counted from (stats for nerds).
+        let cost_from = std::time::Instant::now();
         // When this frame reaches the screen. Timed commits due by then belong in it, and
         // animations are computed for that moment (the clock stands still there for the frame).
         let presented_at = lit.next_presentation_time();
@@ -2751,6 +2764,8 @@ impl JffState {
         }
 
         let mut queued = false;
+        // How long the CPU waited for the GPU to finish the frame, if it did.
+        let mut gpu_wait = None;
         // The window did not reach the plane: draw the frame again through the HDR path.
         let mut retry = false;
         if !hdr_failed {
@@ -2800,9 +2815,11 @@ impl JffState {
                     }
                     if !declined && res.needs_sync() {
                         if let PrimaryPlaneElement::Swapchain(element) = res.primary_element {
+                            let waited = std::time::Instant::now();
                             if let Err(err) = element.sync.wait() {
                                 tracing::warn!("error waiting for frame completion: {err:?}");
                             }
+                            gpu_wait = Some(waited.elapsed());
                         }
                     }
                     // Nothing new to show while locked: the screen already is the lock.
@@ -2841,12 +2858,33 @@ impl JffState {
         // numbers are rebuilt a few times a second, not per frame.
         if let Some((surface, win)) = &nerd_window {
             if queued {
-                self.stats.note_queued(&lit.output.name());
+                let name = lit.output.name();
+                // The vblank this frame was drawn for. Under VRR or tearing the flip does not
+                // wait for one, and after an idle spell the frame clock is not to be trusted.
+                let refresh = lit.refresh();
+                let predicted = if lit.vrr_on || nerd_async {
+                    None
+                } else {
+                    nerd::countable_prediction(lit.last_vblank, presented_at, refresh)
+                };
+                self.stats.note_queued(&name, predicted, refresh);
+                let spent = cost_from.elapsed();
+                self.stats.note_cost(
+                    &name,
+                    crate::protocol::presentation::monotonic_now(),
+                    nerd::FrameCost {
+                        cpu: spent.saturating_sub(gpu_wait.unwrap_or_default()),
+                        gpu_wait,
+                    },
+                );
             }
             if self.stats.due(std::time::Instant::now()) {
                 let (color, format) = surface_scanout_facts(surface);
                 let buffer = match format {
-                    Some(code) => nerd::BufferKind::Dmabuf(code),
+                    Some(code) => nerd::BufferKind::Dmabuf(
+                        code,
+                        surface_buffer_modifier(surface).unwrap_or(nerd::MODIFIER_INVALID),
+                    ),
                     None if crate::protocol::layer_shell::is_mapped(surface) => {
                         nerd::BufferKind::Shm
                     }
@@ -2898,9 +2936,13 @@ impl JffState {
                     client: None,
                     shown: None,
                     display_hz: 0.0,
+                    cost: None,
+                    sync: None,
+                    latency: None,
                     fullscreen: win.fullscreen,
                     wants_tearing: win.wants_tearing,
                     says_game: win.says_game,
+                    client_sync: crate::protocol::presentation::surface_sync_use(surface),
                     buffer,
                     buffer_size,
                     window_size: win.window_size,
