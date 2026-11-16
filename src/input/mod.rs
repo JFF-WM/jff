@@ -112,10 +112,10 @@ impl JffState {
         // zwp_input_timestamps_v1: a client that asked gets the event's time just before the
         // event itself. Sending it for an event a compositor binding then swallows is harmless:
         // the next event of that device is stamped again, and the client keeps the latest.
+        // Motion is not stamped here: the pointer focus before the move can be another client
+        // than the one the move ends on, so `stamp_pointer_motion` does it once that is known.
         match &event {
             InputEvent::Keyboard { event } => self.stamp_keyboard(Event::time(event)),
-            InputEvent::PointerMotion { event } => self.stamp_pointer(Event::time(event)),
-            InputEvent::PointerMotionAbsolute { event } => self.stamp_pointer(Event::time(event)),
             InputEvent::PointerButton { event } => self.stamp_pointer(Event::time(event)),
             InputEvent::PointerAxis { event } => self.stamp_pointer(Event::time(event)),
             _ => {}
@@ -158,12 +158,16 @@ impl JffState {
                 let (x, y, w, h) = layout::bounds(&rects);
                 let size: Size<i32, Logical> = (w, h).into();
                 let pos = event.position_transformed(size) + Point::from((x as f64, y as f64));
+                self.motion_hw_time = Some(event.time());
                 self.pointer_motion_to(pos, event.time());
+                self.motion_hw_time = None;
             }
 
             // Mice and touchpads (libinput) report how far the pointer moved, not where it is.
             InputEvent::PointerMotion { event } => {
+                self.motion_hw_time = Some(event.time());
                 self.pointer_motion_relative(event.delta(), event.delta_unaccel(), event.time());
+                self.motion_hw_time = None;
             }
 
             // Pens and tablets (zwp_tablet_manager_v2), see `tablet.rs`.
@@ -627,6 +631,7 @@ impl JffState {
         }
 
         self.check_hot_corner(pos);
+        self.stamp_pointer_motion(new_under.as_ref().map(|(surface, _)| surface));
         pointer.motion(
             self,
             new_under.clone(),
@@ -663,6 +668,7 @@ impl JffState {
         self.check_hot_corner(pos);
 
         let under = self.pointer_focus_under(pos);
+        self.stamp_pointer_motion(under.as_ref().map(|(surface, _)| surface));
         let pointer = self.seat.get_pointer().unwrap();
         pointer.motion(
             self,

@@ -5,6 +5,8 @@
 //! The protocol only promises that the `timestamp` event comes before the input event it
 //! belongs to, so the compositor sends it right before it hands the event to the client.
 //! `process_input_event` calls `stamp_keyboard` / `stamp_pointer` ahead of the dispatch for that.
+//! Pointer motion is the exception: it can change the focus, so it is stamped by
+//! `stamp_pointer_motion` right before `wl_pointer.motion`, for the surface it ends on.
 
 use smithay::backend::input::InputTime;
 use smithay::reexports::wayland_protocols::wp::input_timestamps::zv1::server::{
@@ -148,7 +150,26 @@ impl JffState {
             .stamp(DeviceKind::Touch, surface, input_time_nsec(time));
     }
 
-    /// Before a `wl_pointer` event: tell the pointer focus client when it happened.
+    /// Before a `wl_pointer.motion`: tell the client the pointer is about to be on, `target`,
+    /// when the move happened. That is the focus after the move, not before: when the pointer
+    /// crosses into another client's surface, that client gets `enter` and the motion, and the
+    /// client it left sees neither. Does nothing unless a device event is being handled
+    /// (`motion_hw_time`), so synthetic motion carries no timestamp.
+    pub(crate) fn stamp_pointer_motion(&mut self, target: Option<&WlSurface>) {
+        let Some(time) = self.motion_hw_time.take() else {
+            return;
+        };
+        if self.input_timestamps.is_empty() {
+            return;
+        }
+        if let Some(surface) = target {
+            self.input_timestamps
+                .stamp(DeviceKind::Pointer, surface, input_time_nsec(time));
+        }
+    }
+
+    /// Before a `wl_pointer` event that does not move the pointer (button, axis): tell the
+    /// pointer focus client when it happened.
     pub(crate) fn stamp_pointer(&mut self, time: InputTime) {
         if self.input_timestamps.is_empty() {
             return;

@@ -315,6 +315,10 @@ pub struct JffState {
     pub fixes: Fixes,
     /// zwp_input_timestamps_v1: nanosecond event times for clients that ask (`protocol/input_timestamps.rs`).
     pub input_timestamps: InputTimestamps,
+    /// Hardware time of the libinput motion event being handled, so the timestamp can go to the
+    /// client the pointer ends up on. Set only while that event is dispatched, `None` for motion
+    /// that did not come from a device (virtual pointer, tablet, IPC).
+    pub motion_hw_time: Option<smithay::backend::input::InputTime>,
     /// xdg-toplevel-drag: a drag-and-drop that carries a window (`protocol/toplevel_drag.rs`).
     pub toplevel_drags: ToplevelDrags,
     /// xdg-toplevel-tag: window tags for `window-rule` (`protocol/toplevel_tag.rs`).
@@ -679,6 +683,7 @@ impl JffState {
             pointer_warp,
             fixes,
             input_timestamps,
+            motion_hw_time: None,
             toplevel_drags,
             toplevel_tag_manager,
             virtual_pointer_manager,
