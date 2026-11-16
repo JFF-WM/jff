@@ -358,6 +358,9 @@ pub struct JffState {
     pub overview: Option<crate::feature::overview_mode::Overview>,
     /// Scroll over the overview not yet turned into a workspace step. Outlives the overview, which reopens after each step.
     pub overview_scroll: crate::primitives::scroll_steps::ScrollSteps,
+    /// For `overview { auto-open }`: per monitor, the workspace it showed and whether that had no
+    /// windows, as of the last look. The overview opens when this turns into "empty".
+    pub overview_auto: HashMap<String, (usize, bool)>,
     /// Whether the pointer may start a hot corner dwell on its next entry into a corner. Cleared
     /// when the dwell fires (or the entry was blocked), set again once the pointer leaves.
     pub hot_corner_armed: bool,
@@ -695,6 +698,7 @@ impl JffState {
             resize: None,
             overview: None,
             overview_scroll: Default::default(),
+            overview_auto: HashMap::new(),
             hot_corner_armed: true,
             hot_corner_timer: None,
             closing: Vec::new(),

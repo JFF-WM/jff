@@ -1325,6 +1325,50 @@ impl JffState {
         }
     }
 
+    /// `overview { auto-open }`: open the overview when the monitor in use has just run out of
+    /// windows, so you can type the name of an app and start it. Called once per event-loop
+    /// iteration.
+    ///
+    /// It acts on the moment a monitor *becomes* empty (its last window closed or left, or it
+    /// switched to an empty workspace), not on being empty: Escape closes the overview and it
+    /// stays closed until the next time. Only the monitor the pointer is on opens it, the
+    /// overview takes the pointer and the keyboard.
+    pub fn auto_open_overview(&mut self) {
+        let mut seen: HashMap<String, (usize, bool)> = HashMap::new();
+        let mut open_on: Option<Output> = None;
+        let active = self.active_output_name();
+        for output in &self.outputs {
+            let name = output.name();
+            let state = (
+                self.desk.current_on(&name),
+                self.windows_on(output_rect(output)).is_empty(),
+            );
+            // The first look at a monitor only records it: nothing opens at start-up or when a
+            // monitor is plugged in.
+            let arrived = state.1 && self.overview_auto.get(&name).is_some_and(|b| *b != state);
+            if arrived && name == active {
+                open_on = Some(output.clone());
+            }
+            seen.insert(name, state);
+        }
+        self.overview_auto = seen;
+
+        let Some(output) = open_on else {
+            return;
+        };
+        if !self.config.overview().auto_open
+            || self.overview_active()
+            || self.session_locked()
+            || self.screenshot.is_some()
+        {
+            return;
+        }
+        self.open_overview_with(true, Some(output));
+        if self.overview_active() {
+            self.queue_redraw_all();
+        }
+    }
+
     /// Open the overview as the window switcher, with the next window selected (the last one
     /// with `backwards`). It ends on its own when the modifiers held now are let go.
     pub fn open_switcher(&mut self, backwards: bool) {

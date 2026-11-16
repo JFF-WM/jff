@@ -875,11 +875,15 @@ pub const DEFAULT_SELECTION_COLOR: [f32; 4] = [0.35, 0.55, 0.95, 0.6];
 /// The `overview { … }` block: how the overview and the switcher mark the selected thumbnail.
 /// `selection-width` is the outline's width in pixels (0 draws none), `selection-color` its
 /// colour (`#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`). The square of the workspace wall the
-/// pointer is over uses the same outline.
+/// pointer is over uses the same outline. `auto-open` (on by default) opens the overview when
+/// the monitor in use has no windows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OverviewConfig {
     pub selection_width: i32,
     pub selection_color: [f32; 4],
+    /// Open the overview by itself when the monitor in use has no windows (the last one closed,
+    /// or you switched to an empty workspace), so an app can be started by typing its name.
+    pub auto_open: bool,
 }
 
 impl Default for OverviewConfig {
@@ -887,6 +891,7 @@ impl Default for OverviewConfig {
         Self {
             selection_width: DEFAULT_SELECTION_WIDTH,
             selection_color: DEFAULT_SELECTION_COLOR,
+            auto_open: true,
         }
     }
 }
@@ -2888,6 +2893,7 @@ fn parse_overview(node: &KdlNode) -> anyhow::Result<OverviewConfig> {
         match child.name().value() {
             "selection-width" => config.selection_width = int_arg(child, MAX_BORDER_WIDTH)?,
             "selection-color" => config.selection_color = parse_color(&string_arg(child)?)?,
+            "auto-open" => config.auto_open = flag_value(child)?,
             other => bail!("unknown overview setting {other:?}"),
         }
     }

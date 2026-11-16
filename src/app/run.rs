@@ -271,6 +271,7 @@ pub fn run() -> anyhow::Result<()> {
         state.update_resize();
         state.update_idle_inhibited();
         state.service_session_lock();
+        state.auto_open_overview();
         state.publish_events();
         state.publish_foreign_toplevels();
         state.publish_ext_foreign_toplevels();
