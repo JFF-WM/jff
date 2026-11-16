@@ -44,6 +44,7 @@ mod overview_mode;
 mod pacing;
 mod popup_grab;
 mod region;
+mod render_device;
 mod screenshot_area;
 mod screenshot_capture;
 mod screenshot_save;

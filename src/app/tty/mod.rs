@@ -1433,6 +1433,68 @@ impl Tty {
     }
 }
 
+/// The GPU to open: the one `render-device` names, else the primary one (the one the machine
+/// booted on), else the first there is. jff drives the monitors of this one GPU only, so it says
+/// so in the log when another GPU has monitors connected that it leaves dark.
+fn choose_gpu(seat: &str, wanted: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
+    let all = udev::all_gpus(seat).context("error listing the GPUs")?;
+    let mut chosen = None;
+    if let Some(wanted) = wanted {
+        let wanted_real = std::fs::canonicalize(wanted).ok();
+        chosen = all
+            .iter()
+            .find(|path| {
+                path.as_path() == std::path::Path::new(wanted)
+                    || (wanted_real.is_some() && std::fs::canonicalize(path).ok() == wanted_real)
+            })
+            .cloned();
+        if chosen.is_none() {
+            tracing::warn!(
+                "render-device {wanted:?} is not one of the GPUs on this seat ({all:?}), using the default"
+            );
+        }
+    }
+    let chosen = chosen
+        .or_else(|| udev::primary_gpu(seat).ok().flatten())
+        .or_else(|| all.first().cloned())
+        .context("no GPU found")?;
+    warn_ignored_gpus(&all, &chosen);
+    Ok(chosen)
+}
+
+/// Log a warning for each GPU other than `chosen` that has a monitor connected: jff has no
+/// multi-GPU support, so those monitors stay dark. Reads `/sys/class/drm`, so it needs no
+/// access to the other devices.
+fn warn_ignored_gpus(all: &[std::path::PathBuf], chosen: &std::path::Path) {
+    for other in all.iter().filter(|path| path.as_path() != chosen) {
+        let Some(card) = other.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let prefix = format!("{card}-");
+        let mut connected: Vec<String> = std::fs::read_dir("/sys/class/drm")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                let connector = name.strip_prefix(&prefix)?.to_owned();
+                let status = std::fs::read_to_string(entry.path().join("status")).ok()?;
+                (status.trim() == "connected").then_some(connector)
+            })
+            .collect();
+        connected.sort();
+        if connected.is_empty() {
+            tracing::debug!("GPU {other:?} is not used, it has no monitor connected");
+        } else {
+            tracing::warn!(
+                "GPU {other:?} has monitors connected ({}) that jff leaves dark: it uses only {chosen:?} and has no multi-GPU support. Put `render-device \"{}\"` in the config to use that GPU instead",
+                connected.join(", "),
+                other.display()
+            );
+        }
+    }
+}
+
 /// Open the session, the GPU, every connected monitor and the input devices.
 pub fn init(
     handle: &LoopHandle<'static, JffState>,
@@ -1444,14 +1506,7 @@ pub fn init(
     let seat = session.seat();
 
     // ---- GPU ----
-    let gpu_path = udev::primary_gpu(&seat)
-        .context("error looking for the primary GPU")?
-        .or_else(|| {
-            udev::all_gpus(&seat)
-                .ok()
-                .and_then(|gpus| gpus.into_iter().next())
-        })
-        .context("no GPU found")?;
+    let gpu_path = choose_gpu(&seat, config.render_device())?;
     tracing::info!("using GPU {gpu_path:?}");
 
     let fd = session

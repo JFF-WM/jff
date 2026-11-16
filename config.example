@@ -6,6 +6,7 @@
 // jff reloads the file when you save it (or on the `reload-config` bind). Everything takes
 // effect on reload except the settings listed here, which only work the way they say:
 //   autostart, sh-autostart   run once, when jff starts. A reload does not run a changed list.
+//   render-device             the GPU is chosen when jff starts.
 //   restore-apps              turning it on in a running session starts saving the open apps,
 //                             but they are only started again at the next jff start.
 //   color-representation yuv  clients tell the compositor what they can use when they connect:
@@ -66,6 +67,12 @@ focus-follows-mouse #true
 // Use it together with `focus-follows-mouse`: that one moves the keyboard to the pointer, this one
 // moves the pointer to the keyboard, so the two never disagree after Alt+Tab.
 warp-mouse-to-focus #true
+
+// The GPU jff uses (read at startup). By default it is the primary one, the GPU the machine
+// booted on. jff drives only the monitors of that one GPU: monitors wired to another GPU stay
+// dark, and the log says so. Name the other GPU here when that is where your monitors are.
+// List them with `ls /dev/dri/card*`.
+// render-device "/dev/dri/card1"
 
 // Restore the apps of the last session (off by default). While on, jff remembers every open
 // window (its app id, workspace and monitor) in $XDG_STATE_HOME/jff-wm/open-apps. At the next

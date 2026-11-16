@@ -11,7 +11,7 @@
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
-//! A reload applies every setting except these, which are the only ones that work another way, so keep this list and the one at the top of `config.example` in step: `autostart` / `sh-autostart` run once when jff starts (a reload does not run a changed list), `restore-apps` restores the last session's apps only at start (saving follows a reload), and `color-representation { yuv }` is told to a client when it connects (programs already running keep what they were told).
+//! A reload applies every setting except these, which are the only ones that work another way, so keep this list and the one at the top of `config.example` in step: `autostart` / `sh-autostart` run once when jff starts (a reload does not run a changed list), `restore-apps` restores the last session's apps only at start (saving follows a reload), `render-device` picks the GPU when jff starts, and `color-representation { yuv }` is told to a client when it connects (programs already running keep what they were told).
 //!
 //! `binds` has three actions for several monitors, each takes one target: `left`, `right`, `up`, `down` (the monitor that lies that way from the one in use), `next`, `prev` (left to right, then top to bottom, wrapping) or the name of a monitor (`"DP-2"`, see `jff msg outputs`). `focus-monitor "right"` moves the pointer and the keyboard there (to the topmost window, or to the middle of an empty monitor). `move-to-monitor "right"` sends the focused window there, pointer and keyboard follow, and a window of a tiling container takes its container along. `move-workspace-to-monitor "right"` trades what the monitor in use shows with what that monitor shows, and needs `workspaces { per-output }`. A target that does not exist (the edge of the desktop) does nothing, a name that is not connected shows an error toast.
 //!
@@ -175,6 +175,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "focus-follows-mouse",
     "allow-tearing",
     "global-hotkeys",
+    "render-device",
     "restore-apps",
     "window-animations",
     "no-client-decorations",
@@ -1339,6 +1340,8 @@ pub struct Config {
     allow_tearing: bool,
     /// `global-hotkeys`: clients may bind their own global hotkeys (xx-hotkey-v1). Off by default.
     global_hotkeys: bool,
+    /// `render-device "/dev/dri/cardN"`: the GPU jff opens, `None` for the primary one.
+    render_device: Option<String>,
     /// `restore-apps`: start the apps that were open in the last session, and remember the ones
     /// open now. Off by default.
     restore_apps: bool,
@@ -1410,6 +1413,7 @@ impl Default for Config {
                 focus_follows_mouse: false,
                 allow_tearing: false,
                 global_hotkeys: false,
+                render_device: None,
                 restore_apps: false,
                 window_animations: WindowAnimations::default(),
                 no_client_decorations: false,
@@ -1618,6 +1622,16 @@ impl Config {
         let focus_follows_mouse = parse_flag(&doc, "focus-follows-mouse", false)?;
         let allow_tearing = parse_flag(&doc, "allow-tearing", false)?;
         let global_hotkeys = parse_flag(&doc, "global-hotkeys", false)?;
+        let render_device = match doc.get("render-device") {
+            None => None,
+            Some(node) => {
+                let path = string_arg(node)?;
+                if !path.starts_with('/') {
+                    bail!("render-device takes a path like \"/dev/dri/card1\"");
+                }
+                Some(path)
+            }
+        };
         let restore_apps = parse_flag(&doc, "restore-apps", false)?;
         let window_animations = match doc.get("window-animations") {
             None => WindowAnimations::default(),
@@ -1777,6 +1791,7 @@ impl Config {
             focus_follows_mouse,
             allow_tearing,
             global_hotkeys,
+            render_device,
             restore_apps,
             window_animations,
             no_client_decorations,
@@ -2087,6 +2102,12 @@ impl Config {
     /// Whether clients may bind their own global hotkeys (xx-hotkey-v1).
     pub fn global_hotkeys(&self) -> bool {
         self.global_hotkeys
+    }
+
+    /// The GPU to use (`render-device`), `None` for the primary one. Read when jff starts. jff
+    /// drives the monitors of this one GPU only.
+    pub fn render_device(&self) -> Option<&str> {
+        self.render_device.as_deref()
     }
 
     /// Whether the apps of the last session are started again, and the open ones remembered
