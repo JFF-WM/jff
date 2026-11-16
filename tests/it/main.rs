@@ -10,6 +10,7 @@ mod color_management_versions;
 mod color_names;
 mod color_representation;
 mod config;
+mod config_lenient;
 mod container_drop;
 mod container_view;
 mod cursor_config;

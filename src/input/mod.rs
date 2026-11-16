@@ -1121,7 +1121,9 @@ impl JffState {
                 self.apply_decoration_mode();
                 self.apply_hotkey_config();
                 self.osd.dismiss(crate::feature::osd::Icon::Error);
-                self.warn_hdr_hidden();
+                if !self.warn_config_skipped() {
+                    self.warn_hdr_hidden();
+                }
                 tracing::info!("config reloaded");
             }
             Err(err) => {

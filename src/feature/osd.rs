@@ -789,6 +789,23 @@ impl JffState {
         self.osd.show(notice, timeout, Instant::now());
     }
 
+    /// Say so when the config file had parts that did not parse and were left out (see `Config::parse_lenient`). Returns whether it did, so the caller does not cover the toast with another one.
+    pub fn warn_config_skipped(&mut self) -> bool {
+        let skipped = self.config.skipped();
+        let Some(first) = skipped.first() else {
+            return false;
+        };
+        for entry in skipped {
+            tracing::warn!("config: left out {entry}");
+        }
+        let message = match skipped.len() {
+            1 => format!("Left out {first}"),
+            more => format!("Left out {first} (and {} more, see the log)", more - 1),
+        };
+        self.show_error("Config error, the rest is in use", &message);
+        true
+    }
+
     /// Say so when a monitor is HDR but clients cannot be told: the protocol they would ask for HDR through is not there, because the config has `color-management { off }` (or had it when jff started, and the global is only made then).
     pub fn warn_hdr_hidden(&mut self) {
         let names = self.config.hdr_output_names();

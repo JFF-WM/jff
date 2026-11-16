@@ -61,6 +61,7 @@
 //! `DEFAULT_CONFIG` is what runs when the user has no file. It has to parse: `Config::default`
 //! goes through `parse()` and logs an error if it fails.
 
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -1373,6 +1374,8 @@ pub struct Config {
     color_representation_yuv: bool,
     /// `color-management { … }`.
     color_management: ColorManagementConfig,
+    /// What [`Config::parse_lenient`] left out of the file because it did not parse, one line each. Empty for a file that is fine, and always for [`Config::parse`], which fails instead.
+    skipped: Vec<String>,
 }
 
 /// Held while dragging with the mouse, moves or resizes a window.
@@ -1428,17 +1431,18 @@ impl Default for Config {
                 container_rules: Vec::new(),
                 color_representation_yuv: false,
                 color_management: ColorManagementConfig::default(),
+                skipped: Vec::new(),
             }
         })
     }
 }
 
 impl Config {
-    /// Load the file, falling back to defaults when it is missing.
+    /// Load the file, falling back to defaults when it is missing. A part of it that does not parse is left out and listed in [`Config::skipped`], see [`Config::parse_lenient`].
     ///
     /// # Errors
     ///
-    /// File exists but can't be read or parsed.
+    /// File exists but can't be read, or is not KDL.
     pub fn load() -> anyhow::Result<Self> {
         let Some(path) = Self::path() else {
             return Ok(Self::default());
@@ -1446,7 +1450,7 @@ impl Config {
         match std::fs::read_to_string(&path) {
             Ok(text) => {
                 tracing::info!("loading config from {}", path.display());
-                Self::parse(&text).with_context(|| format!("in {}", path.display()))
+                Self::parse_lenient(&text).with_context(|| format!("in {}", path.display()))
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
@@ -1794,7 +1798,70 @@ impl Config {
             container_rules,
             color_representation_yuv,
             color_management,
+            skipped: Vec::new(),
         })
+    }
+
+    /// The same as [`Config::parse`], except that a part of the file that does not parse is left out instead of failing the whole file: one `bind`, one `output`, one `window-rule`, or one of the other top-level settings. What was left out is in [`Config::skipped`]. The rest is exactly what `parse` gives for a file without those parts.
+    ///
+    /// # Errors
+    ///
+    /// Text that is not KDL at all: there is no telling where one setting ends and the next begins.
+    pub fn parse_lenient(text: &str) -> anyhow::Result<Self> {
+        let doc: KdlDocument = text.parse()?;
+        let mut kept = String::new();
+        let mut skipped = Vec::new();
+        // The rules are numbered in the file, so the same name is counted.
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        for node in doc.nodes() {
+            let name = node.name().value();
+            let number = {
+                let count = seen.entry(name).or_insert(0);
+                *count += 1;
+                *count
+            };
+            let block = matches!(name, "binds" | "outputs")
+                .then(|| node.children())
+                .flatten();
+            let Some(children) = block else {
+                match Self::parse(&node.to_string()) {
+                    Ok(_) => kept.push_str(&format!("{node}\n")),
+                    Err(err) => {
+                        let label = match name {
+                            "window-rule" | "container-rule" => format!("{name} {number}"),
+                            _ => name.to_string(),
+                        };
+                        skipped.push(format!("{label}: {}", err.root_cause()));
+                    }
+                }
+                continue;
+            };
+            // A block is checked entry by entry: one bad bind must not take the others down.
+            let mut body = String::new();
+            for child in children.nodes() {
+                match Self::parse(&format!("{name} {{\n{child}\n}}\n")) {
+                    Ok(_) => body.push_str(&format!("{child}\n")),
+                    Err(err) => {
+                        let first = child.entries().first().and_then(|e| e.value().as_string());
+                        let label = match (name, first) {
+                            ("binds", _) => format!("bind {:?}", child.name().value()),
+                            (_, Some(first)) => format!("output {first:?}"),
+                            _ => name.to_string(),
+                        };
+                        skipped.push(format!("{label}: {}", err.root_cause()));
+                    }
+                }
+            }
+            kept.push_str(&format!("{name} {{\n{body}}}\n"));
+        }
+        let mut config = Self::parse(&kept)?;
+        config.skipped = skipped;
+        Ok(config)
+    }
+
+    /// What [`Config::parse_lenient`] left out of the file, one line each.
+    pub fn skipped(&self) -> &[String] {
+        &self.skipped
     }
 
     /// Corner radius in pixels of windows that aren't fullscreen (0 by default: square).

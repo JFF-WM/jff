@@ -147,7 +147,7 @@ pub fn run() -> anyhow::Result<()> {
     }
     if let Some(why) = startup_error {
         state.show_error("Config error, using defaults", &why);
-    } else {
+    } else if !state.warn_config_skipped() {
         state.warn_hdr_hidden();
     }
 
