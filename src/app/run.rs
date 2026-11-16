@@ -276,6 +276,7 @@ pub fn run() -> anyhow::Result<()> {
         state.publish_ext_foreign_toplevels();
         state.publish_ext_workspaces();
         state.service_image_copy();
+        state.service_wlr_screencopy();
         // Last, so the frame is made from the state the steps above settled. A monitor draws
         // here only if something asked for it (commit, input, animation, vblank).
         state.redraw_queued_outputs();

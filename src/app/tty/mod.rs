@@ -2592,6 +2592,7 @@ impl JffState {
             // that commits without damage from spinning.
             advance_frame_sequence(&output);
             self.image_copy.output_drawn(&output);
+            self.wlr_screencopy.output_drawn(&output);
             self.send_frame_callbacks(&output);
         } else {
             self.release_fifo_barriers(&output);

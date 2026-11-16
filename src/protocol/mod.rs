@@ -30,6 +30,8 @@ pub mod transient_seat;
 pub mod virtual_keyboard;
 pub mod virtual_pointer;
 pub mod window_sdr;
+pub mod wlr_screencopy;
+pub mod wlr_screencopy_bindings;
 pub mod workspace;
 pub mod xdg_session_bindings;
 pub mod xx_hotkey;

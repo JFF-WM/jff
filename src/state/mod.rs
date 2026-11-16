@@ -120,6 +120,7 @@ use crate::protocol::toplevel_drag::ToplevelDrags;
 use crate::protocol::toplevel_tag::ToplevelTagManager;
 use crate::protocol::transient_seat::TransientSeats;
 use crate::protocol::virtual_pointer::VirtualPointerManager;
+use crate::protocol::wlr_screencopy::WlrScreencopy;
 use crate::protocol::workspace::ExtWorkspace;
 use crate::protocol::xx_hotkey::Hotkeys;
 use crate::protocol::xx_zones::Zones;
@@ -242,6 +243,8 @@ pub struct JffState {
     pub tearing_control_state: TearingControlState,
     /// ext-image-copy-capture-v1 / ext-image-capture-source-v1 (screen capture of monitors).
     pub image_copy: ImageCopy,
+    /// wlr-screencopy-unstable-v1: grim, wf-recorder and friends (`protocol/wlr_screencopy.rs`).
+    pub wlr_screencopy: WlrScreencopy,
     /// ext-foreign-toplevel-list-v1 (the read-only list of open windows).
     pub ext_foreign_toplevel: ExtForeignToplevel,
     pub foreign_toplevel: ForeignToplevel,
@@ -518,6 +521,7 @@ impl JffState {
 
         let tearing_control_state = TearingControlState::new(&display_handle);
         let image_copy = ImageCopy::new(&display_handle);
+        let wlr_screencopy = WlrScreencopy::new(&display_handle);
         let ext_foreign_toplevel = ExtForeignToplevel::new(&display_handle);
         let foreign_toplevel = ForeignToplevel::new(&display_handle);
         let ext_workspace = ExtWorkspace::new(&display_handle);
@@ -640,6 +644,7 @@ impl JffState {
             fifo_manager_state,
             tearing_control_state,
             image_copy,
+            wlr_screencopy,
             ext_foreign_toplevel,
             foreign_toplevel,
             ext_workspace,

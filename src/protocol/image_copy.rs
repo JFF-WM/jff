@@ -257,6 +257,18 @@ impl ImageCopy {
         }
     }
 
+    /// The fourcc codes of the dmabuf formats offered for monitor captures, empty when dmabuf
+    /// is not offered (`wlr_screencopy.rs` announces them too).
+    pub(crate) fn dmabuf_codes(&self) -> Vec<u32> {
+        if self.dma_node.is_none() {
+            return Vec::new();
+        }
+        self.dma_formats
+            .iter()
+            .map(|(code, _)| *code as u32)
+            .collect()
+    }
+
     /// A frame was sent to `output`: what a capture of it shows may have changed.
     pub fn output_drawn(&mut self, output: &Output) {
         if self.sessions.is_empty() {
@@ -344,7 +356,7 @@ fn write_rows(
 
 /// Write `picture` (RGBA) into shm buffer `buffer`, as `Argb8888`/`Xrgb8888` (which in memory
 /// are B, G, R, A on the little-endian machines jff runs on).
-fn write_shm(buffer: &WlBuffer, picture: &Captured) -> Result<(), String> {
+pub(crate) fn write_shm(buffer: &WlBuffer, picture: &Captured) -> Result<(), String> {
     let (width, height) = (picture.width as usize, picture.height as usize);
     write_rows(buffer, width, height, |y, row| {
         let source = &picture.rgba[y * width * 4..(y + 1) * width * 4];
