@@ -26,7 +26,8 @@
 
 use std::path::PathBuf;
 
-use smithay::backend::allocator::Fourcc;
+use smithay::backend::allocator::dmabuf::Dmabuf;
+use smithay::backend::allocator::{Buffer as _, Fourcc};
 use smithay::backend::input::InputTime;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::memory::{
@@ -305,6 +306,33 @@ fn render_to_rgba<E: RenderElement<GlesRenderer>>(
     })
 }
 
+/// Render `elements` (front to back, in picture pixels) straight into `dmabuf`, a buffer a
+/// client made for a capture. Nothing is read back to the CPU.
+fn render_to_dmabuf<E: RenderElement<GlesRenderer>>(
+    renderer: &mut GlesRenderer,
+    dmabuf: &mut Dmabuf,
+    size: (i32, i32),
+    scale: f64,
+    elements: &[E],
+    clear: [f32; 4],
+) -> Result<(), String> {
+    if size.0 <= 0 || size.1 <= 0 {
+        return Err("nothing to capture: the picture would be empty".to_string());
+    }
+    let physical: Size<i32, Physical> = size.into();
+    let mut target = renderer
+        .bind(dmabuf)
+        .map_err(|err| format!("could not draw into the client's buffer: {err:?}"))?;
+    let mut tracker = OutputDamageTracker::new(physical, scale, Transform::Normal);
+    let result = tracker
+        .render_output(renderer, &mut target, 0, elements, clear)
+        .map_err(|err| format!("could not render the picture: {err:?}"))?;
+    // The client is told the picture is ready as soon as this returns, so the GPU has to be done
+    // with it. This is the wait that is left: no readback, no copy.
+    let _ = result.sync.wait();
+    Ok(())
+}
+
 /// Render `elements` (already in the working space) into a float texture of `size` and read it
 /// back as the bits of half floats, four per pixel, top row first.
 fn render_to_working(
@@ -431,6 +459,34 @@ impl JffState {
             &frame.elements,
             BACKGROUND,
         )
+    }
+
+    /// A picture of `output` as `capture_output` makes it, drawn straight into the client's
+    /// `dmabuf` instead of being read back. The buffer must be exactly the size of the picture.
+    /// Gives the size of the picture.
+    pub(crate) fn capture_output_into(
+        &mut self,
+        output: &Output,
+        with_cursor: bool,
+        dmabuf: &mut Dmabuf,
+    ) -> Result<Size<i32, BufferCoords>, String> {
+        let frame = self.output_frame(output, with_cursor, None)?;
+        let size = dmabuf.size();
+        if (size.w, size.h) != frame.size {
+            return Err(format!(
+                "the buffer is {}x{}, the picture {}x{}",
+                size.w, size.h, frame.size.0, frame.size.1
+            ));
+        }
+        render_to_dmabuf(
+            self.backend.renderer(),
+            dmabuf,
+            frame.size,
+            frame.scale,
+            &frame.elements,
+            BACKGROUND,
+        )?;
+        Ok(size)
     }
 
     /// The working space and final pass of `output` while it is shown as HDR, `None` when it is

@@ -801,6 +801,11 @@ fn create_lut_blob(
 
 impl Tty {
     /// DRM device that client sync objects are imported on (wp_linux_drm_syncobj_v1).
+    /// The render node of the GPU jff draws with, `None` when the driver has none.
+    pub fn render_node(&self) -> Option<DrmNode> {
+        self.render_node
+    }
+
     pub fn drm_device_fd(&self) -> &DrmDeviceFd {
         self.drm.device_fd()
     }

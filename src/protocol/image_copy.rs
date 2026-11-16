@@ -11,11 +11,16 @@
 //! the window is (other workspace, covered by another window). The session ends when the
 //! window closes.
 //!
-//! Pictures: a frame is a render of the monitor (or window) into an offscreen texture, read back and written
-//! into the client's `wl_shm` buffer. Same as `JffState::capture_output` in `screenshot.rs`, so a
-//! capture shows exactly what a screenshot shows (no overview). Buffers offered: `Argb8888` and
-//! `Xrgb8888`, and for a monitor in HDR mode also the 10-bit formats (`HDR_FORMATS`), listed
-//! after the 8-bit ones. No dmabuf.
+//! Pictures: a frame is a render of the monitor (or window), the same as
+//! `JffState::capture_output` in `screenshot.rs`, so a capture shows exactly what a screenshot
+//! shows (no overview). Buffers offered: `Argb8888` and `Xrgb8888`, and for a monitor in HDR mode
+//! also the 10-bit formats (`HDR_FORMATS`), listed after the 8-bit ones. Into a `wl_shm` buffer
+//! the render is read back to the CPU and written. Monitors on the TTY backend also offer dmabuf
+//! (`Argb8888` and `Xrgb8888` in the modifiers the renderer can draw into): a client that
+//! allocates its buffer that way gets the monitor drawn straight into it, with no readback or
+//! copy. That picture is always whole: the damage sent with it is all of it, and a frame is
+//! still only drawn when the monitor drew since the last one. Windows, the 10-bit HDR formats
+//! and the winit backend stay on `wl_shm`.
 //!
 //! HDR: the 8-bit formats always get the sRGB picture a screenshot file has, so a client that
 //! knows nothing about HDR is never handed a washed-out one. A client that asks for a 10-bit
@@ -40,6 +45,9 @@
 //! Sessions end when the monitor goes away or is switched off. A mode change (or a window
 //! resize) sends new buffer constraints and fails the frame in flight with `buffer_constraints`.
 
+use smithay::backend::allocator::dmabuf::Dmabuf;
+use smithay::backend::allocator::{Buffer as _, Fourcc, Modifier};
+use smithay::backend::drm::DrmNode;
 use smithay::backend::renderer::utils::{with_renderer_surface_state, CommitCounter};
 use smithay::desktop::{PopupManager, Window};
 use smithay::output::{Output, WeakOutput};
@@ -48,6 +56,7 @@ use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::utils::{Buffer as BufferCoords, IsAlive, Rectangle, Size, Transform};
 use smithay::wayland::compositor::{with_surface_tree_downward, TraversalAction};
+use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::foreign_toplevel_list::ForeignToplevelHandle;
 use smithay::wayland::image_capture_source::{
     ImageCaptureSource, ImageCaptureSourceHandler, ImageCaptureSourceState,
@@ -55,11 +64,12 @@ use smithay::wayland::image_capture_source::{
     ToplevelCaptureSourceState,
 };
 use smithay::wayland::image_copy_capture::{
-    BufferConstraints, CaptureFailureReason, Frame, FrameRef, ImageCopyCaptureHandler,
-    ImageCopyCaptureState, Session, SessionRef,
+    BufferConstraints, CaptureFailureReason, DmabufConstraints, Frame, FrameRef,
+    ImageCopyCaptureHandler, ImageCopyCaptureState, Session, SessionRef,
 };
 use smithay::wayland::shm::{with_buffer_contents, with_buffer_contents_mut};
 
+use crate::app::Backend;
 use crate::feature::outputs::frame_size;
 use crate::feature::screenshot::{Captured, HdrCaptured};
 use crate::ipc::WindowId;
@@ -165,6 +175,8 @@ enum Last {
     Sdr(Vec<u8>),
     /// The half floats of the working space of an HDR picture.
     Hdr(Vec<u16>),
+    /// A picture drawn straight into a client's dmabuf: there are no pixels to compare with.
+    Dmabuf,
 }
 
 /// A picture on its way into a client's buffer.
@@ -213,6 +225,10 @@ pub struct ImageCopy {
     drawn: Vec<(String, u64)>,
     /// The `HDR_FORMATS` that `wl_shm` offers: a client can't make a buffer in any other.
     hdr_formats: Vec<wl_shm::Format>,
+    /// The render node of the GPU, and the formats (with their modifiers) a client can allocate
+    /// a capture buffer in. `None` and empty while dmabuf is not offered.
+    dma_node: Option<DrmNode>,
+    dma_formats: Vec<(Fourcc, Vec<Modifier>)>,
 }
 
 impl ImageCopy {
@@ -236,6 +252,8 @@ impl ImageCopy {
             sessions: Vec::new(),
             drawn: Vec::new(),
             hdr_formats: Vec::new(),
+            dma_node: None,
+            dma_formats: Vec::new(),
         }
     }
 
@@ -279,14 +297,18 @@ enum Target {
 struct ToplevelSourceId(u64);
 
 /// What a client has to allocate for pictures of this `size`: the two 8-bit formats, then
-/// `extra`. No dmabuf: the picture is read back to memory anyway.
-fn shm_constraints(size: (i32, i32), extra: &[wl_shm::Format]) -> BufferConstraints {
+/// `extra`, in `wl_shm`, and in a dmabuf when `dma` says so.
+fn buffer_constraints(
+    size: (i32, i32),
+    extra: &[wl_shm::Format],
+    dma: Option<DmabufConstraints>,
+) -> BufferConstraints {
     let mut shm = vec![wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888];
     shm.extend_from_slice(extra);
     BufferConstraints {
         size: size.into(),
         shm,
-        dma: None,
+        dma,
     }
 }
 
@@ -368,6 +390,93 @@ impl JffState {
             .map(|entry| Target::Window(entry.window.clone()))
     }
 
+    /// Find out which GPU a capture buffer can be allocated for and in which formats, so that
+    /// monitor captures can offer dmabuf. Only the TTY backend has a render node. The formats
+    /// are the 8-bit ones the renderer can draw into.
+    pub fn offer_capture_dmabuf(&mut self) {
+        let Backend::Tty(tty) = &self.backend else {
+            return;
+        };
+        let Some(node) = tty.render_node() else {
+            return;
+        };
+        let render_formats = tty.renderer.egl_context().dmabuf_render_formats();
+        let mut formats: Vec<(Fourcc, Vec<Modifier>)> = Vec::new();
+        for code in [Fourcc::Argb8888, Fourcc::Xrgb8888] {
+            let modifiers: Vec<Modifier> = render_formats
+                .iter()
+                .filter(|format| format.code == code)
+                .map(|format| format.modifier)
+                .collect();
+            if !modifiers.is_empty() {
+                formats.push((code, modifiers));
+            }
+        }
+        if formats.is_empty() {
+            tracing::info!("image-copy-capture: the renderer can draw into no dmabuf format, capture stays on wl_shm");
+            return;
+        }
+        tracing::info!(
+            "image-copy-capture: dmabuf offered for monitors, {} format(s)",
+            formats.len()
+        );
+        self.image_copy.dma_node = Some(node);
+        self.image_copy.dma_formats = formats;
+    }
+
+    /// The dmabuf part of the constraints of a monitor capture, `None` when it is not offered.
+    fn dmabuf_constraints(&self) -> Option<DmabufConstraints> {
+        let node = self.image_copy.dma_node?;
+        if self.image_copy.dma_formats.is_empty() {
+            return None;
+        }
+        Some(DmabufConstraints {
+            node,
+            formats: self.image_copy.dma_formats.clone(),
+        })
+    }
+
+    /// Answer `frame` with a picture of the monitor drawn into the client's `dmabuf`.
+    fn service_dmabuf_frame(
+        &mut self,
+        entry: &mut CaptureSession,
+        target: &Target,
+        frame: Frame,
+        mut dmabuf: Dmabuf,
+    ) -> bool {
+        let Target::Output(output) = target else {
+            frame.fail(CaptureFailureReason::BufferConstraints);
+            return true;
+        };
+        if !matches!(dmabuf.format().code, Fourcc::Argb8888 | Fourcc::Xrgb8888) {
+            frame.fail(CaptureFailureReason::BufferConstraints);
+            return true;
+        }
+        let seen = Seen::Output(self.image_copy.drawn_count(&output.name()));
+        // Nothing is drawn while the monitor can't have changed since the last picture.
+        if matches!(entry.last, Some(Last::Dmabuf)) && entry.seen.as_ref() == Some(&seen) {
+            entry.pending = Some(frame);
+            return true;
+        }
+        let cursor = entry.session.draw_cursor();
+        match self.capture_output_into(output, cursor, &mut dmabuf) {
+            Ok(size) => {
+                entry.seen = Some(seen);
+                entry.last = Some(Last::Dmabuf);
+                frame.success(
+                    Transform::Normal,
+                    vec![Rectangle::from_size(size)],
+                    monotonic_now(),
+                );
+            }
+            Err(why) => {
+                tracing::warn!("image-copy-capture: {why}");
+                frame.fail(CaptureFailureReason::Unknown);
+            }
+        }
+        true
+    }
+
     /// Buffer constraints for `target`, or `None` when there is nothing to show (a monitor
     /// that is off, a window with no size yet).
     fn target_constraints(&self, target: &Target) -> Option<BufferConstraints> {
@@ -383,11 +492,11 @@ impl JffState {
                 } else {
                     &[]
                 };
-                Some(shm_constraints(size, extra))
+                Some(buffer_constraints(size, extra, self.dmabuf_constraints()))
             }
             Target::Window(window) => {
                 let (_, size) = self.window_capture_size(window).ok()?;
-                Some(shm_constraints((size.w, size.h), &[]))
+                Some(buffer_constraints((size.w, size.h), &[], None))
             }
         }
     }
@@ -435,6 +544,9 @@ impl JffState {
             return true;
         };
         let buffer = frame.buffer();
+        if let Some(dmabuf) = get_dmabuf(&buffer).ok().cloned() {
+            return self.service_dmabuf_frame(entry, &target, frame, dmabuf);
+        }
         let format = buffer_format(&buffer);
         let ten_bit = format.and_then(hdr_layout);
         let cursor = entry.session.draw_cursor();
@@ -449,7 +561,8 @@ impl JffState {
             (_, None) => format
                 .is_some_and(|f| !matches!(f, wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888)),
         };
-        if !bad_format && entry.last.is_some() && entry.seen.as_ref() == Some(&seen) {
+        let shm_last = matches!(entry.last, Some(Last::Sdr(_) | Last::Hdr(_)));
+        if !bad_format && shm_last && entry.seen.as_ref() == Some(&seen) {
             entry.pending = Some(frame);
             return true;
         }

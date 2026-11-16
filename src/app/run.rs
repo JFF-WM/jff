@@ -137,6 +137,8 @@ pub fn run() -> anyhow::Result<()> {
     // A client can only make a buffer in a format wl_shm offers, so that is also what picture
     // formats a capture can ask for are picked from.
     state.image_copy.offer_hdr_formats(&shm_formats);
+    // Monitor captures can also go straight into a client's dmabuf, on the TTY backend.
+    state.offer_capture_dmabuf();
 
     // outputs are described by their ICC profile, if the config gives them one
     crate::protocol::color_management::sync_output_color(&mut state);
