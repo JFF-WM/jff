@@ -8,8 +8,6 @@
 //! and sends the difference. Nothing is computed while no client has bound the protocol.
 //!
 //! Not supported:
-//! - the `minimized` state: `set_minimized` and `unset_minimized` work (see `feature/stash.rs`),
-//!   but the state is never sent, so a taskbar does not show a window as minimized.
 //! - `set_rectangle` (where the taskbar button is, for a minimize animation): ignored.
 //! - the `parent` event: never sent.
 //! - urgency: the protocol has no state for "asks for attention" (only maximized, minimized,
@@ -39,6 +37,7 @@ const VERSION: u32 = 3;
 
 /// `zwlr_foreign_toplevel_handle_v1::state` values.
 const STATE_MAXIMIZED: u32 = 0;
+const STATE_MINIMIZED: u32 = 1;
 const STATE_ACTIVATED: u32 = 2;
 const STATE_FULLSCREEN: u32 = 3;
 
@@ -50,18 +49,21 @@ struct Info {
     /// Name of the monitor the window is on.
     output: Option<String>,
     maximized: bool,
+    /// The window is out of sight on purpose (minimized, or in the scratchpad).
+    minimized: bool,
     fullscreen: bool,
     /// The window has the keyboard.
     activated: bool,
 }
 
 impl Info {
-    fn from_window(window: &WindowInfo) -> Self {
+    fn from_window(window: &WindowInfo, minimized: bool) -> Self {
         Self {
             title: window.title.clone().unwrap_or_default(),
             app_id: window.app_id.clone().unwrap_or_default(),
             output: window.output.clone(),
             maximized: window.maximized,
+            minimized,
             fullscreen: window.fullscreen,
             activated: window.focused,
         }
@@ -72,6 +74,9 @@ impl Info {
         let mut states = Vec::new();
         if self.maximized {
             states.push(STATE_MAXIMIZED);
+        }
+        if self.minimized {
+            states.push(STATE_MINIMIZED);
         }
         if self.activated {
             states.push(STATE_ACTIVATED);
@@ -148,7 +153,11 @@ fn send_changes(
         }
     }
 
-    if changed(|i| i.maximized) || changed(|i| i.fullscreen) || changed(|i| i.activated) {
+    if changed(|i| i.maximized)
+        || changed(|i| i.minimized)
+        || changed(|i| i.fullscreen)
+        || changed(|i| i.activated)
+    {
         handle.state(new.state_bytes(handle.version()));
     }
     handle.done();
@@ -165,6 +174,12 @@ impl JffState {
         }
 
         let windows = self.window_list();
+        let minimized: Vec<u64> = self
+            .desk
+            .all_top_down()
+            .filter(|entry| entry.hidden.is_some())
+            .filter_map(|entry| entry.window.user_data().get::<WindowId>().map(|id| id.0))
+            .collect();
         let outputs = self.outputs.clone();
         let display = self.display_handle.clone();
         let ft = &mut self.foreign_toplevel;
@@ -181,7 +196,7 @@ impl JffState {
         });
 
         for window in &windows {
-            let info = Info::from_window(window);
+            let info = Info::from_window(window, minimized.contains(&window.id));
             match ft.toplevels.iter_mut().find(|t| t.id == window.id) {
                 // Not new: send what changed.
                 Some(toplevel) => {

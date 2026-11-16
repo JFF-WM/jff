@@ -413,11 +413,15 @@ impl JffState {
         config: Config,
     ) -> Self {
         let compositor_state = CompositorState::new_v6::<Self>(&display_handle);
-        // Only advertise what jff really does: maximize and fullscreen. No minimize, no window
-        // menu, so clients don't show buttons that would do nothing.
+        // Only advertise what jff really does: maximize, minimize and fullscreen. No window
+        // menu, so clients don't show a button that would do nothing.
         let xdg_shell_state = XdgShellState::new_with_capabilities::<Self>(
             &display_handle,
-            [WmCapabilities::Fullscreen, WmCapabilities::Maximize],
+            [
+                WmCapabilities::Fullscreen,
+                WmCapabilities::Maximize,
+                WmCapabilities::Minimize,
+            ],
         );
         let xdg_dialog_state = XdgDialogState::new::<Self>(&display_handle);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
@@ -1464,6 +1468,19 @@ impl XdgShellHandler for JffState {
     fn unmaximize_request(&mut self, surface: ToplevelSurface) {
         tracing::info!("client requested unmaximize");
         self.set_maximized(&surface, false);
+    }
+
+    // The minimize button of a window that draws its own title bar.
+    fn minimize_request(&mut self, surface: ToplevelSurface) {
+        tracing::info!("client requested minimize");
+        let wl_surface = surface.wl_surface();
+        let window = self
+            .desk
+            .find_by(|w| is_window_for(w, wl_surface))
+            .map(|entry| entry.window.clone());
+        if let Some(window) = window {
+            self.minimize_window(&window);
+        }
     }
 
     // Games and video players ask for fullscreen: fill the whole output, no frame.
