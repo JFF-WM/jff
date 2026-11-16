@@ -384,7 +384,12 @@ cursor {
 //   open-workspace N       1 to 64
 //   open-maximized #true   #false keeps the window floating
 //   open-size W H          pixels, 1 to 16384, kept inside the monitor
+//   open-position X Y      the window's top left, in pixels from the top left of its monitor
+//                          (0 to 16384), kept inside the monitor. The window floats
+//   open-centered          the middle of its monitor. The window floats. Not with `open-position`
 //   floating               keep the window floating (no auto-maximize)
+//   opacity N              0 to 1, how opaque the window is drawn. A rule with only an `opacity`
+//                          does not use up the one rule a window gets
 //   open-in-container "NAME"   join the container of that name on the window's workspace and
 //                          monitor, or start one that fills the usable area. Needs
 //                          `tiling-containers`. A dialog joins too: use `match dialog=#false` or
@@ -437,6 +442,25 @@ window-rule {
     open-maximized #false
     open-size 800 500
 }
+
+// A calculator: small, floating, in the middle of the monitor the pointer is on, a bit see-through.
+window-rule {
+    match app-id="org.gnome.Calculator"
+
+    open-on-output "pointer"
+    open-size 360 520
+    open-centered
+    opacity 0.95
+}
+
+// A floating notes window pinned near the top right of the first monitor.
+// window-rule {
+//     match app-id="scratch-notes"
+//
+//     open-on-output "DP-1"
+//     open-size 500 400
+//     open-position 1380 40
+// }
 
 // Match by title, and only for plain windows: workspace 3.
 window-rule {

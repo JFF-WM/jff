@@ -54,6 +54,7 @@ mod swipe;
 mod tile_tree;
 mod touch;
 mod window_anim;
+mod window_rules;
 mod xx_hotkey;
 mod yuv;
 mod zone;

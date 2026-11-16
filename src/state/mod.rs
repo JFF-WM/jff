@@ -2029,6 +2029,21 @@ impl JffState {
             sized = Some(fitted);
         }
 
+        // `open-position` and `open-centered`: where on its monitor the window starts, kept
+        // inside it. A dialog goes where the rule says too, not over its parent.
+        if rule.position.is_some() || rule.centered {
+            let pos = self.desk.pos_of(is_this).unwrap_or_default();
+            let area = monitor.unwrap_or_else(|| self.rect_for_window(pos, size));
+            let win = sized.unwrap_or(size);
+            let at = match rule.position {
+                Some((x, y)) => (area.0 + x, area.1 + y),
+                None => (area.0 + (area.2 - win.0) / 2, area.1 + (area.3 - win.1) / 2),
+            };
+            self.desk
+                .set_pos_where(is_this, layout::fit_into(at, win, area));
+            return RulePlacement::Done;
+        }
+
         // A dialog the rule gave a monitor or a size is centred there, over its parent when
         // that is on the same monitor.
         if dialog && (sized.is_some() || monitor.is_some()) {

@@ -7,7 +7,7 @@
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
 //! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
-//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), the first rule that fits a window applies), and
+//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `open-position X Y` (from the top left of the monitor, kept inside it, floating), `open-centered` (the middle of the monitor, floating, not together with `open-position`), `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -1176,6 +1176,11 @@ pub struct WindowRule {
     pub size: Option<(i32, i32)>,
     /// `floating #true`: the window stays floating, whatever `maximize-new-windows` says.
     pub floating: bool,
+    /// `open-position X Y`: where the window's top left starts, from the top left of its
+    /// monitor, kept inside the monitor.
+    pub position: Option<(i32, i32)>,
+    /// `open-centered`: the window starts in the middle of its monitor.
+    pub centered: bool,
     /// `open-in-container "name"`: the window joins the container with this name on its
     /// workspace and monitor, or starts it when there is none. Needs `tiling-containers`.
     pub container: Option<String>,
@@ -1202,7 +1207,11 @@ impl WindowRule {
     /// Whether the rule says how the window's mode or size starts: then the window is not
     /// maximized like a new window is by default.
     pub fn places_window(&self) -> bool {
-        self.floating || self.maximized.is_some() || self.size.is_some()
+        self.floating
+            || self.maximized.is_some()
+            || self.size.is_some()
+            || self.position.is_some()
+            || self.centered
     }
 
     /// Whether the rule has any action at all.
@@ -2804,6 +2813,24 @@ fn parse_window_rule(node: &KdlNode) -> anyhow::Result<WindowRule> {
                 }
             }
             "floating" => rule.floating = flag_value(child)?,
+            "open-position" => {
+                let sides = positional(child)
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_integer()
+                            .and_then(|n| i32::try_from(n).ok())
+                            .filter(|n| (0..=MAX_RULE_SIZE).contains(n))
+                    })
+                    .collect::<Option<Vec<i32>>>();
+                match sides.as_deref() {
+                    Some(&[x, y]) => rule.position = Some((x, y)),
+                    _ => bail!(
+                        "open-position takes x and y from the top left of the monitor, each from 0 to {MAX_RULE_SIZE}"
+                    ),
+                }
+            }
+            "open-centered" => rule.centered = flag_value(child)?,
             "open-in-container" => {
                 let name = string_arg(child)?;
                 if name.trim().is_empty() {
@@ -2835,6 +2862,15 @@ fn parse_window_rule(node: &KdlNode) -> anyhow::Result<WindowRule> {
     }
     if rule.floating && rule.container.is_some() {
         bail!("floating and open-in-container ask for opposite things");
+    }
+    if rule.position.is_some() && rule.centered {
+        bail!("open-position and open-centered both say where the window goes");
+    }
+    if (rule.position.is_some() || rule.centered) && rule.maximized == Some(true) {
+        bail!("open-position and open-centered ask for a floating window, open-maximized #true for the opposite");
+    }
+    if (rule.position.is_some() || rule.centered) && rule.container.is_some() {
+        bail!("open-position and open-centered cannot be combined with open-in-container, the container places the window");
     }
     Ok(rule)
 }
