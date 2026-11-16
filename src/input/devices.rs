@@ -12,6 +12,10 @@ use crate::state::JffState;
 impl JffState {
     /// A device appeared: remember it for reloads and set it up from the config.
     pub fn input_device_added(&mut self, mut device: li::Device) {
+        // Not set up here, but its name is what `touchscreen \"NAME\"` in the config matches.
+        if device.has_capability(li::DeviceCapability::Touch) {
+            tracing::info!("input device {:?} is a touchscreen", device.name());
+        }
         let Some(kind) = device_kind(&device) else {
             return;
         };

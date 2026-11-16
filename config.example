@@ -272,6 +272,19 @@ input {
     // device "Logitech G502" {
     //     accel-speed -0.3
     // }
+
+    // Touchscreens. Without a mapping a touchscreen covers the built-in panel (eDP, LVDS, DSI), else
+    // the first monitor. `map-to-output` takes a monitor name (`jff msg outputs`); `touchscreen { }`
+    // is for every touchscreen, `touchscreen "NAME" { }` for the one with that libinput name (jff
+    // logs touchscreen names at info level) and wins. A monitor that is not connected is ignored.
+    // A turned or scaled monitor needs nothing more. Three fingers on a touchscreen are jff's own:
+    // sideways switches workspace, up opens the overview, down closes it.
+    // touchscreen {
+    //     map-to-output "eDP-1"
+    // }
+    // touchscreen "ELAN Touchscreen" {
+    //     map-to-output "DP-2"
+    // }
 }
 
 // The pointer image. `theme` and `size` fall back to $XCURSOR_THEME and $XCURSOR_SIZE, then to

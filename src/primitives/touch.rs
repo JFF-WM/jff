@@ -1,5 +1,5 @@
-//! Fingers on a touchscreen: which ones are down, which one stands in for the mouse, and which
-//! monitor a touchscreen covers.
+//! Fingers on a touchscreen: which ones are down, which one stands in for the mouse, which
+//! monitor a touchscreen covers, and the three-finger swipe jff keeps for itself.
 //!
 //! No Wayland in here (`S` is the device's slot id, `T` whatever a finger's events go to), so
 //! the rules can be tested on their own. `input/touch.rs` is the user.
@@ -15,6 +15,11 @@ pub struct Finger<S, T> {
     /// The press went to the pointer side (click-to-focus, window grabs, the overview), so the
     /// release is owed there.
     pub pressed: bool,
+    /// The client under the finger never bound `wl_touch`, so the finger is passed on as
+    /// `wl_pointer` events instead (pointer emulation). Never set together with `forwarded`.
+    pub emulated: bool,
+    /// Where the finger last was, in shared space.
+    pub at: (f64, f64),
 }
 
 /// The fingers down right now.
@@ -51,6 +56,8 @@ impl<S: Copy + PartialEq, T> Fingers<S, T> {
             target: None,
             forwarded: false,
             pressed: false,
+            emulated: false,
+            at: (0.0, 0.0),
         });
         primary
     }
@@ -92,12 +99,33 @@ impl<S: Copy + PartialEq, T> Fingers<S, T> {
         }
     }
 
+    /// Every finger down, with where it last was.
+    pub fn positions(&self) -> Vec<(S, (f64, f64))> {
+        self.list.iter().map(|f| (f.slot, f.at)).collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.list.is_empty()
     }
 
     pub fn len(&self) -> usize {
         self.list.len()
+    }
+}
+
+impl<S: Copy + PartialEq, T: Clone> Fingers<S, T> {
+    /// The compositor takes every finger for itself (a gesture): what each one was owed is
+    /// handed back to be settled, and no finger owes anything afterwards. The fingers
+    /// themselves are still down.
+    pub fn settle_all(&mut self) -> Vec<Finger<S, T>> {
+        let owed = self.list.clone();
+        for finger in &mut self.list {
+            finger.forwarded = false;
+            finger.pressed = false;
+            finger.emulated = false;
+            finger.target = None;
+        }
+        owed
     }
 }
 
@@ -119,4 +147,103 @@ pub fn touch_output<N: AsRef<str>>(names: &[N]) -> Option<usize> {
         .iter()
         .position(|name| is_internal_panel(name.as_ref()))
         .or(Some(0))
+}
+
+/// The monitor a touchscreen covers, as an index into `names`: the one called `wanted` (the
+/// config's `map-to-output`) if it is connected, else what [`touch_output`] picks. A mapping
+/// to a monitor that is unplugged does not leave the touchscreen dead.
+pub fn touch_output_mapped<N: AsRef<str>>(names: &[N], wanted: Option<&str>) -> Option<usize> {
+    wanted
+        .and_then(|wanted| names.iter().position(|name| name.as_ref() == wanted))
+        .or_else(|| touch_output(names))
+}
+
+/// Fingers of the compositor's own touchscreen swipe.
+pub const GESTURE_FINGERS: usize = super::swipe::FINGERS as usize;
+
+/// A multi-finger swipe on a touchscreen. It starts when exactly [`GESTURE_FINGERS`] fingers
+/// are down, follows the middle of the fingers, and owns every finger until all have lifted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TouchGesture<S> {
+    active: bool,
+    swipe: super::swipe::SwipeTracker,
+    points: Vec<(S, (f64, f64))>,
+    centroid: (f64, f64),
+}
+
+impl<S> Default for TouchGesture<S> {
+    fn default() -> Self {
+        Self {
+            active: false,
+            swipe: Default::default(),
+            points: Vec::new(),
+            centroid: (0.0, 0.0),
+        }
+    }
+}
+
+fn centroid_of<S>(points: &[(S, (f64, f64))]) -> (f64, f64) {
+    if points.is_empty() {
+        return (0.0, 0.0);
+    }
+    let n = points.len() as f64;
+    let (x, y) = points
+        .iter()
+        .fold((0.0, 0.0), |(x, y), (_, p)| (x + p.0, y + p.1));
+    (x / n, y / n)
+}
+
+impl<S: Copy + PartialEq> TouchGesture<S> {
+    /// The gesture is going on: no finger belongs to a client or the pointer.
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// `points` are all the fingers down now. Starts the gesture when there are exactly
+    /// [`GESTURE_FINGERS`] of them and `allowed` (false while something else owns the input:
+    /// the lock screen, a screenshot selection). Returns whether it started.
+    pub fn begin(&mut self, points: Vec<(S, (f64, f64))>, allowed: bool) -> bool {
+        if self.active || !allowed || points.len() != GESTURE_FINGERS {
+            return false;
+        }
+        self.swipe.begin(super::swipe::FINGERS, true);
+        self.centroid = centroid_of(&points);
+        self.points = points;
+        self.active = true;
+        true
+    }
+
+    /// Another finger touched down during the gesture: it counts, and nothing jumps.
+    pub fn add(&mut self, slot: S, at: (f64, f64)) {
+        if !self.active {
+            return;
+        }
+        self.points.retain(|(s, _)| *s != slot);
+        self.points.push((slot, at));
+        self.centroid = centroid_of(&self.points);
+    }
+
+    /// A finger moved. Gives the direction once the middle of the fingers went far enough
+    /// (once per gesture).
+    pub fn moved(&mut self, slot: S, at: (f64, f64)) -> Option<super::swipe::Swipe> {
+        if !self.active {
+            return None;
+        }
+        self.points.iter_mut().find(|(s, _)| *s == slot)?.1 = at;
+        let now = centroid_of(&self.points);
+        let (dx, dy) = (now.0 - self.centroid.0, now.1 - self.centroid.1);
+        self.centroid = now;
+        self.swipe.update(dx, dy)
+    }
+
+    /// A finger lifted: the middle moves to the fingers left, which is not a swipe.
+    pub fn lift(&mut self, slot: S) {
+        self.points.retain(|(s, _)| *s != slot);
+        self.centroid = centroid_of(&self.points);
+    }
+
+    /// Every finger is up, or the touch was cancelled.
+    pub fn end(&mut self) {
+        *self = Self::default();
+    }
 }

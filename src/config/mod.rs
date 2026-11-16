@@ -19,7 +19,7 @@
 //!
 //! `warp-mouse-to-focus` moves the pointer to the center of a window when it gets the keyboard by something other than the pointer (a binding, the switcher, a new window, a closed one, a taskbar, a workspace switch), also when the pointer is over it already, unless the focus came from a click, a game has locked the pointer, or a window is being dragged. Off by default.
 //!
-//! `input { … }` sets up pointer devices: `touchpad { … }` and `mouse { … }` for every device of that kind, and `device "NAME" { … }` for the one with that libinput name (jff logs the name of every device it sees, at info level), which wins over the two. Inside: `tap`, `tap-button-map "left-right-middle"|"left-middle-right"`, `drag`, `natural-scroll`, `accel-speed N` (-1 to 1), `accel-profile "flat"|"adaptive"`, `scroll-method "none"|"two-finger"|"edge"|"on-button-down"`, `scroll-button "middle"|CODE`, `disable-while-typing`, `click-method "button-areas"|"clickfinger"`, `middle-emulation`, `left-handed`, `off` and `disable-on-external-mouse`. A setting that is not there stays at the device's own default, except `tap` on a touchpad, which is on. Applied when a device is plugged in and on reload, only on the TTY backend. A setting a device doesn't support is skipped.
+//! `input { … }` sets up pointer devices: `touchpad { … }` and `mouse { … }` for every device of that kind, and `device "NAME" { … }` for the one with that libinput name (jff logs the name of every device it sees, at info level), which wins over the two. Inside: `tap`, `tap-button-map "left-right-middle"|"left-middle-right"`, `drag`, `natural-scroll`, `accel-speed N` (-1 to 1), `accel-profile "flat"|"adaptive"`, `scroll-method "none"|"two-finger"|"edge"|"on-button-down"`, `scroll-button "middle"|CODE`, `disable-while-typing`, `click-method "button-areas"|"clickfinger"`, `middle-emulation`, `left-handed`, `off` and `disable-on-external-mouse`. A setting that is not there stays at the device's own default, except `tap` on a touchpad, which is on. Applied when a device is plugged in and on reload, only on the TTY backend. A setting a device doesn't support is skipped. `touchscreen { map-to-output "DP-1" }` makes every touchscreen cover that monitor (`jff msg outputs` lists the names), `touchscreen "NAME" { map-to-output "DP-1" }` only the touchscreen with that libinput name (jff logs touchscreens at info level too), which wins. Without a mapping, or when the monitor is not connected, a touchscreen covers the built-in panel, else the first monitor. Three fingers on a touchscreen are jff's own, like on a touchpad: sideways switches workspace, up opens the overview and down closes it, and the client under the fingers gets a `wl_touch` cancel. A client that never bound `wl_touch` gets a touch with one finger as pointer events (move, left button).
 //!
 //! `cursor { … }` sets the pointer image: `theme "NAME"` (an XCursor theme, else `$XCURSOR_THEME`, else `default`), `size N` (1 to 512, else `$XCURSOR_SIZE`, else 24), `hide-when-typing` (the cursor hides on a key press and comes back when the pointer moves, off by default) and `hide-after-ms N` (it hides after the pointer rests that long, 0 is off, off by default). The theme and size are exported to the apps jff starts, and apply to a running session on reload.
 //!
@@ -1322,6 +1322,17 @@ pub struct InputConfig {
     pub mouse: DeviceSettings,
     /// For the devices with this libinput name, in file order.
     pub devices: Vec<(String, DeviceSettings)>,
+    /// `touchscreen { map-to-output … }` blocks, in file order.
+    pub touchscreens: Vec<TouchscreenMap>,
+}
+
+/// A `touchscreen` block: which monitor a touchscreen covers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TouchscreenMap {
+    /// The libinput name of the touchscreen, or `None` for every touchscreen.
+    pub device: Option<String>,
+    /// The monitor's name (`jff msg outputs`).
+    pub output: String,
 }
 
 impl InputConfig {
@@ -1337,6 +1348,18 @@ impl InputConfig {
             settings = settings.overridden_by(device);
         }
         settings
+    }
+
+    /// The monitor the touchscreen called `device` is mapped to: a block naming the device
+    /// wins over one for every touchscreen, and the later block of two wins.
+    pub fn touch_output_for(&self, device: &str) -> Option<&str> {
+        let named = self
+            .touchscreens
+            .iter()
+            .rev()
+            .find(|t| t.device.as_deref() == Some(device));
+        let any = self.touchscreens.iter().rev().find(|t| t.device.is_none());
+        named.or(any).map(|t| t.output.as_str())
     }
 }
 
@@ -2500,6 +2523,24 @@ fn parse_input(node: &KdlNode) -> anyhow::Result<InputConfig> {
                 let settings =
                     parse_device_settings(child).with_context(|| format!("in device {name:?}"))?;
                 config.devices.push((name, settings));
+            }
+            "touchscreen" => {
+                // `touchscreen { … }` for every touchscreen, `touchscreen "NAME" { … }` for one.
+                let device = match positional(child).as_slice() {
+                    [] => None,
+                    [_] => Some(string_arg(child)?),
+                    _ => bail!("touchscreen takes at most one device name"),
+                };
+                let mut output = None;
+                for setting in child.children().map(KdlDocument::nodes).unwrap_or_default() {
+                    match setting.name().value() {
+                        "map-to-output" => output = Some(string_arg(setting)?),
+                        other => bail!("unknown touchscreen setting {other:?}"),
+                    }
+                }
+                if let Some(output) = output {
+                    config.touchscreens.push(TouchscreenMap { device, output });
+                }
             }
             other => bail!("unknown input setting {other:?}"),
         }

@@ -403,6 +403,8 @@ pub struct JffState {
     pub popup_grab: Option<PopupGrabState>,
     /// The fingers on a touchscreen (see `input/touch.rs`).
     pub fingers: crate::primitives::touch::Fingers<smithay::backend::input::TouchSlot, WlSurface>,
+    /// The three-finger swipe on a touchscreen, when one is going on.
+    pub touch_gesture: crate::primitives::touch::TouchGesture<smithay::backend::input::TouchSlot>,
 }
 
 impl JffState {
@@ -727,6 +729,7 @@ impl JffState {
             input_serials: Default::default(),
             popup_grab: None,
             fingers: Default::default(),
+            touch_gesture: Default::default(),
         };
         state
             .desk

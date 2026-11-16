@@ -12,13 +12,26 @@
 //! of the `wl_touch.down`, which is how the request is recognised. The client's touch
 //! sequence is then cancelled, as the protocol describes, and the finger belongs to the grab.
 //!
-//! Not done yet: mapping a touchscreen to a chosen monitor (it covers the built-in panel, or
-//! the first monitor), output rotation, compositor gestures (multi-finger swipes), pointer
-//! emulation for clients that never bind `wl_touch`, and Alt+drag keeping its first press
-//! from the client.
+//! A touchscreen covers the monitor `input { touchscreen { map-to-output … } }` names for it,
+//! else the built-in panel, else the first monitor. A turned or scaled monitor is handled by
+//! `absolute_on_output`, which undoes the turn on the position the panel reports.
+//!
+//! Three fingers down are the compositor's own gesture (`primitives::touch::TouchGesture`),
+//! like the three-finger touchpad swipe: sideways switches workspace, up opens the overview,
+//! down closes it. When the third finger lands, the client gets `wl_touch.cancel`, a press
+//! the first finger made on the pointer side is let go, and every finger belongs to the
+//! gesture until all are up. That also means a client never sees a three-finger pinch.
+//!
+//! A client that never bound `wl_touch` would be deaf to all of this, so the primary finger
+//! over such a client is passed on as `wl_pointer` events: the pointer gets focus on the
+//! client's surface, follows the finger and presses the left button. Other fingers are not
+//! emulated, and the pointer leaves the client when the finger lifts.
+//!
+//! Not done yet: Alt+drag keeping its first press from the client.
 
 use smithay::backend::input::{
-    AbsolutePositionEvent, ButtonState, Event, InputBackend, InputTime, TouchEvent, TouchSlot,
+    AbsolutePositionEvent, ButtonState, Device, Event, InputBackend, InputTime, TouchEvent,
+    TouchSlot,
 };
 use smithay::input::pointer::{GrabStartData, MotionEvent as PointerMotionEvent};
 use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
@@ -28,7 +41,7 @@ use smithay::utils::{Logical, Point, Serial, SERIAL_COUNTER};
 
 use super::BTN_LEFT;
 use crate::primitives::layout;
-use crate::primitives::touch::{touch_output, Finger};
+use crate::primitives::touch::{touch_output_mapped, Finger};
 use crate::state::JffState;
 
 impl JffState {
@@ -39,7 +52,8 @@ impl JffState {
     ) -> Option<Point<f64, Logical>> {
         let names: Vec<String> = self.outputs.iter().map(|output| output.name()).collect();
         let rects = self.output_rects();
-        let index = touch_output(&names)?;
+        let wanted = self.config.input().touch_output_for(&event.device().name());
+        let index = touch_output_mapped(&names, wanted)?;
         let rect = rects.get(index)?;
         let pos = self.absolute_on_output::<B, _>(self.outputs.get(index)?, event)
             + Point::from((rect.0 as f64, rect.1 as f64));
@@ -49,13 +63,21 @@ impl JffState {
     /// Move the seat pointer to the primary finger, without giving any client pointer focus.
     /// No hot corners: the corner of a touchscreen is where the close button of a maximized
     /// window is.
-    fn touch_move_pointer(&mut self, pos: Point<f64, Logical>, time: InputTime) {
+    ///
+    /// `focus` is `None` except for pointer emulation, where the client under the finger is
+    /// the pointer's focus.
+    fn touch_move_pointer(
+        &mut self,
+        pos: Point<f64, Logical>,
+        time: InputTime,
+        focus: Option<(WlSurface, Point<f64, Logical>)>,
+    ) {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
         pointer.motion(
             self,
-            None,
+            focus,
             &PointerMotionEvent {
                 location: pos,
                 serial: SERIAL_COUNTER.next_serial(),
@@ -82,6 +104,55 @@ impl JffState {
             .is_some_and(|(surface, _)| surface.id().same_client_as(&grab.root.id()))
     }
 
+    /// Whether the client that owns `surface` has a `wl_touch` object. Asked of the protocol
+    /// objects themselves, as nothing else says whether a client bound one. A client that
+    /// can't be looked at counts as having one: it gets touches as before.
+    fn client_has_touch(&self, surface: &WlSurface) -> bool {
+        let Some(client) = surface.client() else {
+            return true;
+        };
+        let mut found = false;
+        let walked =
+            self.display_handle
+                .backend_handle()
+                .with_all_objects_for(client.id(), |object| {
+                    if object.interface().name == "wl_touch" {
+                        found = true;
+                    }
+                });
+        walked.is_err() || found
+    }
+
+    /// The compositor takes every finger down for its own gesture: the client's touch is
+    /// cancelled, and presses held on the pointer side are let go.
+    fn touch_begin_gesture(&mut self, time: InputTime) {
+        let owed = self.fingers.settle_all();
+        if owed.iter().any(|finger| finger.forwarded) {
+            if let Some(touch) = self.seat.get_touch() {
+                touch.cancel(self);
+            }
+        }
+        for finger in owed {
+            self.touch_release_pointer(&finger, time);
+        }
+    }
+
+    /// Let go of what the pointer side of `finger` holds: its press, and the focus a pointer
+    /// emulation gave a client.
+    fn touch_release_pointer(&mut self, finger: &Finger<TouchSlot, WlSurface>, time: InputTime) {
+        if finger.pressed {
+            self.pointer_button_with(
+                BTN_LEFT,
+                ButtonState::Released,
+                time,
+                SERIAL_COUNTER.next_serial(),
+            );
+        }
+        if finger.emulated {
+            self.touch_move_pointer(Point::from(finger.at), time, None);
+        }
+    }
+
     pub(crate) fn touch_down<B: InputBackend>(&mut self, event: &B::TouchDownEvent) {
         let Some(pos) = self.touch_position::<B, _>(event) else {
             return;
@@ -97,16 +168,46 @@ impl JffState {
             self.touch_settle(slot, stale, time);
         }
         let primary = self.fingers.down(slot);
+        if let Some(finger) = self.fingers.get_mut(slot) {
+            finger.at = (pos.x, pos.y);
+        }
+
+        // Three fingers are the compositor's gesture. Once it is going, fingers that join
+        // it belong to it too.
+        if self.touch_gesture.is_active() {
+            self.touch_gesture.add(slot, (pos.x, pos.y));
+            return;
+        }
+        let allowed = !self.session_locked() && self.screenshot.is_none();
+        if self.touch_gesture.begin(self.fingers.positions(), allowed) {
+            self.touch_begin_gesture(time);
+            return;
+        }
+
+        // A client with no `wl_touch` gets the primary finger as a pointer.
+        let emulated = if primary && !modal {
+            self.pointer_focus_under(pos)
+                .filter(|(surface, _)| !self.client_has_touch(surface))
+        } else {
+            None
+        };
         if primary {
-            self.touch_move_pointer(pos, time);
+            self.touch_move_pointer(pos, time, emulated.clone());
             // The overview and the screenshot selection act on the press themselves. An open
-            // menu keeps a tap on itself to the menu alone (see `touch_in_popup_grab`).
-            if modal || !self.touch_in_popup_grab(pos) {
+            // menu keeps a tap on itself to the menu alone (see `touch_in_popup_grab`),
+            // unless the client is getting a pointer, which sees the tap as it is.
+            if modal || emulated.is_some() || !self.touch_in_popup_grab(pos) {
                 self.pointer_button_with(BTN_LEFT, ButtonState::Pressed, time, serial);
                 if let Some(finger) = self.fingers.get_mut(slot) {
                     finger.pressed = true;
                 }
             }
+        }
+        if emulated.is_some() {
+            if let Some(finger) = self.fingers.get_mut(slot) {
+                finger.emulated = true;
+            }
+            return;
         }
         if modal {
             return;
@@ -143,12 +244,27 @@ impl JffState {
         let Some(finger) = self.fingers.get(slot) else {
             return;
         };
-        let (forwarded, target) = (finger.forwarded, finger.target.clone());
+        let (forwarded, target, emulated) =
+            (finger.forwarded, finger.target.clone(), finger.emulated);
         let Some(pos) = self.touch_position::<B, _>(event) else {
             return;
         };
+        if let Some(finger) = self.fingers.get_mut(slot) {
+            finger.at = (pos.x, pos.y);
+        }
+        if self.touch_gesture.is_active() {
+            if let Some(swipe) = self.touch_gesture.moved(slot, (pos.x, pos.y)) {
+                self.run_swipe(swipe);
+            }
+            return;
+        }
         if self.fingers.is_primary(slot) {
-            self.touch_move_pointer(pos, time);
+            let focus = if emulated {
+                self.pointer_focus_under(pos)
+            } else {
+                None
+            };
+            self.touch_move_pointer(pos, time, focus);
         }
         if !forwarded {
             return;
@@ -177,6 +293,12 @@ impl JffState {
             return;
         };
         self.touch_settle(slot, finger, time);
+        if self.touch_gesture.is_active() {
+            self.touch_gesture.lift(slot);
+            if self.fingers.is_empty() {
+                self.touch_gesture.end();
+            }
+        }
     }
 
     /// Give back what a finger that is gone was owed: the client its `touch.up`, the pointer
@@ -197,14 +319,7 @@ impl JffState {
                 touch.up(self, &UpEvent { slot, serial, time });
             }
         }
-        if finger.pressed {
-            self.pointer_button_with(
-                BTN_LEFT,
-                ButtonState::Released,
-                time,
-                SERIAL_COUNTER.next_serial(),
-            );
-        }
+        self.touch_release_pointer(&finger, time);
     }
 
     /// The end of a batch of finger events that belong together.
@@ -217,19 +332,13 @@ impl JffState {
     /// The device dropped every touch (a palm, a suspend): clients get a cancel, and a press
     /// the compositor still holds for the primary finger is let go.
     pub(crate) fn touch_cancel(&mut self, time: InputTime) {
+        self.touch_gesture.end();
         let fingers = self.fingers.clear();
         if let Some(touch) = self.seat.get_touch() {
             touch.cancel(self);
         }
         for finger in fingers {
-            if finger.pressed {
-                self.pointer_button_with(
-                    BTN_LEFT,
-                    ButtonState::Released,
-                    time,
-                    SERIAL_COUNTER.next_serial(),
-                );
-            }
+            self.touch_release_pointer(&finger, time);
         }
     }
 
