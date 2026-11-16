@@ -6,6 +6,7 @@ use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 use smithay::backend::input::{AbsolutePositionEvent, InputBackend, InputTime};
+use smithay::desktop::layer_map_for_output;
 use smithay::desktop::space::SpaceElement;
 use smithay::input::pointer::MotionEvent;
 use smithay::output::Output;
@@ -14,7 +15,7 @@ use smithay::reexports::wayland_server::Client;
 use smithay::utils::{Logical, Point, Rectangle, Size, Transform, SERIAL_COUNTER};
 use smithay::wayland::fractional_scale::with_fractional_scale;
 
-use crate::config::{ModeRequest, RuleOutput, WindowRule};
+use crate::config::{Config, ModeRequest, OutputConfig, RuleOutput, WindowRule};
 use crate::desk::{Side, WindowMode};
 use crate::primitives::edid::Identity;
 use crate::primitives::geom;
@@ -135,11 +136,19 @@ pub fn frame_size(output: &Output) -> Option<(i32, i32)> {
     Some((size.w, size.h))
 }
 
-/// The area `output` covers in the shared space.
+/// The scale `name` is asked to be drawn at, 1 when the config says nothing.
+pub fn wanted_scale(config: &Config, name: &str) -> f64 {
+    config.output(name).map_or(1.0, OutputConfig::scale)
+}
+
+/// The area `output` covers in the shared space, in logical pixels: the size of its picture
+/// divided by its scale.
 pub fn output_rect(output: &Output) -> Rect {
     let loc = output.current_location();
     let size = frame_size(output).unwrap_or((0, 0));
-    (loc.x, loc.y, size.0, size.1)
+    let scale = output.current_scale().fractional_scale();
+    let logical = |pixels: i32| (f64::from(pixels) / scale).round() as i32;
+    (loc.x, loc.y, logical(size.0), logical(size.1))
 }
 
 /// Where a point of a panel's own picture (`native` pixels, `point` in them) is in the upright
@@ -154,9 +163,10 @@ pub fn upright_point(transform: Transform, native: (i32, i32), point: (f64, f64)
 
 impl JffState {
     /// Where an absolute device (touchscreen, pen) event is on `output`, from the monitor's own
-    /// top left. The device reports where it was touched on the panel as built, so on a turned
-    /// monitor that is turned back to the upright frame the windows are in. (Winit has no turned
-    /// panel: its output only mirrors the picture on its way into the host's window.)
+    /// top left, in logical pixels. The device reports where it was touched on the panel as
+    /// built, so on a turned monitor that is turned back to the upright frame the windows are in,
+    /// and a scaled one is divided by its scale. (Winit has no turned panel: its output only
+    /// mirrors the picture on its way into the host's window.)
     pub fn absolute_on_output<B: InputBackend, E: AbsolutePositionEvent<B>>(
         &self,
         output: &Output,
@@ -172,7 +182,9 @@ impl JffState {
             }
         };
         let at = event.position_transformed(Size::<i32, Logical>::from(native));
-        upright_point(transform, native, (at.x, at.y)).into()
+        let scale = output.current_scale().fractional_scale();
+        let (x, y) = upright_point(transform, native, (at.x, at.y));
+        (x / scale, y / scale).into()
     }
 
     /// Area of every monitor, in the order they were added.
@@ -504,6 +516,17 @@ impl JffState {
                 } else {
                     entry.window.output_leave(output);
                 }
+            }
+        }
+        // Panels and wallpapers learn the scale of their monitor as well.
+        for output in &self.outputs {
+            let scale = output.current_scale().fractional_scale();
+            for layer in layer_map_for_output(output).layers() {
+                layer.with_surfaces(|_, states| {
+                    with_fractional_scale(states, |fractional| {
+                        fractional.set_preferred_scale(scale)
+                    });
+                });
             }
         }
     }

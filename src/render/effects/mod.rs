@@ -7,6 +7,8 @@
 //! * `background_effect`: per-surface state that decides where the element goes.
 //! * `border`: a rounded outline around windows (the `border` block), with a colour fade when
 //!   focus moves. Also opt-in.
+//! * `frame_scale`: the scale of the output a frame is built for, read by what is sized in frame
+//!   pixels (corner radius, border width).
 //! * `rounded`: rounded window corners (`radius` setting) - a texture shader masking the
 //!   window's surface. Also opt-in: nothing runs with `radius 0`.
 //!
@@ -40,6 +42,7 @@
 pub mod background_effect;
 pub mod blur;
 pub mod border;
+pub mod frame_scale;
 pub mod framebuffer_effect;
 pub mod gamut;
 pub mod hdr;

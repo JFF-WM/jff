@@ -175,7 +175,7 @@ impl Rounding {
         self
     }
 
-    /// `geo` is the window geometry in frame coordinates, `radius` in pixels. `None` when
+    /// `geo` is the window geometry in frame coordinates, `radius` in logical pixels. `None` when
     /// there's nothing to round (no radius, empty window) or the shader is unavailable.
     pub fn new(
         renderer: &mut GlesRenderer,
@@ -186,15 +186,13 @@ impl Rounding {
             return None;
         }
         let program = program(renderer)?;
-        // jff draws at scale 1: logical and physical pixels coincide.
-        let geo = Rectangle::new(
-            (geo.loc.x, geo.loc.y).into(),
-            (geo.size.w, geo.size.h).into(),
-        );
+        // The mask is in frame pixels, the window in logical ones.
+        let geo: Rectangle<i32, Physical> =
+            geo.to_physical_precise_round(Scale::from(super::frame_scale::get()));
         Some(Self {
             program,
             geo,
-            radius,
+            radius: super::frame_scale::px(radius),
             correction: None,
             alpha_mode: AlphaMode::default(),
             conversion: None,
@@ -584,6 +582,8 @@ pub fn make_ring(
     motion: RingMotion,
 ) -> Option<PixelShaderElement> {
     let program = ring_program(renderer)?;
+    // the uniforms are in frame pixels, the area in logical ones
+    let scale = super::frame_scale::get() as f32;
     // colors are sRGB in the config, an HDR output wants them in its working space
     let color = super::gamut::tint(color);
     let motion = RingMotion {
@@ -596,14 +596,14 @@ pub fn make_ring(
         None,
         1.0,
         vec![
-            Uniform::new("border", border as f32),
-            Uniform::new("radius", radius as f32),
+            Uniform::new("border", border as f32 * scale),
+            Uniform::new("radius", radius as f32 * scale),
             Uniform::new("color", color),
             Uniform::new("color2", motion.color2),
             Uniform::new("phase", motion.phase),
             Uniform::new("animated", motion.amount),
             Uniform::new("style", motion.style.uniform()),
-            Uniform::new("margin", motion.margin as f32),
+            Uniform::new("margin", motion.margin as f32 * scale),
             Uniform::new("paper", if motion.paper { 1.0f32 } else { 0.0 }),
         ],
         Kind::Unspecified,

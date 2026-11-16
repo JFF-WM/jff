@@ -149,6 +149,18 @@ struct RingKey {
     motion: RingMotion,
     /// Drawn for an HDR output, whose working space needs the colors converted.
     working: bool,
+    /// The scale of the output it was made for, in 1/120.
+    scale: u32,
+}
+
+/// The scale ring uniforms were made for, in 1/120, for [`RingKey`].
+fn scale_120() -> u32 {
+    (super::frame_scale::get() * 120.0).round() as u32
+}
+
+/// Logical pixels as the frame pixels a damage band has to cover.
+fn band_px(value: i32) -> i32 {
+    (f64::from(value) * super::frame_scale::get()).ceil() as i32
 }
 
 struct State {
@@ -312,6 +324,7 @@ pub fn border_element(
             color: alpha::faded(color, visible),
             motion,
             working: super::gamut::working().is_some(),
+            scale: scale_120(),
         };
         let cached = state
             .ring
@@ -338,8 +351,8 @@ pub fn border_element(
         id: element_id,
         commit,
         inner,
-        edge: width + 1 + key.motion.margin,
-        reach: radius + width + 1 + key.motion.margin,
+        edge: band_px(width + 1 + key.motion.margin),
+        reach: band_px(radius + width + 1 + key.motion.margin),
     };
     STATES.with(|states| {
         if let Some(state) = states.borrow_mut().get_mut(&id) {
@@ -384,6 +397,7 @@ pub fn container_border_element(
         color: target(&paint),
         motion: RingMotion::default(),
         working: super::gamut::working().is_some(),
+        scale: scale_120(),
     };
     let (cached, previous) = CONTAINER_RINGS.with(|rings| {
         let mut rings = rings.borrow_mut();
@@ -410,8 +424,8 @@ pub fn container_border_element(
         id: element_id,
         commit,
         inner,
-        edge: style.width + 1,
-        reach: radius + style.width + 1,
+        edge: band_px(style.width + 1),
+        reach: band_px(radius + style.width + 1),
     };
     CONTAINER_RINGS.with(|rings| {
         rings.borrow_mut().insert(id, (key, element.clone()));

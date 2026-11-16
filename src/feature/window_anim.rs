@@ -19,7 +19,7 @@ use smithay::backend::renderer::element::memory::{
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::desktop::Window;
-use smithay::utils::{Logical, Physical, Point, Scale, Transform};
+use smithay::utils::{Logical, Physical, Point, Scale, Size, Transform};
 
 use crate::config::OpenStyle;
 use crate::feature::screenshot::capture::Captured;
@@ -119,6 +119,8 @@ pub fn open_alpha(shown: Option<Instant>, now: Instant, open: Duration) -> f32 {
 /// The last picture of a closed window, fading out where it was.
 pub struct Ghost {
     buffer: MemoryRenderBuffer,
+    /// What the picture shows, in logical pixels: it has more pixels on a scaled monitor.
+    size: Size<i32, Logical>,
     /// Top-left corner of the window geometry, in the shared space.
     pos: Point<i32, Logical>,
     /// Workspace it was on: only drawn while that one is shown.
@@ -128,8 +130,14 @@ pub struct Ghost {
 
 impl Ghost {
     /// `picture` is premultiplied RGBA, as `capture_window` returns it.
-    pub fn new(picture: &Captured, pos: (i32, i32), workspace: usize) -> Self {
+    pub fn new(
+        picture: &Captured,
+        pos: (i32, i32),
+        size: Size<i32, Logical>,
+        workspace: usize,
+    ) -> Self {
         Self {
+            size,
             buffer: MemoryRenderBuffer::from_slice(
                 &picture.rgba,
                 Fourcc::Abgr8888,
@@ -147,7 +155,7 @@ impl Ghost {
 
 /// Drop ghosts that have finished fading (`close` long) and draw the rest (those on
 /// `workspace`) with the frame's top-left at `origin`, as they look at `now`. Push the result
-/// before the windows' elements: ghosts go on top. Drawn at scale 1, like the capture they came from.
+/// before the windows' elements: ghosts go on top.
 pub fn ghost_elements(
     renderer: &mut GlesRenderer,
     ghosts: &mut Vec<Ghost>,
@@ -161,14 +169,16 @@ pub fn ghost_elements(
     for ghost in ghosts.iter().filter(|g| g.workspace == workspace) {
         let alpha =
             1.0 - ease_out_cubic(progress(now.saturating_duration_since(ghost.closed), close));
-        let loc: Point<f64, Physical> = (ghost.pos - origin).to_f64().to_physical(Scale::from(1.0));
+        let loc: Point<f64, Physical> = (ghost.pos - origin)
+            .to_f64()
+            .to_physical(Scale::from(crate::render::effects::frame_scale::get()));
         match MemoryRenderBufferRenderElement::from_buffer(
             &mut *renderer,
             loc,
             &ghost.buffer,
             Some(alpha),
             None,
-            None,
+            Some(ghost.size),
             Kind::Unspecified,
         ) {
             Ok(element) => out.push(JffElement::Memory(element)),
@@ -195,7 +205,10 @@ impl JffState {
         // The picture is made in the colors of the monitor it fades on, which draws it as it is.
         let color = self.window_output_color(window);
         match self.capture_window_in(window, color) {
-            Ok(picture) => self.closing.push(Ghost::new(&picture, pos, workspace)),
+            Ok(picture) => {
+                self.closing
+                    .push(Ghost::new(&picture, pos, window.geometry().size, workspace))
+            }
             Err(why) => tracing::debug!("no close animation: {why}"),
         }
     }

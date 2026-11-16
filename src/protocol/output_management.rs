@@ -2,8 +2,8 @@
 //! change their mode, position, and on/off state while jff runs.
 //!
 //! Changes go through the in-memory `Config`, exactly as if they'd been written in the `outputs`
-//! block of the config file, so they last until the config is reloaded. Scale isn't supported,
-//! jff draws every monitor at 1: a configuration asking for another one is reported as failed.
+//! block of the config file, so they last until the config is reloaded. Scale is the `scale` of
+//! that block, 0.25 to 10, one outside that is reported as failed.
 //!
 //! Adaptive sync (version 4) is the config's `adaptive-sync`. A head says it is enabled for
 //! `fullscreen` as well as `always`, since VRR runs whenever a window wants it. A client that
@@ -78,6 +78,7 @@ struct HeadState {
     current: Option<usize>,
     position: (i32, i32),
     transform: Transform,
+    scale: f64,
     /// The `adaptive-sync` setting.
     vrr: Vrr,
     /// Whether the monitor can do VRR, `None` while it is dark and nothing says.
@@ -117,9 +118,10 @@ pub struct HeadRequest {
     mode: Option<ModeRequest>,
     position: Option<(i32, i32)>,
     transform: Option<Transform>,
+    scale: Option<f64>,
     /// Adaptive sync on or off.
     adaptive_sync: Option<bool>,
-    /// Something jff can't do (scale) was asked for.
+    /// Something jff can't do (a scale out of range) was asked for.
     unsupported: bool,
 }
 
@@ -200,7 +202,7 @@ fn announce(
             }
             head.position(state.position.0, state.position.1);
             head.transform(state.transform);
-            head.scale(1.0);
+            head.scale(state.scale);
             if version >= 4 {
                 head.adaptive_sync(if adaptive_sync_enabled(state.vrr, state.vrr_capable) {
                     zwlr_output_head_v1::AdaptiveSyncState::Enabled
@@ -270,12 +272,14 @@ impl JffState {
                     })
                     .unwrap_or((0, 0));
                 let transform = output.map_or(Transform::Normal, |o| o.current_transform().into());
+                let scale = output.map_or(1.0, |o| o.current_scale().fractional_scale());
                 let (vrr, vrr_capable) = self.vrr_state(&monitor.name);
                 HeadState {
                     enabled: output.is_some(),
                     current,
                     position,
                     transform,
+                    scale,
                     vrr,
                     vrr_capable,
                     monitor,
@@ -382,6 +386,9 @@ impl JffState {
                     }
                     if let Some(transform) = request.transform {
                         config.transform = OutputTransform::from_smithay(transform.into());
+                    }
+                    if let Some(scale) = request.scale {
+                        config.set_scale(scale);
                     }
                 }
             });
@@ -634,7 +641,9 @@ impl Dispatch<ZwlrOutputConfigurationHeadV1, HeadConfigData> for JffState {
                 ),
             },
             zwlr_output_configuration_head_v1::Request::SetScale { scale } => {
-                if (scale - 1.0).abs() > 1e-6 {
+                if (0.25..=10.0).contains(&scale) {
+                    head.scale = Some(scale);
+                } else {
                     head.unsupported = true;
                 }
             }

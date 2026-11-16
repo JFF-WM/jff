@@ -53,7 +53,9 @@ use smithay::desktop::utils::{
     OutputPresentationFeedback,
 };
 use smithay::desktop::Window;
-use smithay::output::{Mode, Output, OutputModeSource, PhysicalProperties, Subpixel};
+use smithay::output::{
+    Mode, Output, OutputModeSource, PhysicalProperties, Scale as OutputScale, Subpixel,
+};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
 use smithay::reexports::drm::control::{
@@ -83,7 +85,7 @@ use crate::app::pacing::advance_frame_sequence;
 use crate::app::{Backend, BACKGROUND};
 use crate::config::{Config, ModeRequest, OutputTransform, Vrr};
 use crate::desk::Desk;
-use crate::feature::outputs::{output_rect, Monitor, MonitorMode};
+use crate::feature::outputs::{output_rect, wanted_scale, Monitor, MonitorMode};
 use crate::feature::overview_mode::{overview_drag_elements, overview_elements};
 use crate::feature::screenshot::screenshot_elements;
 use crate::primitives::color::ImageDescription;
@@ -1242,6 +1244,19 @@ impl Tty {
                 lit.compositor.reset_buffers();
                 lit.queue_redraw();
             }
+            // A new `scale` needs no new mode either: the picture is drawn again at the new
+            // scale, and `relayout_outputs` (after this) fits windows and panels to the new size.
+            let scale = wanted_scale(config, &lit.output.name());
+            if lit.output.current_scale().fractional_scale() != scale {
+                tracing::info!("monitor {}: scale {scale}", lit.output.name());
+                lit.output.change_current_state(
+                    None,
+                    None,
+                    Some(OutputScale::Fractional(scale)),
+                    None,
+                );
+                lit.queue_redraw();
+            }
         }
 
         let stale: Vec<OutputKey> = self
@@ -1274,7 +1289,8 @@ impl Tty {
             let hdr_wanted =
                 config.output(&name).is_some_and(|c| c.hdr) && dev == DeviceId::PRIMARY;
             let transform = output_transform(config, &name);
-            match self.light_up(dev, &info, &name, crtc, mode, transform, hdr_wanted) {
+            let scale = wanted_scale(config, &name);
+            match self.light_up(dev, &info, &name, crtc, mode, transform, scale, hdr_wanted) {
                 Ok(lit) => {
                     used.insert(crtc);
                     added.push(lit.output.clone());
@@ -1295,6 +1311,7 @@ impl Tty {
         crtc: crtc::Handle,
         drm_mode: DrmMode,
         transform: Transform,
+        scale: f64,
         hdr_wanted: bool,
     ) -> anyhow::Result<TtyOutput> {
         let primary_node = self.primary.render_node;
@@ -1330,7 +1347,12 @@ impl Tty {
             },
         );
         let wl_mode = Mode::from(drm_mode.clone());
-        output.change_current_state(Some(wl_mode), Some(transform), None, Some((0, 0).into()));
+        output.change_current_state(
+            Some(wl_mode),
+            Some(transform),
+            Some(OutputScale::Fractional(scale)),
+            Some((0, 0).into()),
+        );
         output.set_preferred(wl_mode);
 
         let surface = device
@@ -2215,7 +2237,10 @@ impl JffState {
             }
         }
 
-        let scale = Scale::from(1.0f64);
+        // Everything is placed in logical pixels, the output's tracker scales it to the panel.
+        let output_scale = lit.output.current_scale().fractional_scale();
+        let scale = Scale::from(output_scale);
+        let _frame_scale = crate::render::effects::frame_scale::enter(output_scale);
         let rect = output_rect(&lit.output);
         let origin: Point<i32, Logical> = (rect.0, rect.1).into();
         // What this monitor shows. Every surface drawn below (layers, popups, thumbnails, the

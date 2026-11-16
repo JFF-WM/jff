@@ -166,6 +166,8 @@ pub struct HdrFrame {
     damage: DamageBag<i32, Physical>,
     id: Id,
     size: Size<i32, Physical>,
+    /// The scale of the output the tracker draws for.
+    scale: f64,
     /// 0 until the texture holds a whole frame.
     age: usize,
     /// The settings of the output. The content peak of `pass` is always `None`: it is `content_peak` below that goes to the element.
@@ -183,6 +185,7 @@ impl HdrFrame {
         pass: FinalPass,
     ) -> Result<Self, String> {
         let size = oriented_size(output).ok_or("the output has no mode")?;
+        let scale = output.current_scale().fractional_scale();
         let program = program(renderer).ok_or("the final pass shader did not compile")?;
         let texture = renderer
             .create_buffer(WORKING_FORMAT, (size.w, size.h).into())
@@ -190,10 +193,11 @@ impl HdrFrame {
         Ok(Self {
             texture,
             // The tracker does not follow the output's transform: the frame stays in the output's orientation and the compositor that shows it applies the transform.
-            tracker: OutputDamageTracker::new(size, Scale::from(1.0), Transform::Normal),
+            tracker: OutputDamageTracker::new(size, Scale::from(scale), Transform::Normal),
             damage: DamageBag::default(),
             id: Id::new(),
             size,
+            scale,
             age: 0,
             pass,
             content_peak: None,
@@ -208,7 +212,9 @@ impl HdrFrame {
 
     /// Whether this frame still fits the output's mode, its orientation (a quarter turn swaps the size) and the final pass settings.
     pub fn fits(&self, output: &Output, pass: &FinalPass) -> bool {
-        self.pass == *pass && oriented_size(output) == Some(self.size)
+        self.pass == *pass
+            && oriented_size(output) == Some(self.size)
+            && output.current_scale().fractional_scale() == self.scale
     }
 
     /// Composite `elements` (already in the working space) and give back the element that puts the result on the output, with the states of the elements for presentation feedback.

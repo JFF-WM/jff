@@ -483,6 +483,8 @@ pub struct OutputConfig {
     pub mode: Option<ModeRequest>,
     /// How the picture is turned onto the panel.
     pub transform: OutputTransform,
+    /// How many times larger than a logical pixel the monitor's pixels are, in 1/120 (the unit of wp_fractional_scale). 1 when not set.
+    pub scale: Option<u32>,
     /// ICC profile whose calibration curves (`vcgt`) are applied to the monitor.
     pub icc_profile: Option<std::path::PathBuf>,
     /// Variable refresh rate.
@@ -518,6 +520,20 @@ pub struct OutputConfig {
 }
 
 impl OutputConfig {
+    /// The scale as a factor, 1 when not set.
+    pub fn scale(&self) -> f64 {
+        self.scale.map_or(1.0, |units| f64::from(units) / 120.0)
+    }
+
+    /// Ask for `scale`, rounded to the 1/120 wp_fractional_scale speaks. `false` when it is out of range.
+    pub fn set_scale(&mut self, scale: f64) -> bool {
+        if !SCALE_RANGE.contains(&scale) {
+            return false;
+        }
+        self.scale = Some((scale * 120.0).round() as u32);
+        true
+    }
+
     /// Things in the HDR settings that load fine but do nothing, or leave the panel little room, for `jff check-config`.
     fn hdr_warnings(&self) -> Vec<String> {
         let name = &self.name;
@@ -3006,6 +3022,9 @@ fn parse_log(node: &KdlNode) -> anyhow::Result<LogConfig> {
 }
 
 /// One `output "NAME" { … }` node.
+/// What an output's `scale` may be.
+const SCALE_RANGE: std::ops::RangeInclusive<f64> = 0.25..=10.0;
+
 fn parse_output(node: &KdlNode) -> anyhow::Result<OutputConfig> {
     let name = positional(node)
         .first()
@@ -3066,6 +3085,15 @@ fn parse_output(node: &KdlNode) -> anyhow::Result<OutputConfig> {
                             .join(", ")
                     ),
                 };
+            }
+            "scale" => {
+                if !config.set_scale(float_arg(child)?) {
+                    bail!(
+                        "scale takes a number from {} to {}: scale 1.5",
+                        SCALE_RANGE.start(),
+                        SCALE_RANGE.end()
+                    );
+                }
             }
             "adaptive-sync" => {
                 config.vrr = match args.as_slice() {

@@ -181,7 +181,7 @@ pub fn layer_elements(
     ignore: &[String],
     popup_radius: i32,
 ) -> Vec<JffElement> {
-    let scale = Scale::from(1.0f64);
+    let scale = Scale::from(crate::render::effects::frame_scale::get());
     let map = layer_map_for_output(output);
     let mut out: Vec<JffElement> = Vec::new();
     for layer in layers {
@@ -256,7 +256,7 @@ pub fn layer_body_elements(
     blur: Option<config::Blur>,
     ignore: &[String],
 ) -> Vec<JffElement> {
-    let scale = Scale::from(1.0f64);
+    let scale = Scale::from(crate::render::effects::frame_scale::get());
     let map = layer_map_for_output(output);
     let mut out: Vec<JffElement> = Vec::new();
     for layer in layers {

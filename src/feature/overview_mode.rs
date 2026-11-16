@@ -586,7 +586,7 @@ pub(crate) fn thumb_elements(
     out: &mut Vec<JffElement>,
     snapshot: Option<&WallpaperSnapshot>,
 ) {
-    let scale = Scale::from(1.0f64);
+    let scale = Scale::from(crate::render::effects::frame_scale::get());
     // Draw the window at (0, 0) with its geometry corner, shrink it around that corner, then
     // move the result to its slot.
     let geo = window.geometry();
@@ -971,16 +971,17 @@ fn wallpaper_elements(
         );
         // Later surfaces of the layer are in front: the list is back to front, draw it so.
         for (surface, loc) in wall.wallpaper.iter().rev() {
+            let frame = crate::render::effects::frame_scale::get();
             let slot: Point<i32, Physical> = Point::from((
-                cell.0 - origin.x + (f64::from(loc.x) * scale).round() as i32,
-                cell.1 - origin.y + (f64::from(loc.y) * scale).round() as i32,
+                ((f64::from(cell.0 - origin.x) + f64::from(loc.x) * scale) * frame).round() as i32,
+                ((f64::from(cell.1 - origin.y) + f64::from(loc.y) * scale) * frame).round() as i32,
             ));
             let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(
                     &mut *renderer,
                     surface,
                     Point::<i32, Physical>::from((0, 0)),
-                    Scale::from(1.0f64),
+                    Scale::from(crate::render::effects::frame_scale::get()),
                     1.0,
                     Kind::Unspecified,
                 );

@@ -647,6 +647,7 @@ impl JffState {
         let size = frame_size(output).ok_or("the monitor has no mode (it is off)")?;
         let scale_factor = output.current_scale().fractional_scale();
         let scale = Scale::from(scale_factor);
+        let _frame_scale = crate::render::effects::frame_scale::enter(scale_factor);
         let rect = output_rect(output);
         let origin: Point<i32, Logical> = (rect.0, rect.1).into();
         let pointer: Point<f64, Logical> = self
@@ -1047,6 +1048,7 @@ impl JffState {
         self.refuse_when_locked()?;
         let geo = window.geometry();
         let (scale_factor, size) = self.window_capture_size(window)?;
+        let _frame_scale = crate::render::effects::frame_scale::enter(scale_factor);
         let pos = self
             .desk
             .pos_of(|w| w == window)

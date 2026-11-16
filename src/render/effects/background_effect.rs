@@ -299,7 +299,7 @@ pub fn popup_elements(
     radius: i32,
     out: &mut Vec<JffElement>,
 ) {
-    let scale = Scale::from(1.0f64);
+    let scale = Scale::from(super::frame_scale::get());
     for (popup, popup_offset) in PopupManager::popups_for_surface(parent) {
         let origin = parent_loc + parent_geo_loc + popup_offset - popup.geometry().loc;
         // Only the popover itself, not the transparent margin around it (see `visible_rect`).
@@ -368,7 +368,7 @@ pub fn window_elements(
     // A window that is still opening has no outline (it would show at full strength behind a
     // half-transparent or moving window). Its blur fades in with it, see `open.alpha`.
     let border = if open.settled() { border } else { None };
-    let scale = Scale::from(1.0f64);
+    let scale = Scale::from(super::frame_scale::get());
     let loc: Point<i32, Physical> = surface_loc.to_physical_precise_round(scale);
     let geo = window.geometry();
     if open.scale != 1.0 || open.dy != 0 {
@@ -523,7 +523,7 @@ fn scaled_window(
     open: OpenFrame,
     out: &mut Vec<JffElement>,
 ) {
-    let scale = Scale::from(1.0f64);
+    let scale = Scale::from(super::frame_scale::get());
     let geo = window.geometry();
     let from: Point<i32, Physical> =
         Point::<i32, Logical>::from((-geo.loc.x, -geo.loc.y)).to_physical_precise_round(scale);
