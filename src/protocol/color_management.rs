@@ -233,7 +233,7 @@ pub fn capture_color(config: &Config) -> Option<OutputColor> {
 /// The `wp_color_manager_v1` global and the numbering of descriptions.
 pub struct ColorManagement {
     /// `None` when the config turns the protocol off.
-    _global: Option<GlobalId>,
+    global: Option<GlobalId>,
     identities: LongIdentities,
     /// What a monitor with no ICC profile is described as: sRGB.
     plain: Arc<Described>,
@@ -265,8 +265,7 @@ impl ColorManagement {
             identity: identities.next().unwrap_or(1),
         });
         Self {
-            _global: enabled
-                .then(|| display.create_global::<JffState, WpColorManagerV1, ()>(3, ())),
+            global: enabled.then(|| display.create_global::<JffState, WpColorManagerV1, ()>(3, ())),
             identities,
             plain,
             profiled: HashMap::new(),
@@ -277,9 +276,28 @@ impl ColorManagement {
         }
     }
 
-    /// Whether the `wp_color_manager_v1` global exists, so clients can see the protocol at all. It is made when jff starts, so a config reload does not change it.
+    /// Whether the `wp_color_manager_v1` global exists, so clients can see the protocol at all.
+    /// It follows `color-management { off }`, also after a config reload.
     pub fn offered(&self) -> bool {
-        self._global.is_some()
+        self.global.is_some()
+    }
+
+    /// Create or remove the global to follow `color-management { off }` after a config reload.
+    /// Removing it only hides the protocol from clients that connect or look at the registry
+    /// afterwards: objects a client already holds stay valid, and stop converting because
+    /// [`output_color`] and [`capture_color`] return `None` while the config says `off`.
+    pub fn set_enabled(&mut self, display: &DisplayHandle, enabled: bool) {
+        match (enabled, self.global.is_some()) {
+            (true, false) => {
+                self.global = Some(display.create_global::<JffState, WpColorManagerV1, ()>(3, ()));
+            }
+            (false, true) => {
+                if let Some(global) = self.global.take() {
+                    display.remove_global::<JffState>(global);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// The description of the output `name`, which is also the preferred one of the surfaces on it.

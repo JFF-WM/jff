@@ -11,6 +11,8 @@
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
+//! A reload applies every setting except these, which are the only ones that work another way, so keep this list and the one at the top of `config.example` in step: `autostart` / `sh-autostart` run once when jff starts (a reload does not run a changed list), `restore-apps` restores the last session's apps only at start (saving follows a reload), and `color-representation { yuv }` is told to a client when it connects (programs already running keep what they were told).
+//!
 //! `binds` has three actions for several monitors, each takes one target: `left`, `right`, `up`, `down` (the monitor that lies that way from the one in use), `next`, `prev` (left to right, then top to bottom, wrapping) or the name of a monitor (`"DP-2"`, see `jff msg outputs`). `focus-monitor "right"` moves the pointer and the keyboard there (to the topmost window, or to the middle of an empty monitor). `move-to-monitor "right"` sends the focused window there, pointer and keyboard follow, and a window of a tiling container takes its container along. `move-workspace-to-monitor "right"` trades what the monitor in use shows with what that monitor shows, and needs `workspaces { per-output }`. A target that does not exist (the edge of the desktop) does nothing, a name that is not connected shows an error toast.
 //!
 //! `binds` also has `minimize` (the focused window goes out of sight), `unminimize` (the one minimized last comes back) and a scratchpad: `move-to-scratchpad` puts the focused window in it, `scratchpad` brings one to the monitor in use, centered, or puts it away again when it has the keyboard (with several it steps through them). A hidden window keeps its workspace and place, a taskbar click or an activation request brings it back, and sending a scratchpad window to a workspace takes it out of the scratchpad.
@@ -24,7 +26,7 @@
 //! `focus-follows-mouse` gives the keyboard to the window under the pointer as soon as the pointer moves onto it, without a click and without raising it. The keyboard stays where it is while the overview, the screenshot selection or the lock screen is up, a panel or launcher has the keyboard, a menu is open, or a button is held. Off by default.
 //!
 //! `tiling-containers` turns on tiling containers (groups of windows that tile among themselves, see `desk::container`), and is off by default. It accepts a bare name or `#true` / `#false`.
-//! `restore-apps` starts the applications that were open when the last session ended (one launch per app, found by the app id of its windows in the installed `.desktop` files, see `feature::app_restore`), puts each of their windows on the monitor and the workspace it was on, and keeps that list up to date while you work. It is off by default, and while it is off jff neither reads nor writes the list. It accepts a bare name or `#true` / `#false`, and is read at startup: turning it on in a running session starts saving, and the next session restores. Its monitor and workspace win over those of a `window-rule`, a monitor that is not connected any more leaves the window where it opens by default.
+//! `restore-apps` starts the applications that were open when the last session ended (one launch per app, found by the app id of its windows in the installed `.desktop` files, see `feature::app_restore`), puts each of their windows on the monitor and the workspace it was on, and keeps that list up to date while you work. It is off by default, and while it is off jff neither reads nor writes the list. It accepts a bare name or `#true` / `#false`. Turning it on in a running session starts saving, and the next start restores. Its monitor and workspace win over those of a `window-rule`, a monitor that is not connected any more leaves the window where it opens by default.
 //! `container-rule { match app-id="…", title="…", tag="…", name "…" }` (any number, the `match` lines all have to hold, the first rule that fits a window gives the container its name): a rule does not create a container, it names the one the user creates, from the first window that fits. `name` and `layout "NAME"` are its actions (`layout` applies the saved container layout NAME, see `save-container-layout`, every time a window that fits the rule joins a container, so tagged windows find their slot as they open), `jff check-config` warns about a rule with neither, and any other key inside it is an error.
 //! `binds` has five actions for containers: `focus-container "NAME"` focuses the first container with that name on the current workspace (an error toast when there is none), `container-next` and `container-prev` move the focus to the next or previous window of the focused window's container in tree order, wrapping, and do nothing for a window that is in no container. `maximize` on a window of a container makes it fill the container's rectangle, the others stay under it, and `maximize` again (or the window closing) shows the tree again. A window that closes leaves the tree, and the others take its room. `container-drag` picks up the focused window of a container with the pointer: the next left click puts it down (a right click cancels), over another window of a container the middle swaps the two places and an edge puts it beside that window, at the edge of the monitor or off every container it leaves the container and snaps, maximizes or floats as any dropped window does. Dragging a window of a container by its titlebar or with `drag-modifier` does the same. `container-eject` takes the focused window out of its container and floats it. Both do nothing for a window that is in no container. `save-container-layout "NAME"` saves the shape of the focused window's container (its splits and ratios, one slot per window, the slot of a tagged window keeps the tag, see `window-rule` `tag`) and `apply-container-layout "NAME"` puts the container in that shape again: each window goes to the slot with its tag, the others fill the free slots in their current order, a slot with no window closes up and a window with no slot is split off the last one. Both show an error toast when they cannot. The layouts are kept in `$XDG_STATE_HOME/jff-wm/container-layouts` (see `jff msg layout-list`).
 //!
@@ -369,8 +371,9 @@ pub enum Vrr {
 /// shown (wp-color-management).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ColorManagementConfig {
-    /// `off`: the protocol is not offered and no surface is converted. The protocol is set up at
-    /// startup, so a change of this one takes effect after a restart.
+    /// `off`: the protocol is not offered and no surface is converted. A reload creates or
+    /// removes the global: programs that are already running keep the objects they hold (they
+    /// are no longer converted), and see the protocol appear or vanish when they next connect.
     pub off: bool,
     /// `fullscreen-passthrough`: a fullscreen window is shown as its client drew it, whatever it
     /// is tagged with. It stays eligible for direct scanout, at the price of wrong colors if
@@ -817,8 +820,8 @@ impl BlurWindows {
     }
 }
 
-/// The `osd { … }` block, the toasts shown for the system bell. On unless `off`. `font` is only
-/// read at startup.
+/// The `osd { … }` block, the toasts shown for the system bell. On unless `off`. A changed
+/// `font` applies on reload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OsdConfig {
     pub off: bool,

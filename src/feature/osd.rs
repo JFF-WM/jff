@@ -138,6 +138,21 @@ impl Osd {
         }
     }
 
+    /// Use another font family from now on (`osd { font }`, after a config reload). Does
+    /// nothing when it is the one in use. The new family is loaded the next time text is drawn,
+    /// and the toasts on screen are painted again with it.
+    pub fn set_family(&mut self, family: &str) {
+        if self.family == family {
+            return;
+        }
+        self.family = family.to_owned();
+        self.fonts = Arc::new(OnceLock::new());
+        self.started = false;
+        for toast in &mut self.toasts {
+            toast.painted = None;
+        }
+    }
+
     /// For tests: no font, no loader thread.
     pub fn without_fonts() -> Self {
         let osd = Self::new("sans-serif");
@@ -806,20 +821,16 @@ impl JffState {
         true
     }
 
-    /// Say so when a monitor is HDR but clients cannot be told: the protocol they would ask for HDR through is not there, because the config has `color-management { off }` (or had it when jff started, and the global is only made then).
+    /// Say so when a monitor is HDR but clients cannot be told: the protocol they would ask for HDR through is not there, because the config has `color-management { off }`.
     pub fn warn_hdr_hidden(&mut self) {
         let names = self.config.hdr_output_names();
         if names.is_empty() || self.color_management.offered() {
             return;
         }
-        let names = names.join(", ");
-        let message = if self.config.color_management().off {
-            format!("HDR is on for {names}, but color management is off, so apps can't use it")
-        } else {
-            format!(
-                "HDR is on for {names}, but color management was off when jff started, restart jff so apps can use it"
-            )
-        };
+        let message = format!(
+            "HDR is on for {}, but color management is off, so apps can't use it",
+            names.join(", ")
+        );
         tracing::warn!("{message}");
         self.show_error("Apps cannot use HDR", &message);
     }

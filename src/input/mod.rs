@@ -1108,6 +1108,10 @@ impl JffState {
                 let old_cursor = self.config.cursor().clone();
                 self.config = config;
                 crate::logging::apply(self.config.log());
+                self.osd.set_family(&self.config.osd().font);
+                let offered = !self.config.color_management().off;
+                self.color_management
+                    .set_enabled(&self.display_handle, offered);
                 self.apply_keyboard_config(&old_keyboard);
                 if *self.config.input() != old_input {
                     self.apply_input_config();

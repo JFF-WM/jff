@@ -3,7 +3,14 @@
 // Copy this file to ~/.config/jff/config.kdl (or point $JFF_CONFIG at it) and edit.
 // Every block is optional: anything you leave out uses the built-in default.
 //
-// jff reloads the file when you save it (or on the `reload-config` bind). Check a file without
+// jff reloads the file when you save it (or on the `reload-config` bind). Everything takes
+// effect on reload except the settings listed here, which only work the way they say:
+//   autostart, sh-autostart   run once, when jff starts. A reload does not run a changed list.
+//   restore-apps              turning it on in a running session starts saving the open apps,
+//                             but they are only started again at the next jff start.
+//   color-representation yuv  clients tell the compositor what they can use when they connect:
+//                             programs already running keep what they were told, restart them.
+// Check a file without
 // starting jff with `jff check-config [FILE]`: it reports errors and warns about unknown
 // top-level nodes, which are otherwise silently ignored. An unknown key INSIDE a known block
 // is an error.
@@ -65,8 +72,8 @@ warp-mouse-to-focus #true
 // start, after `autostart` has run, each of those apps is started once and its windows are put
 // back on the monitor and workspace they were on. Apps already in `autostart` are not started
 // twice, apps with no .desktop file are skipped. The monitor and workspace saved here win over
-// those of a window-rule. Read at startup: turning it on in a running session starts saving,
-// and the next session restores. While it is off, jff neither reads nor writes the list.
+// those of a window-rule. Turning it on in a running session starts saving, and the next start
+// restores. While it is off, jff neither reads nor writes the list.
 // restore-apps #true
 
 // Tiling containers (off by default): groups of windows that tile among themselves. Needed by
@@ -319,7 +326,7 @@ cursor {
 // Color management (wp-color-management). On by default. With no block, surfaces a client
 // tagged with another gamut or curve than the monitor's are converted to it.
 // color-management {
-//     off                        // do not offer wp-color-management, draw every surface as it always was (needs a restart)
+//     off                        // do not offer wp-color-management, draw every surface as it always was
 //     convert-srgb               // convert untagged (sRGB) surfaces too: stops them looking oversaturated on a wide-gamut panel, give the monitor an `icc-profile`
 //     fullscreen-passthrough     // never convert a fullscreen window, so it can still be scanned out
 // }
