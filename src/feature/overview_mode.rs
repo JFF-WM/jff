@@ -1403,36 +1403,10 @@ impl JffState {
             .is_some_and(|held| overview::modifier_released(held, now))
     }
 
-    /// Pick the monitor: the one under the pointer, so no click is needed to choose it. If it
-    /// has no windows, fall back to the monitor with the focused window, so the key still does
-    /// something.
+    /// Pick the monitor: the one under the pointer, so no click is needed to choose it. With no
+    /// windows on it the overview still opens there, it is where an app is started from.
     fn overview_output(&self) -> Option<Output> {
-        let under_pointer = self.output_at_pointer();
-        if let Some(output) = &under_pointer {
-            if !self.windows_on(output_rect(output)).is_empty() {
-                return under_pointer;
-            }
-        }
-        let focused_rect = self
-            .seat
-            .get_keyboard()
-            .and_then(|k| k.current_focus())
-            .and_then(|focus| {
-                self.desk
-                    .find_by(|w| w.toplevel().is_some_and(|t| *t.wl_surface() == focus))
-            })
-            .map(|entry| {
-                let size = entry.window.geometry().size;
-                self.rect_for_window(entry.pos, (size.w, size.h))
-            });
-        focused_rect
-            .and_then(|rect| {
-                self.outputs
-                    .iter()
-                    .find(|o| output_rect(o) == rect)
-                    .cloned()
-            })
-            .or(under_pointer)
+        self.output_at_pointer()
     }
 
     /// Windows whose center is on `rect`, topmost first. Windows that haven't committed a buffer
