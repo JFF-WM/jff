@@ -1518,6 +1518,11 @@ impl Config {
         for output in &config.outputs {
             warnings.extend(output.hdr_warnings());
         }
+        if let Some(warning) = config.hdr_hidden_warning() {
+            warnings.push(format!(
+                "{warning}, remove `off` from `color-management {{ … }}`"
+            ));
+        }
         for (i, rule) in config.window_rules().iter().enumerate() {
             let n = i + 1;
             if !rule.has_actions() {
@@ -1884,6 +1889,26 @@ impl Config {
     /// The `color-management { … }` block (everything off or unset by default).
     pub fn color_management(&self) -> ColorManagementConfig {
         self.color_management
+    }
+
+    /// The monitors that are signalled as HDR (`hdr` on a monitor that is not `off`).
+    pub fn hdr_output_names(&self) -> Vec<&str> {
+        self.outputs
+            .iter()
+            .filter(|output| output.hdr && !output.off)
+            .map(|output| output.name.as_str())
+            .collect()
+    }
+
+    /// What to tell the user when `color-management { off }` stops jff from offering wp-color-management while a monitor has `hdr`: the monitor is signalled as HDR, but no client can see that, so a game finds nothing to ask for HDR with.
+    pub fn hdr_hidden_warning(&self) -> Option<String> {
+        let names = self.hdr_output_names();
+        (self.color_management.off && !names.is_empty()).then(|| {
+            format!(
+                "HDR is on for {}, but color management is off, so apps can't use it",
+                names.join(", ")
+            )
+        })
     }
 
     /// The `window-rule` blocks, in file order.

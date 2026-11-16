@@ -1401,3 +1401,48 @@ fn window_sdr_is_the_default_when_a_rule_says_nothing() {
     }
     .is_default());
 }
+
+#[test]
+fn hdr_with_color_management_off_is_called_out() {
+    use jff_wm::config::Config;
+
+    let config = Config::parse(
+        r#"
+        color-management { off; }
+        outputs {
+            output "DP-1" { hdr; }
+            output "HDMI-A-2" { hdr #false; }
+        }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.hdr_hidden_warning().as_deref(),
+        Some("HDR is on for DP-1, but color management is off, so apps can't use it")
+    );
+    let warnings = Config::check_text(
+        r#"
+        color-management { off; }
+        outputs { output "DP-1" { hdr; } }
+        "#,
+    )
+    .unwrap();
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("color management is off")));
+}
+
+#[test]
+fn hdr_with_color_management_on_or_a_monitor_off_is_not() {
+    use jff_wm::config::Config;
+
+    let on = Config::parse(r#"outputs { output "DP-1" { hdr; } }"#).unwrap();
+    assert_eq!(on.hdr_hidden_warning(), None);
+    let no_hdr =
+        Config::parse(r#"color-management { off; } outputs { output "DP-1" { } }"#).unwrap();
+    assert_eq!(no_hdr.hdr_hidden_warning(), None);
+    let off_monitor =
+        Config::parse(r#"color-management { off; } outputs { output "DP-1" { off; hdr; } }"#)
+            .unwrap();
+    assert_eq!(off_monitor.hdr_hidden_warning(), None);
+}

@@ -147,6 +147,8 @@ pub fn run() -> anyhow::Result<()> {
     }
     if let Some(why) = startup_error {
         state.show_error("Config error, using defaults", &why);
+    } else {
+        state.warn_hdr_hidden();
     }
 
     let socket = ListeningSocketSource::new_auto()?;

@@ -277,6 +277,11 @@ impl ColorManagement {
         }
     }
 
+    /// Whether the `wp_color_manager_v1` global exists, so clients can see the protocol at all. It is made when jff starts, so a config reload does not change it.
+    pub fn offered(&self) -> bool {
+        self._global.is_some()
+    }
+
     /// The description of the output `name`, which is also the preferred one of the surfaces on it.
     pub fn output_description(&self, name: &str) -> Arc<Described> {
         self.hdr

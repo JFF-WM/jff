@@ -789,6 +789,24 @@ impl JffState {
         self.osd.show(notice, timeout, Instant::now());
     }
 
+    /// Say so when a monitor is HDR but clients cannot be told: the protocol they would ask for HDR through is not there, because the config has `color-management { off }` (or had it when jff started, and the global is only made then).
+    pub fn warn_hdr_hidden(&mut self) {
+        let names = self.config.hdr_output_names();
+        if names.is_empty() || self.color_management.offered() {
+            return;
+        }
+        let names = names.join(", ");
+        let message = if self.config.color_management().off {
+            format!("HDR is on for {names}, but color management is off, so apps can't use it")
+        } else {
+            format!(
+                "HDR is on for {names}, but color management was off when jff started, restart jff so apps can use it"
+            )
+        };
+        tracing::warn!("{message}");
+        self.show_error("Apps cannot use HDR", &message);
+    }
+
     /// Show an error toast. Not affected by `osd { off }`, an error you can't see is worse.
     pub fn show_error(&mut self, title: &str, message: &str) {
         let Some(output) = self.output_at_pointer().map(|o| o.name()) else {
