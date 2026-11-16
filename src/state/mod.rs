@@ -362,6 +362,8 @@ pub struct JffState {
     pub overview: Option<crate::feature::overview_mode::Overview>,
     /// Scroll over the overview not yet turned into a workspace step. Outlives the overview, which reopens after each step.
     pub overview_scroll: crate::primitives::scroll_steps::ScrollSteps,
+    /// The touchpad swipe going on, and whether jff keeps it (see `primitives/swipe.rs`).
+    pub swipe: crate::primitives::swipe::SwipeTracker,
     /// For `overview { auto-open }`: per monitor, the workspace it showed and whether that had no
     /// windows, as of the last look. The overview opens when this turns into "empty".
     pub overview_auto: HashMap<String, (usize, bool)>,
@@ -707,6 +709,7 @@ impl JffState {
             resize: None,
             overview: None,
             overview_scroll: Default::default(),
+            swipe: Default::default(),
             overview_auto: HashMap::new(),
             hot_corner_armed: true,
             hot_corner_timer: None,

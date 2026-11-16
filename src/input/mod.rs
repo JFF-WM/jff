@@ -27,7 +27,7 @@ use smithay::utils::{Logical, Point, Serial, Size, SERIAL_COUNTER};
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
 
 use crate::config::{Action, Config, HotCorner};
-use crate::desk::WindowMode;
+use crate::desk::{Goto, WindowMode};
 use crate::feature::outputs::output_rect;
 use crate::feature::overview_mode::{overview_key, typed_char, OverviewKey};
 use crate::feature::screenshot::{report_failure, screenshot_key, ScreenshotKey};
@@ -37,6 +37,7 @@ use crate::input::grabs::tile_move::TileMoveEnd;
 use crate::ipc::WindowId;
 use crate::primitives::geom;
 use crate::primitives::layout;
+use crate::primitives::swipe::Swipe;
 use crate::protocol::layer_shell::Under;
 use crate::protocol::xx_hotkey::mods_of;
 use crate::protocol::xx_zones::ZoneDrag;
@@ -72,6 +73,19 @@ fn spawn_terminal() {
         .or_else(|_| std::env::var("TERMINAL"))
         .unwrap_or_else(|_| "alacritty".to_string());
     spawn_command(&term, &[]);
+}
+
+/// Three fingers sideways switch workspace, up opens the overview and down closes it.
+impl JffState {
+    fn run_swipe(&mut self, swipe: Swipe) {
+        match swipe {
+            Swipe::Left => self.goto_workspace(Goto::Next),
+            Swipe::Right => self.goto_workspace(Goto::Prev),
+            Swipe::Up if !self.overview_active() => self.open_overview(),
+            Swipe::Down if self.overview_active() => self.end_overview(None),
+            Swipe::Up | Swipe::Down => {}
+        }
+    }
 }
 
 pub const BTN_LEFT: u32 = 0x110;
@@ -230,7 +244,12 @@ impl JffState {
             }
 
             // Touchpad gestures (zwp_pointer_gestures_v1), for the window under the pointer.
+            // Three-finger swipes are jff's own, the client does not hear about them.
             InputEvent::GestureSwipeBegin { event } => {
+                let allowed = !self.session_locked() && self.screenshot.is_none();
+                if self.swipe.begin(event.fingers(), allowed) {
+                    return;
+                }
                 let pointer = self.seat.get_pointer().unwrap();
                 let (serial, time, fingers) =
                     (SERIAL_COUNTER.next_serial(), event.time(), event.fingers());
@@ -245,12 +264,22 @@ impl JffState {
                 pointer.frame(self);
             }
             InputEvent::GestureSwipeUpdate { event } => {
+                if self.swipe.is_kept() {
+                    let delta = event.delta();
+                    if let Some(swipe) = self.swipe.update(delta.x, delta.y) {
+                        self.run_swipe(swipe);
+                    }
+                    return;
+                }
                 let pointer = self.seat.get_pointer().unwrap();
                 let (time, delta) = (event.time(), event.delta());
                 pointer.gesture_swipe_update(self, &SwipeUpdate { time, delta });
                 pointer.frame(self);
             }
             InputEvent::GestureSwipeEnd { event } => {
+                if self.swipe.end() {
+                    return;
+                }
                 let pointer = self.seat.get_pointer().unwrap();
                 let (serial, time, cancelled) = (
                     SERIAL_COUNTER.next_serial(),

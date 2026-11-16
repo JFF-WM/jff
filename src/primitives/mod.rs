@@ -25,6 +25,7 @@ pub mod overview_grid;
 pub mod region;
 pub mod scroll_steps;
 pub mod stats;
+pub mod swipe;
 pub mod tile_tree;
 pub mod touch;
 pub mod yuv;
