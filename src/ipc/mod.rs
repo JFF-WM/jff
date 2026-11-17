@@ -84,7 +84,7 @@
 //! A window is
 //! `{"id":1,"app_id":"foot","title":"~","x":40,"y":40,"width":800,"height":600,
 //!   "maximized":false,"fullscreen":false,"focused":true,"urgent":false,"output":"DP-1",
-//!   "workspace":1,"pid":4242,"container":null}`.
+//!   "workspace":1,"pid":4242,"container":null,"tag":null}`.
 //! `id` is assigned when the window appears and never reused while jff runs. `urgent` is true
 //! while the window asked for attention (an xdg-activation token without input, a terminal's
 //! bell or a finished download) and hasn't had the keyboard since, the `urgent` event tells when it
@@ -92,7 +92,9 @@
 //! process id of the client that owns the window (null when unknown), an X11 window reports
 //! xwayland-satellite's pid. `container` is `{"id":1,"name":"Terminals"}` for a window that is a
 //! member of a tiling container (`name` is null for a container without one), null for any
-//! other window. It is in `windows`, `focused`, `window-info`, `status` and the `watch` snapshot.
+//! other window. `tag` is the tag that `window-rule { match tag=".." }` sees: the one given with the
+//! `tag` command or a rule's `tag` line, else the one the app set itself with xdg-toplevel-tag, null
+//! when there is none, the `tag` event tells when it changes. It is in `windows`, `focused`, `window-info`, `status` and the `watch` snapshot.
 //!
 //! `containers` replies `{"ok":true,"workspace":2,"containers":[CONTAINER,...]}`, the
 //! containers on the shown workspace, oldest first. A container is
@@ -156,6 +158,7 @@
 //! window-closed      id                                        windows
 //! title            id, title (string or null)                windows
 //! app-id           id, app_id (string or null)               windows
+//! tag              id, tag (string or null)                  windows
 //! geometry         id, x, y, width, height                   windows
 //! drag             id, on                                    windows
 //! maximized        id, on                                    windows
@@ -1215,8 +1218,9 @@ impl JffState {
         let focused = focused.is_some_and(|w| w == window);
         let workspace = self.desk.workspace_of(|w| w == window).unwrap_or(0) + 1;
 
-        let (mut app_id, mut title, mut fullscreen) = (None, None, false);
+        let (mut app_id, mut title, mut fullscreen, mut tag) = (None, None, false, None);
         if let Some(toplevel) = window.toplevel() {
+            tag = crate::protocol::toplevel_tag::tag_of(toplevel.wl_surface());
             (app_id, title) = with_states(toplevel.wl_surface(), |states| {
                 states
                     .data_map
@@ -1254,6 +1258,7 @@ impl JffState {
             workspace,
             pid: self.window_pid(window),
             container: self.container_ref(window),
+            tag,
         }
     }
 

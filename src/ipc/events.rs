@@ -107,6 +107,9 @@ pub struct WindowInfo {
     pub pid: Option<u32>,
     /// The tiling container the window is a member of, `None` for a window in none.
     pub container: Option<ContainerRef>,
+    /// The tag of the window that rules see: the one the user gave it (a rule or the `tag`
+    /// command), else the one the app set with xdg-toplevel-tag. `None` when it has neither.
+    pub tag: Option<String>,
 }
 
 /// The tiling container a window is a member of: what a window says about it.
@@ -180,7 +183,7 @@ impl WindowInfo {
     fn members(&self) -> String {
         format!(
             "\"id\":{},\"app_id\":{},\"title\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\
-             \"maximized\":{},\"fullscreen\":{},\"focused\":{},\"urgent\":{},\"output\":{},\"workspace\":{},\"pid\":{},\"container\":{}",
+             \"maximized\":{},\"fullscreen\":{},\"focused\":{},\"urgent\":{},\"output\":{},\"workspace\":{},\"pid\":{},\"container\":{},\"tag\":{}",
             self.id,
             json_opt(self.app_id.as_deref()),
             json_opt(self.title.as_deref()),
@@ -196,6 +199,7 @@ impl WindowInfo {
             self.workspace,
             self.pid.map_or_else(|| "null".to_string(), |pid| pid.to_string()),
             json_container(self.container.as_ref()),
+            json_opt(self.tag.as_deref()),
         )
     }
 
@@ -615,6 +619,11 @@ pub enum Event {
         id: u64,
         app_id: Option<String>,
     },
+    /// The tag of the window changed: the app set one, or the user gave or took one away.
+    Tag {
+        id: u64,
+        tag: Option<String>,
+    },
     Geometry {
         id: u64,
         x: i32,
@@ -691,6 +700,7 @@ impl Event {
             | Event::WindowClosed { .. }
             | Event::Title { .. }
             | Event::AppId { .. }
+            | Event::Tag { .. }
             | Event::Geometry { .. }
             | Event::Drag { .. }
             | Event::Maximized { .. }
@@ -739,6 +749,10 @@ impl Event {
             } => format!(
                 "{{\"event\":\"geometry\",\"id\":{id},\"x\":{x},\"y\":{y},\"width\":{width},\
                  \"height\":{height}}}"
+            ),
+            Event::Tag { id, tag } => format!(
+                "{{\"event\":\"tag\",\"id\":{id},\"tag\":{}}}",
+                json_opt(tag.as_deref())
             ),
             Event::Drag { id, on } => {
                 format!("{{\"event\":\"drag\",\"id\":{id},\"on\":{on}}}")
@@ -869,6 +883,12 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
             events.push(Event::AppId {
                 id,
                 app_id: after.app_id.clone(),
+            });
+        }
+        if before.tag != after.tag {
+            events.push(Event::Tag {
+                id,
+                tag: after.tag.clone(),
             });
         }
         if new.dragging == Some(id) && old.dragging != Some(id) {

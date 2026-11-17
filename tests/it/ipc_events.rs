@@ -23,6 +23,7 @@ fn window(id: u64) -> WindowInfo {
         workspace: 1,
         pid: Some(4242),
         container: None,
+        tag: None,
     }
 }
 
@@ -235,6 +236,28 @@ fn title_and_app_id_changes() {
             },
         ]
     );
+}
+
+#[test]
+fn a_window_tag_appears_changes_and_goes() {
+    let old = snapshot(vec![window(1)]);
+    let mut tagged = old.clone();
+    tagged.windows[0].tag = Some("browser".to_string());
+    assert_eq!(
+        diff(&old, &tagged),
+        vec![Event::Tag {
+            id: 1,
+            tag: Some("browser".to_string())
+        }]
+    );
+    assert!(diff(&tagged, &tagged).is_empty());
+    assert_eq!(
+        diff(&tagged, &old),
+        vec![Event::Tag { id: 1, tag: None }]
+    );
+    assert!(tagged.windows[0]
+        .to_json()
+        .ends_with("\"container\":null,\"tag\":\"browser\"}"));
 }
 
 #[test]
@@ -655,6 +678,13 @@ fn every_event_belongs_to_its_group() {
             Group::Windows,
         ),
         (
+            Event::Tag {
+                id: 1,
+                tag: None,
+            },
+            Group::Windows,
+        ),
+        (
             Event::Geometry {
                 id: 1,
                 x: 0,
@@ -713,7 +743,7 @@ fn a_window_is_written_like_the_documented_example() {
         v.to_json(),
         "{\"id\":1,\"app_id\":\"foot\",\"title\":\"~\",\"x\":40,\"y\":40,\"width\":800,\
              \"height\":600,\"maximized\":false,\"fullscreen\":false,\"focused\":true,\"urgent\":false,\
-             \"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\"container\":null}"
+             \"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\"container\":null,\"tag\":null}"
     );
     v.app_id = None;
     v.title = None;
@@ -721,7 +751,7 @@ fn a_window_is_written_like_the_documented_example() {
     assert!(v.to_json().contains("\"app_id\":null,\"title\":null"));
     assert!(v.to_json().contains("\"output\":null"));
     v.pid = None;
-    assert!(v.to_json().contains("\"pid\":null,\"container\":null}"));
+    assert!(v.to_json().contains("\"pid\":null,\"container\":null,\"tag\":null}"));
 }
 
 #[test]
@@ -833,7 +863,7 @@ fn events_are_written_as_one_json_line_each() {
             "{\"event\":\"window-opened\",\"id\":5,\"app_id\":\"foot\",\"title\":\"~\",\
                  \"x\":40,\"y\":40,\"width\":800,\"height\":600,\"maximized\":false,\
                  \"fullscreen\":false,\"focused\":false,\"urgent\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\
-                 \"container\":null}",
+                 \"container\":null,\"tag\":null}",
         ),
         (
             Event::WindowClosed { id: 5 },
@@ -870,6 +900,17 @@ fn events_are_written_as_one_json_line_each() {
                 app_id: Some("foot".to_string()),
             },
             "{\"event\":\"app-id\",\"id\":5,\"app_id\":\"foot\"}",
+        ),
+        (
+            Event::Tag {
+                id: 5,
+                tag: Some("browser".to_string()),
+            },
+            "{\"event\":\"tag\",\"id\":5,\"tag\":\"browser\"}",
+        ),
+        (
+            Event::Tag { id: 5, tag: None },
+            "{\"event\":\"tag\",\"id\":5,\"tag\":null}",
         ),
         (
             Event::Geometry {
