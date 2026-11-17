@@ -4,8 +4,9 @@
 //! Every GPU is opened. One (`render-device`, else the boot GPU) draws everything with its
 //! renderer, and clients, linux-dmabuf and the wl_display binding stay on it. Another GPU only
 //! scans out: the primary draws the frame of its monitors into a dmabuf and the other GPU shows
-//! it as one texture (`cross_gpu`), so those monitors are SDR only and have a software cursor.
-//! Those frames go through a copy, so a monitor on another GPU has no VRR and no content type.
+//! it as one texture (`cross_gpu`), so those monitors have a software cursor. Those frames go
+//! through a copy, so a monitor on another GPU has no VRR and no content type. HDR works there
+//! too: the primary codes the frame as PQ and it crosses in a 10-bit format.
 //! A GPU plugged in later is opened and lit like the others, one that is unplugged takes its
 //! monitors with it. The primary cannot go away: if it is unplugged jff stops. A connector
 //! name that two GPUs share (`DP-1`) is kept by the first one (the primary's) and the other is
@@ -983,8 +984,7 @@ impl Tty {
             sdr_white,
             ..OutputHdr::default()
         };
-        let Some(((dev, _), lit)) = self.outputs.iter().find(|(_, lit)| lit.output == *output)
-        else {
+        let Some((_, lit)) = self.outputs.iter().find(|(_, lit)| lit.output == *output) else {
             return OutputHdr {
                 reason: requested.then(|| "the monitor is not lit".to_string()),
                 ..base
@@ -994,8 +994,6 @@ impl Tty {
         let (Some(_), Some(plan)) = (&lit.hdr, lit.hdr_plan) else {
             let reason = if !requested {
                 None
-            } else if *dev != DeviceId::PRIMARY {
-                Some("the monitor is on a secondary GPU, which is SDR only".to_string())
             } else if let Status::Sdr(reason) = &lit.hdr_status {
                 Some(reason.to_string())
             } else {
@@ -1285,8 +1283,7 @@ impl Tty {
             let Some(mode) = pick_mode(&info, wanted.and_then(|c| c.mode)) else {
                 continue;
             };
-            // HDR needs the primary's own scanout path, a secondary's monitor is SDR only
-            let hdr_wanted = wanted.is_some_and(|c| c.hdr) && dev == DeviceId::PRIMARY;
+            let hdr_wanted = wanted.is_some_and(|c| c.hdr);
             match self
                 .outputs
                 .iter()
@@ -1363,8 +1360,7 @@ impl Tty {
                 tracing::warn!("no free CRTC for monitor {name}");
                 continue;
             };
-            let hdr_wanted =
-                config.output(&name).is_some_and(|c| c.hdr) && dev == DeviceId::PRIMARY;
+            let hdr_wanted = config.output(&name).is_some_and(|c| c.hdr);
             let transform = output_transform(config, &name);
             let scale = wanted_scale(config, &name);
             match self.light_up(dev, &info, &name, crtc, mode, transform, scale, hdr_wanted) {
@@ -1407,7 +1403,7 @@ impl Tty {
             drm_mode.vrefresh()
         );
         if via_primary {
-            tracing::info!("monitor {name}: on a secondary GPU, SDR only");
+            tracing::info!("monitor {name}: on a secondary GPU, the primary draws its frames");
         }
 
         let (pw, ph) = info.size().unwrap_or((0, 0));
@@ -1613,10 +1609,6 @@ impl Tty {
             ..
         } = &mut *self;
         for (&(dev, _), lit) in outputs.iter_mut() {
-            // a secondary GPU's monitors are SDR only, see `light_up`
-            if dev != DeviceId::PRIMARY {
-                continue;
-            }
             let Some(device) = pick_device(primary, secondary, dev) else {
                 continue;
             };
@@ -1672,6 +1664,10 @@ impl Tty {
             let status = if !output_config.is_some_and(|c| c.hdr) {
                 Status::Off
             } else {
+                // The frame of a monitor on another GPU crosses in a 10-bit format, which both GPUs have to take.
+                let crossable = dev == DeviceId::PRIMARY
+                    || secondary_renderer(secondary, dev)
+                        .is_some_and(|other| cross_gpu::hdr_crossable(renderer, other));
                 match hdr_target(
                     &lit.compositor,
                     lit.connector,
@@ -1682,6 +1678,7 @@ impl Tty {
                     Ok(_) if !hdr_frame::supported(renderer) => {
                         Status::Sdr(Unavailable::NoFloatTarget)
                     }
+                    Ok(_) if !crossable => Status::Sdr(Unavailable::NoCrossFormat),
                     Ok(plan) => {
                         let panel = lit
                             .edid
@@ -1774,6 +1771,25 @@ impl Tty {
                 .with_night([1.0; 3])
                 .with_content_peak(hdr.content_peak),
         ))
+    }
+
+    /// What the frame of `output` is drawn with while it is HDR: the working space, the final pass (without the content peak, that comes from the frame) and whether the pass is fitted to the content. For a monitor on another GPU, whose frame the primary draws. `None` while it is SDR.
+    pub fn hdr_settings(&self, output: &Output) -> Option<(WorkingSpace, FinalPass, bool)> {
+        let lit = self.outputs.values().find(|lit| lit.output == *output)?;
+        let hdr = lit.hdr.as_ref()?;
+        Some((hdr.space, hdr.pass, hdr.content_metadata))
+    }
+
+    /// Remember the content peak the last frame of `output` was fitted to, where screenshots and `jff msg` read it.
+    pub fn set_hdr_content_peak(&mut self, output: &Output, peak: Option<f32>) {
+        let hdr = self
+            .outputs
+            .values_mut()
+            .find(|lit| lit.output == *output)
+            .and_then(|lit| lit.hdr.as_mut());
+        if let Some(hdr) = hdr {
+            hdr.content_peak = peak;
+        }
     }
 
     /// What clients are told about each monitor drawn in HDR: PQ in BT.2020 up to its peak (the EDID's or `hdr-peak`), with SDR white at its configured level.
@@ -3160,12 +3176,22 @@ impl JffState {
             return;
         };
 
-        // After a VT switch `reset_state` read back what the other VT left on the connector: SDR
-        // is signalled again with the next frame, as on the primary.
+        // The signalling goes out with the next frame, as on the primary: HDR when the monitor
+        // is, and after a VT switch `reset_state` read back what the other VT left on the
+        // connector, so SDR again.
         if lit.color_dirty {
             lit.color_dirty = false;
             if let Err(err) = lit.compositor.use_color_state(lit.color_target) {
-                tracing::warn!("monitor {}: cannot signal SDR: {err}", lit.output.name());
+                tracing::warn!(
+                    "monitor {}: cannot signal HDR, back to SDR: {err}",
+                    lit.output.name()
+                );
+                lit.color_target = ConnectorColorState::default();
+                lit.hdr = None;
+                lit.hdr_plan = None;
+                lit.hdr_content = (None, None);
+                lit.hdr_status = Status::Sdr(Unavailable::SignalRejected);
+                let _ = lit.compositor.use_color_state(lit.color_target);
             }
         }
 

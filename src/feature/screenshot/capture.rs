@@ -338,6 +338,68 @@ fn render_to_dmabuf<E: RenderElement<GlesRenderer>>(
     Ok(())
 }
 
+/// How the frame of an HDR monitor on another GPU is drawn, see [`JffState::draw_output_for_scanout`].
+pub struct CrossHdr<'a> {
+    pub space: WorkingSpace,
+    /// The settings of the monitor, without the content peak that the frame works out.
+    pub pass: FinalPass,
+    /// The roll-off is fitted to the peak the visible surfaces state.
+    pub content_metadata: bool,
+    /// The texture that is composited into, made again when it no longer fits the monitor.
+    pub frame: &'a mut Option<hdr_frame::HdrFrame>,
+}
+
+/// The HDR part of [`JffState::draw_output_for_scanout`]: composite `frame` in the working space,
+/// then draw the final pass over it into `dmabuf`. `tracker` only decides what changed in the
+/// buffer, the damage of the composite is what the final pass element carries.
+#[allow(clippy::too_many_arguments)]
+fn draw_hdr_for_scanout(
+    renderer: &mut GlesRenderer,
+    output: &Output,
+    dmabuf: &mut Dmabuf,
+    tracker: &mut OutputDamageTracker,
+    age: usize,
+    frame: OutputFrame,
+    hdr: CrossHdr<'_>,
+    background: [f32; 4],
+) -> Result<(bool, RenderElementStates), String> {
+    let CrossHdr {
+        space,
+        pass,
+        frame: slot,
+        ..
+    } = hdr;
+    let linear = hdr_frame::linearize(&mut *renderer, frame.elements, space);
+    let lights = gamut::take_content_light();
+    if !slot.as_ref().is_some_and(|f| f.fits(output, &pass)) {
+        *slot = Some(hdr_frame::HdrFrame::new(&mut *renderer, output, pass)?);
+    }
+    let clear = hdr_frame::clear_color(space, background);
+    let rendered = slot
+        .as_mut()
+        .map(|f| f.render(&mut *renderer, &linear, clear, &lights));
+    let (element, states) = match rendered {
+        Some(Ok(done)) => done,
+        Some(Err(err)) => {
+            *slot = None;
+            return Err(format!("could not draw the HDR frame: {err:?}"));
+        }
+        None => return Err("no HDR frame to draw into".to_string()),
+    };
+    let mut target = renderer
+        .bind(dmabuf)
+        .map_err(|err| format!("could not draw into the buffer: {err:?}"))?;
+    let result = tracker
+        .render_output(renderer, &mut target, age, &[element], [0.0; 4])
+        .map_err(|err| format!("could not render the frame: {err:?}"))?;
+    let changed = result.damage.is_some_and(|damage| !damage.is_empty());
+    if changed {
+        // the other GPU reads this next: it has to be done
+        let _ = result.sync.wait();
+    }
+    Ok((changed, states))
+}
+
 /// Render `elements` (already in the working space) into a new float texture of `size` and
 /// hand the texture over, for a final pass to draw from.
 fn render_to_working_texture(
@@ -527,14 +589,21 @@ impl JffState {
     }
 
     /// Draw `output` as its monitor shows it into `dmabuf`, for a monitor on a GPU that only scans out.
+    /// `hdr` is how, when that monitor is HDR: the frame is then composited in the working space and
+    /// what lands in `dmabuf` is the PQ signal, as the screen of a monitor on the primary gets.
     pub(crate) fn draw_output_for_scanout(
         &mut self,
         output: &Output,
         dmabuf: &mut Dmabuf,
         tracker: &mut OutputDamageTracker,
         age: usize,
+        hdr: Option<CrossHdr<'_>>,
     ) -> Result<(bool, RenderElementStates), String> {
         let locked = self.session_lock.is_locked();
+        let space = hdr.as_ref().map(|hdr| hdr.space);
+        // The surfaces drawn below say how bright their content gets, for the final pass.
+        let _light_scope =
+            gamut::collect_content_light(hdr.as_ref().is_some_and(|hdr| hdr.content_metadata));
         let pointer: Point<f64, Logical> = self
             .seat
             .get_pointer()
@@ -547,11 +616,16 @@ impl JffState {
             let scale = Scale::from(scale_factor);
             let rect = output_rect(output);
             let origin: Point<i32, Logical> = (rect.0, rect.1).into();
-            let color_scope = gamut::enter(crate::protocol::color_management::output_color(
+            let color = crate::protocol::color_management::output_color(
                 &self.config,
                 &self.color_management,
                 &output.name(),
-            ));
+            );
+            let color = match space {
+                Some(space) => Some(crate::protocol::color_management::hdr_color(color, space)),
+                None => color,
+            };
+            let color_scope = gamut::enter(color);
             let near = layout::contains(layout::grow(rect, CURSOR_MARGIN), (pointer.x, pointer.y));
             let cursor = near.then(|| self.cursor.render_cursor());
             let millis = self.start_time.elapsed().as_millis() as u32;
@@ -580,7 +654,7 @@ impl JffState {
                 _color_scope: color_scope,
             }
         } else {
-            self.output_frame(output, true, None, true)?
+            self.output_frame(output, true, space, true)?
         };
         // TODO: the stats overlay is not drawn on a monitor of another GPU yet. It needs the
         // snapshot `render_crtc` stores from what the output compositor did, which a monitor
@@ -605,6 +679,9 @@ impl JffState {
             BACKGROUND
         };
         let renderer = self.backend.renderer();
+        if let Some(hdr) = hdr {
+            return draw_hdr_for_scanout(renderer, output, dmabuf, tracker, age, frame, hdr, clear);
+        }
         let mut target = renderer
             .bind(dmabuf)
             .map_err(|err| format!("could not draw into the buffer: {err:?}"))?;

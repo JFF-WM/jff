@@ -37,7 +37,7 @@
 //! never converted, so it can still be scanned out) and `color-management "off"` inside an
 //! `output` (that monitor is not managed): surfaces a client tagged with another gamut or curve
 //! than the monitor's are converted to it, and with `convert-srgb` the untagged ones too.
-//! `hdr` inside an `output` signals that monitor as HDR10 (PQ, BT.2020) when its EDID and the connector allow it, and is off by default.
+//! `hdr` inside an `output` signals that monitor as HDR10 (PQ, BT.2020) when its EDID and the connector allow it, and is off by default. On a monitor of a secondary GPU the primary draws and codes the frame, which crosses in a 10-bit format, so it also needs a 10-bit format that both GPUs take.
 //! `sdr-white` sets the luminance in cd/m² that SDR white is shown at on an HDR monitor (203 by default, 10 to 1000).
 //! `hdr-peak` replaces the peak luminance the EDID states (100 to 10000 cd/m²): the frame is mapped to it and it is what the monitor is told and what clients are told.
 //! `hdr-contrast` sets the contrast of an HDR monitor around SDR white (0.5 to 2.0, 1.0 by default): above 1.0 darks go down and highlights go up, under 1.0 the picture is flatter. SDR white stays where `sdr-white` puts it, and the roll-off under the peak still applies after it.

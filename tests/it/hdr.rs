@@ -264,6 +264,7 @@ fn only_hdr10_can_have_little_headroom() {
 #[test]
 fn the_runtime_reasons_have_messages() {
     assert!(Unavailable::NoFloatTarget.to_string().contains("float"));
+    assert!(Unavailable::NoCrossFormat.to_string().contains("10-bit"));
 }
 
 #[test]
