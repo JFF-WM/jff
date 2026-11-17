@@ -1,11 +1,14 @@
 # jff
 
-A hybrid tiling-and-stacking Wayland compositor that started as "just for fun" and kept growing:
-real HDR, tiling when you want it, touchscreens and gestures that just work, and
-rules that decide what every app does the moment it opens. Written in Rust,
-built on [Smithay](https://github.com/Smithay/smithay). GPL-3.0-or-later.
-
-![jff](resources/jff.svg)
+<table>
+  <tr>
+    <td><img src="resources/jff.svg" width="200"></td>
+    <td align="center">
+      A hybrid tiling-and-stacking Wayland compositor that started as
+      "just for fun" and kept growing.
+    </td>
+  </tr>
+</table>
 
 ## What it does
 
