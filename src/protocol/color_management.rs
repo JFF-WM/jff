@@ -325,6 +325,21 @@ impl ColorManagement {
         self.profiled.contains_key(name)
     }
 
+    /// The preferred description of a capture (`xx-image-capture-color-management-v1`) of the
+    /// monitor `output`, `None` for a window: what the picture holds, see
+    /// `primitives/capture_color.rs`. It is the monitor's own description (and identity) while it
+    /// is in HDR mode, plain sRGB otherwise.
+    pub fn capture_preferred(&self, output: Option<&str>) -> Arc<Described> {
+        output
+            .and_then(|name| self.hdr.get(name))
+            .filter(|told| {
+                crate::primitives::capture_color::preferred(Some(told.description))
+                    == told.description
+            })
+            .unwrap_or(&self.plain)
+            .clone()
+    }
+
     /// A client's description with a number of its own. `None` when the numbers ran out.
     fn describe(&mut self, description: ImageDescription) -> Option<Arc<Described>> {
         let identity = self.identities.next()?;
@@ -443,6 +458,12 @@ impl ImageDescriptionData {
             allows_info: false,
         }
     }
+}
+
+/// The description behind a `wp_image_description_v1`, `None` when it failed (or is not one of
+/// ours): what another protocol can use it for.
+pub(crate) fn ready_description(object: &WpImageDescriptionV1) -> Option<Arc<Described>> {
+    object.data::<ImageDescriptionData>()?.described.clone()
 }
 
 /// One `wp_image_description_reference_v1` (version 2): a handle on an image description that

@@ -167,6 +167,7 @@ pub fn run() -> anyhow::Result<()> {
             // `done` of an information object destroys it, so it can't go out mid-request.
             crate::protocol::color_management::flush_pending_info(state);
             crate::protocol::color_management::refresh_feedbacks(state);
+            state.refresh_capture_colors();
             // a commit, a request that moved a window, a new client...
             state.queue_redraw_all();
             Ok(PostAction::Continue)
@@ -274,6 +275,7 @@ pub fn run() -> anyhow::Result<()> {
         state.publish_foreign_toplevels();
         state.publish_ext_foreign_toplevels();
         state.publish_ext_workspaces();
+        state.refresh_capture_colors();
         state.service_image_copy();
         state.service_wlr_screencopy();
         // Last, so the frame is made from the state the steps above settled. A monitor draws

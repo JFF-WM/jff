@@ -36,6 +36,8 @@ pub mod workspace;
 pub mod xdg_session_bindings;
 pub mod xx_hotkey;
 pub mod xx_hotkey_bindings;
+pub mod xx_image_capture_color_management;
+pub mod xx_image_capture_color_management_bindings;
 pub mod xx_session_bindings;
 pub mod xx_zones;
 pub mod xx_zones_bindings;

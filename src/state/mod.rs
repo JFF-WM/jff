@@ -102,6 +102,7 @@ use crate::input::grabs::resize::ResizeGrab;
 use crate::primitives::geom;
 use crate::primitives::layout;
 use crate::protocol::color_management::ColorManagement;
+use crate::protocol::xx_image_capture_color_management::XxImageCaptureColor;
 use crate::protocol::color_representation::ColorRepresentationManager;
 use crate::protocol::ext_foreign_toplevel::ExtForeignToplevel;
 use crate::protocol::fixes::Fixes;
@@ -338,6 +339,9 @@ pub struct JffState {
     /// wp-color-management: image descriptions of surfaces and outputs, and what each monitor
     /// shows (`protocol/color_management.rs`).
     pub color_management: ColorManagement,
+    /// xx-image-capture-color-management-v1: the colors of a capture, and the description of a
+    /// frame (`protocol/xx_image_capture_color_management.rs`).
+    pub xx_capture_color: XxImageCaptureColor,
     /// State of the `wlr-layer-shell` protocol (panels, launchers, wallpapers).
     pub layer_shell_state: WlrLayerShellState,
     /// The id the next window gets (see `ipc.rs`).
@@ -583,6 +587,8 @@ impl JffState {
         let color_representation_manager = ColorRepresentationManager::new(&display_handle);
         let color_management =
             ColorManagement::new(&display_handle, !config.color_management().off);
+        let xx_capture_color =
+            XxImageCaptureColor::new(&display_handle, !config.color_management().off);
 
         // wlr-layer-shell: lets bars, launchers, wallpapers, and notification daemons place
         // themselves on a monitor. Not for sandboxed apps: a layer surface draws above every
@@ -699,6 +705,7 @@ impl JffState {
             transient_seats,
             color_representation_manager,
             color_management,
+            xx_capture_color,
             layer_shell_state,
             next_window_id: 1,
             subscribers: Vec::new(),

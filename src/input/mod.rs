@@ -1148,6 +1148,8 @@ impl JffState {
                 let offered = !self.config.color_management().off;
                 self.color_management
                     .set_enabled(&self.display_handle, offered);
+                self.xx_capture_color
+                    .set_enabled(&self.display_handle, offered);
                 self.apply_keyboard_config(&old_keyboard);
                 if *self.config.input() != old_input {
                     self.apply_input_config();

@@ -5,6 +5,7 @@ mod app_index;
 mod app_restore;
 mod app_search;
 mod border;
+mod capture_color;
 mod color_management;
 mod color_management_versions;
 mod color_names;

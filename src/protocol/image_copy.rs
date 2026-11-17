@@ -70,11 +70,15 @@ use smithay::wayland::image_copy_capture::{
 };
 use smithay::wayland::shm::{with_buffer_contents, with_buffer_contents_mut};
 
+use std::sync::Arc;
+
 use crate::app::Backend;
 use crate::feature::outputs::frame_size;
 use crate::feature::screenshot::{Captured, HdrCaptured};
 use crate::ipc::WindowId;
+use crate::primitives::capture_color::frame_description_fits;
 use crate::primitives::hdr_capture::{pack_row_2101010, pq_picture};
+use crate::protocol::color_management::Described;
 use crate::protocol::presentation::monotonic_now;
 use crate::state::{is_sandboxed, JffState};
 
@@ -392,7 +396,28 @@ fn write_hdr_shm(buffer: &WlBuffer, picture: &HdrCaptured, red_high: bool) -> Re
     })
 }
 
+/// Whether a picture that is HDR (`hdr_picture`) or not can be said to be what `wanted` describes
+/// (`xx-image-capture-color-management-v1`). A frame nobody described always can.
+fn description_fits(wanted: Option<&Described>, hdr_picture: bool) -> bool {
+    wanted.map_or(true, |wanted| {
+        frame_description_fits(&wanted.description, hdr_picture)
+    })
+}
+
 impl JffState {
+    /// The preferred description of a capture of `source` (`xx-image-capture-color-management-v1`),
+    /// `None` when the monitor or window is gone.
+    pub(crate) fn capture_source_preferred(
+        &self,
+        source: &ImageCaptureSource,
+    ) -> Option<Arc<Described>> {
+        let name = match self.source_target(source)? {
+            Target::Output(output) => Some(output.name()),
+            Target::Window(_) => None,
+        };
+        Some(self.color_management.capture_preferred(name.as_deref()))
+    }
+
     /// The monitor or window a capture source stands for, if it's still there.
     fn source_target(&self, source: &ImageCaptureSource) -> Option<Target> {
         if let Some(weak) = source.user_data().get::<WeakOutput>() {
@@ -471,6 +496,7 @@ impl JffState {
         entry: &mut CaptureSession,
         target: &Target,
         frame: Frame,
+        wanted: Option<Arc<Described>>,
         mut dmabuf: Dmabuf,
     ) -> bool {
         let Target::Output(output) = target else {
@@ -485,6 +511,11 @@ impl JffState {
             || (ten_bit && self.hdr_capture(output).is_some());
         if !allowed {
             frame.fail(CaptureFailureReason::BufferConstraints);
+            return true;
+        }
+        if !description_fits(wanted.as_deref(), ten_bit) {
+            tracing::warn!("image-copy-capture: the frame's image description is not what it is drawn as");
+            frame.fail(CaptureFailureReason::Unknown);
             return true;
         }
         let seen = Seen::Output(self.image_copy.drawn_count(&output.name()));
@@ -591,8 +622,10 @@ impl JffState {
             return true;
         };
         let buffer = frame.buffer();
+        // What the client said its frame is (`xx-image-capture-color-management-v1`).
+        let wanted = self.xx_capture_color.description_of(&frame);
         if let Some(dmabuf) = get_dmabuf(&buffer).ok().cloned() {
-            return self.service_dmabuf_frame(entry, &target, frame, dmabuf);
+            return self.service_dmabuf_frame(entry, &target, frame, wanted, dmabuf);
         }
         let format = buffer_format(&buffer);
         let ten_bit = format.and_then(hdr_layout);
@@ -608,6 +641,13 @@ impl JffState {
             (_, None) => format
                 .is_some_and(|f| !matches!(f, wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888)),
         };
+        // Nothing converts a picture to another description: the one the client asked for has to
+        // be what the buffer's format gets drawn as.
+        if !bad_format && !description_fits(wanted.as_deref(), ten_bit.is_some()) {
+            tracing::warn!("image-copy-capture: the frame's image description is not what it is drawn as");
+            frame.fail(CaptureFailureReason::Unknown);
+            return true;
+        }
         let shm_last = matches!(entry.last, Some(Last::Sdr(_) | Last::Hdr(_)));
         if !bad_format && shm_last && entry.seen.as_ref() == Some(&seen) {
             entry.pending = Some(frame);
@@ -746,6 +786,8 @@ impl ImageCopyCaptureHandler for JffState {
     }
 
     fn frame(&mut self, session: &SessionRef, frame: Frame) {
+        // From now on the frame's image description can't be set any more.
+        self.xx_capture_color.frame_captured(&frame);
         let Some(entry) = self
             .image_copy
             .sessions
