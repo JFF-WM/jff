@@ -554,6 +554,8 @@ pub enum Why {
     ToastOver,
     /// HDR output: the check says why (see `hdr_scanout::Decline`).
     Hdr(String),
+    /// The monitor is on another GPU: its frame is drawn on the primary and copied across.
+    OtherGpu,
     /// Everything allowed it and the plane still did not take the buffer.
     PlaneRefused,
 }
@@ -573,6 +575,10 @@ impl Why {
             Self::PopupOver => "a popup is over it".into(),
             Self::ToastOver => "a toast is over it".into(),
             Self::Hdr(text) => text.clone(),
+            Self::OtherGpu => {
+                "the monitor is on another GPU, its frame is drawn on the primary and copied across"
+                    .into()
+            }
             Self::PlaneRefused => {
                 "the GPU's plane refused the buffer (format, modifier or size)".into()
             }

@@ -28,16 +28,19 @@ use smithay::backend::renderer::element::memory::{
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::{with_renderer_surface_state, CommitCounter};
-use smithay::desktop::Window;
+use smithay::desktop::{layer_map_for_output, Window};
+use smithay::output::Output;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Physical, Point, Transform};
 
+use crate::desk::Desk;
 use crate::feature::osd::{
     draw_text, elide, half_line, over, sd_round_box, text_width, Fonts, Picture, Pixel,
 };
+use crate::primitives::layout::{self, Rect};
 use crate::primitives::stats::{
     budget_of, commit_latency, drift_ms, missed_vblank, Costs, FrameCost, Latencies, Presented,
     Section, Snapshot, Syncs, Ticks, Tone,
@@ -275,7 +278,7 @@ impl StatsOverlay {
 
     /// A frame was queued on `output`. It carries something new of the window if the window
     /// committed since the last frame. `predicted` is the vblank it was drawn for and `refresh`
-    /// the monitor's interval; `predicted` is `None` when there is no vblank to miss.
+    /// the monitor's interval, `predicted` is `None` when there is no vblank to miss.
     pub fn note_queued(&mut self, output: &str, predicted: Option<Duration>, refresh: Duration) {
         if output != self.output {
             return;
@@ -580,6 +583,34 @@ pub fn window_facts(window: &Window) -> Option<(WlSurface, WindowFacts)> {
         window_size: (size.w, size.h),
     };
     Some((surface, facts))
+}
+
+/// The window the overlay follows on the monitor at `rect`: the focused one, when its middle is on that monitor.
+pub fn followed_window(
+    focused: Option<&Window>,
+    desk: &Desk<Window>,
+    rect: Rect,
+) -> Option<(WlSurface, WindowFacts)> {
+    focused
+        .filter(|window| {
+            desk.pos_of(|w| w == *window).is_some_and(|pos| {
+                let size = window.geometry().size;
+                let center = (f64::from(pos.0 + size.w / 2), f64::from(pos.1 + size.h / 2));
+                layout::contains(rect, center)
+            })
+        })
+        .and_then(window_facts)
+}
+
+/// Where the overlay goes on `output` (at `rect`): x, y and width of the area it sits at the top right of. A window that is not fullscreen keeps it clear of panels.
+pub fn overlay_inset(output: &Output, win: &WindowFacts, rect: Rect) -> (i32, i32, i32) {
+    if !win.fullscreen {
+        let zone = layer_map_for_output(output).non_exclusive_zone();
+        if zone.size.w > 0 && zone.size.h > 0 {
+            return (zone.loc.x, zone.loc.y, zone.size.w);
+        }
+    }
+    (0, 0, rect.2)
 }
 
 impl JffState {

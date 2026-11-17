@@ -320,6 +320,76 @@ fn surface_scanout_facts(surface: &WlSurface) -> (Option<ImageDescription>, Opti
     (tag, format)
 }
 
+/// What the stats overlay and `jff msg stats` report about the window `surface` on the monitor
+/// `lit`. `path` is how its frame reached the screen, the rest is what the monitor does with it.
+fn stats_snapshot(
+    surface: &WlSurface,
+    win: &crate::feature::stats::WindowFacts,
+    lit: &TtyOutput,
+    config: &Config,
+    path: nerd::Path,
+    scanout_without_overlay: Option<bool>,
+    async_flip: bool,
+) -> nerd::Snapshot {
+    let (color, format) = surface_scanout_facts(surface);
+    let buffer = match format {
+        Some(code) => nerd::BufferKind::Dmabuf(
+            code,
+            surface_buffer_modifier(surface).unwrap_or(nerd::MODIFIER_INVALID),
+        ),
+        None if crate::protocol::layer_shell::is_mapped(surface) => nerd::BufferKind::Shm,
+        None => nerd::BufferKind::None,
+    };
+    // a client-drawn shadow makes the sizes differ, so only a fullscreen window is compared
+    let buffer_size = if win.fullscreen {
+        smithay::backend::renderer::utils::with_renderer_surface_state(surface, |state| {
+            state.buffer_size()
+        })
+        .flatten()
+        .map(|size| (size.w, size.h))
+    } else {
+        None
+    };
+    nerd::Snapshot {
+        app_id: win.app_id.clone(),
+        output: lit.output.name(),
+        mode: lit
+            .output
+            .current_mode()
+            .map(|mode| (mode.size.w, mode.size.h, mode.refresh)),
+        client: None,
+        shown: None,
+        display_hz: 0.0,
+        cost: None,
+        sync: None,
+        latency: None,
+        fullscreen: win.fullscreen,
+        wants_tearing: win.wants_tearing,
+        says_game: win.says_game,
+        client_sync: crate::protocol::presentation::surface_sync_use(surface),
+        buffer,
+        buffer_size,
+        window_size: win.window_size,
+        color,
+        allow_tearing: config.allow_tearing(),
+        vrr_policy: match lit.vrr_mode {
+            Vrr::Off => "off",
+            Vrr::Fullscreen => "fullscreen",
+            Vrr::Always => "always",
+        },
+        path,
+        scanout_without_overlay,
+        vrr: match lit.vrr_support {
+            VrrSupport::NotSupported => nerd::Vrr::Unsupported,
+            _ if lit.vrr_on => nerd::Vrr::On,
+            _ => nerd::Vrr::Off,
+        },
+        hdr_output: lit.hdr.is_some(),
+        content_game: lit.content_game,
+        async_flip,
+    }
+}
+
 /// The format modifier of the surface's dmabuf, `None` when it is not one.
 fn surface_buffer_modifier(surface: &WlSurface) -> Option<u64> {
     smithay::backend::renderer::utils::with_renderer_surface_state(surface, |state| {
@@ -2468,16 +2538,7 @@ impl JffState {
         let frozen = self.screenshot.as_ref().filter(|ui| ui.shows(&lit.output));
         // The stats overlay follows the window the user works in, on the monitor that has it.
         let nerd_window = if self.stats.active() {
-            self.focused_window
-                .as_ref()
-                .filter(|window| {
-                    self.desk.pos_of(|w| w == *window).is_some_and(|pos| {
-                        let size = window.geometry().size;
-                        let center = (f64::from(pos.0 + size.w / 2), f64::from(pos.1 + size.h / 2));
-                        layout::contains(rect, center)
-                    })
-                })
-                .and_then(crate::feature::stats::window_facts)
+            crate::feature::stats::followed_window(self.focused_window.as_ref(), &self.desk, rect)
         } else {
             None
         };
@@ -2777,15 +2838,8 @@ impl JffState {
         // the stats overlay, above the toasts
         if nerd_overlay {
             let inset = match &nerd_window {
-                Some((_, win)) if !win.fullscreen => {
-                    let zone = layer_map_for_output(&lit.output).non_exclusive_zone();
-                    if zone.size.w > 0 && zone.size.h > 0 {
-                        (zone.loc.x, zone.loc.y, zone.size.w)
-                    } else {
-                        (0, 0, rect.2)
-                    }
-                }
-                _ => (0, 0, rect.2),
+                Some((_, win)) => crate::feature::stats::overlay_inset(&lit.output, win, rect),
+                None => (0, 0, rect.2),
             };
             let fonts = self.osd.fonts();
             if let Some(element) = self.stats.element(&mut *renderer, fonts, inset) {
@@ -3017,28 +3071,6 @@ impl JffState {
                 );
             }
             if self.stats.due(std::time::Instant::now()) {
-                let (color, format) = surface_scanout_facts(surface);
-                let buffer = match format {
-                    Some(code) => nerd::BufferKind::Dmabuf(
-                        code,
-                        surface_buffer_modifier(surface).unwrap_or(nerd::MODIFIER_INVALID),
-                    ),
-                    None if crate::protocol::layer_shell::is_mapped(surface) => {
-                        nerd::BufferKind::Shm
-                    }
-                    None => nerd::BufferKind::None,
-                };
-                // a client-drawn shadow makes the sizes differ, so only a fullscreen window is compared
-                let buffer_size = if win.fullscreen {
-                    smithay::backend::renderer::utils::with_renderer_surface_state(
-                        surface,
-                        |state| state.buffer_size(),
-                    )
-                    .flatten()
-                    .map(|size| (size.w, size.h))
-                } else {
-                    None
-                };
                 let path = if lit.scanning_out {
                     nerd::Path::Direct
                 } else {
@@ -3064,44 +3096,8 @@ impl JffState {
                         nerd::Why::PlaneRefused
                     })
                 };
-                let snapshot = nerd::Snapshot {
-                    app_id: win.app_id.clone(),
-                    output: lit.output.name(),
-                    mode: lit
-                        .output
-                        .current_mode()
-                        .map(|mode| (mode.size.w, mode.size.h, mode.refresh)),
-                    client: None,
-                    shown: None,
-                    display_hz: 0.0,
-                    cost: None,
-                    sync: None,
-                    latency: None,
-                    fullscreen: win.fullscreen,
-                    wants_tearing: win.wants_tearing,
-                    says_game: win.says_game,
-                    client_sync: crate::protocol::presentation::surface_sync_use(surface),
-                    buffer,
-                    buffer_size,
-                    window_size: win.window_size,
-                    color,
-                    allow_tearing: self.config.allow_tearing(),
-                    vrr_policy: match lit.vrr_mode {
-                        Vrr::Off => "off",
-                        Vrr::Fullscreen => "fullscreen",
-                        Vrr::Always => "always",
-                    },
-                    path,
-                    scanout_without_overlay: nerd_alt,
-                    vrr: match lit.vrr_support {
-                        VrrSupport::NotSupported => nerd::Vrr::Unsupported,
-                        _ if lit.vrr_on => nerd::Vrr::On,
-                        _ => nerd::Vrr::Off,
-                    },
-                    hdr_output: lit.hdr.is_some(),
-                    content_game: lit.content_game,
-                    async_flip: nerd_async,
-                };
+                let snapshot =
+                    stats_snapshot(surface, win, lit, &self.config, path, nerd_alt, nerd_async);
                 self.stats.store(
                     snapshot,
                     std::time::Instant::now(),
@@ -3145,6 +3141,8 @@ impl JffState {
 
     /// Draw one frame to a monitor on a secondary GPU: the primary draws it, the secondary shows it.
     fn render_secondary_crtc(&mut self, dev: DeviceId, crtc: crtc::Handle) {
+        // Where the cost of this frame is counted from (stats for nerds).
+        let cost_from = std::time::Instant::now();
         let Backend::Tty(tty) = &mut self.backend else {
             return;
         };
@@ -3156,6 +3154,15 @@ impl JffState {
         self.release_commit_timers(&output, presented_at);
         // the primary draws the monitor's frame into a buffer the secondary can read
         self.update_cross_frame(dev, crtc, &output);
+        let stats_window = if self.stats.active() {
+            crate::feature::stats::followed_window(
+                self.focused_window.as_ref(),
+                &self.desk,
+                output_rect(&output),
+            )
+        } else {
+            None
+        };
 
         let Backend::Tty(tty) = &mut self.backend else {
             return;
@@ -3275,6 +3282,41 @@ impl JffState {
                 }
             }
             Err(err) => tracing::warn!("error rendering frame: {err}"),
+        }
+
+        // Stats for nerds, as `render_crtc` keeps them. A monitor on another GPU is always
+        // composited, and the overlay says why.
+        if let Some((surface, win)) = &stats_window {
+            if queued {
+                let name = output.name();
+                let refresh = lit.refresh();
+                let predicted = nerd::countable_prediction(lit.last_vblank, presented_at, refresh);
+                self.stats.note_queued(&name, predicted, refresh);
+                self.stats.note_cost(
+                    &name,
+                    crate::protocol::presentation::monotonic_now(),
+                    nerd::FrameCost {
+                        cpu: cost_from.elapsed(),
+                        gpu_wait: None,
+                    },
+                );
+            }
+            if self.stats.due(std::time::Instant::now()) {
+                let snapshot = stats_snapshot(
+                    surface,
+                    win,
+                    lit,
+                    &self.config,
+                    nerd::Path::Composited(nerd::Why::OtherGpu),
+                    None,
+                    false,
+                );
+                self.stats.store(
+                    snapshot,
+                    std::time::Instant::now(),
+                    crate::protocol::presentation::monotonic_now(),
+                );
+            }
         }
 
         if queued {

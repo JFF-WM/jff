@@ -53,6 +53,7 @@ use smithay::input::pointer::{
 };
 use smithay::input::SeatHandler;
 use smithay::output::Output;
+use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{
     Buffer as BufferCoords, Logical, Physical, Point, Rectangle, Scale, Serial, Size, Transform,
     SERIAL_COUNTER,
@@ -65,6 +66,7 @@ use crate::feature::screenshot::area::{
     crop_channels, crop_rgba, flip_rows, physical_rect, screenshot_dir, Selector,
 };
 use crate::feature::screenshot::save::{notify, spawn_save, spawn_save_hdr, HdrSaveJob, SaveJob};
+use crate::feature::stats;
 use crate::feature::window_anim::OpenFrame;
 use crate::input::BTN_LEFT;
 use crate::primitives::hdr::OutputEotf;
@@ -588,6 +590,29 @@ impl JffState {
         Ok(size)
     }
 
+    /// The stats overlay of a monitor on another GPU, drawn on the primary with the rest of its frame. `None` when it is off, follows a window of another monitor, or the picture under it is not the window's (the lock screen, the overview, a frozen screenshot).
+    fn stats_overlay_for(&mut self, output: &Output, locked: bool) -> Option<JffElement> {
+        if locked || !self.stats.active() {
+            return None;
+        }
+        let rect = output_rect(output);
+        let (surface, win) =
+            stats::followed_window(self.focused_window.as_ref(), &self.desk, rect)?;
+        self.stats
+            .follow(surface.id().protocol_id(), &output.name());
+        let covered = self.screenshot.as_ref().is_some_and(|ui| ui.shows(output))
+            || self
+                .overview
+                .as_ref()
+                .is_some_and(|ov| ov.output == *output);
+        if covered || !self.stats.drawn() {
+            return None;
+        }
+        let inset = stats::overlay_inset(output, &win, rect);
+        let fonts = self.osd.fonts();
+        self.stats.element(self.backend.renderer(), fonts, inset)
+    }
+
     /// Draw `output` as its monitor shows it into `dmabuf`, for a monitor on a GPU that only scans out.
     /// `hdr` is how, when that monitor is HDR: the frame is then composited in the working space and
     /// what lands in `dmabuf` is the PQ signal, as the screen of a monitor on the primary gets.
@@ -656,14 +681,15 @@ impl JffState {
         } else {
             self.output_frame(output, true, space, true)?
         };
-        // TODO: the stats overlay is not drawn on a monitor of another GPU yet. It needs the
-        // snapshot `render_crtc` stores from what the output compositor did, which a monitor
-        // shown through a copy has no equivalent of.
         if !locked && !self.osd.is_empty() {
             let mut toasts = Vec::new();
             self.osd
                 .elements(self.backend.renderer(), output, pointer, &mut toasts);
             frame.elements.splice(0..0, toasts);
+        }
+        // The stats overlay, above the toasts. `render_secondary_crtc` keeps its numbers.
+        if let Some(element) = self.stats_overlay_for(output, locked) {
+            frame.elements.insert(0, element);
         }
 
         let size = dmabuf.size();
