@@ -3,7 +3,8 @@
 use smithay::input::keyboard::{Keysym, ModifiersState};
 
 use jff_wm::protocol::xx_hotkey::{
-    is_aux_button, mods_of, mods_state, permitted, Spec, Trigger, ALT, CTRL, SHIFT, SUPER,
+    button_name, is_aux_button, modifier_names, mods_of, mods_state, permitted, HotkeyInfo, Spec,
+    Trigger, ALT, CTRL, SHIFT, SUPER,
 };
 
 const BTN_LEFT: u32 = 0x110;
@@ -123,4 +124,66 @@ fn buttons_need_a_modifier_unless_auxiliary() {
     assert!(permitted(&button(BTN_SIDE, 0)));
     assert!(permitted(&button(BTN_TASK, 0)));
     assert!(is_aux_button(0x116) && !is_aux_button(0x112) && !is_aux_button(0x118));
+}
+
+#[test]
+fn a_trigger_is_described_the_way_a_binding_writes_it() {
+    assert_eq!(key(Keysym::b, SUPER | SHIFT).describe(), "Shift+Super+b");
+    assert_eq!(key(Keysym::F5, 0).describe(), "F5");
+    assert_eq!(key(Keysym::Super_L, 0).describe(), "Super_L");
+    assert_eq!(
+        key(Keysym::a, CTRL | ALT | SHIFT | SUPER).describe(),
+        "Ctrl+Alt+Shift+Super+a"
+    );
+    assert_eq!(button(BTN_SIDE, 0).describe(), "BTN_SIDE");
+    assert_eq!(button(BTN_LEFT, CTRL).describe(), "Ctrl+BTN_LEFT");
+}
+
+#[test]
+fn modifier_and_button_names() {
+    assert!(modifier_names(0).is_empty());
+    assert_eq!(modifier_names(SUPER | CTRL), ["Ctrl", "Super"]);
+    assert_eq!(button_name(BTN_TASK), "BTN_TASK");
+    assert_eq!(button_name(0x2a0), "button 0x2a0");
+}
+
+#[test]
+fn a_hotkey_is_listed_as_json() {
+    let info = HotkeyInfo {
+        app_id: Some("org.example.ptt".to_string()),
+        description: "Push \"to\" talk".to_string(),
+        spec: key(Keysym::F5, CTRL),
+        seat: None,
+        held: true,
+    };
+    assert_eq!(
+        info.to_json(),
+        format!(
+            "{{\"app_id\":\"org.example.ptt\",\"description\":\"Push \\\"to\\\" talk\",\"trigger\":\"Ctrl+F5\",\"kind\":\"key\",\"code\":{},\"modifiers\":[\"ctrl\"],\"tap\":false,\"seat\":null,\"held\":true}}",
+            Keysym::F5.raw()
+        )
+    );
+}
+
+#[test]
+fn a_button_tap_and_an_unnamed_client_are_listed() {
+    let button_info = HotkeyInfo {
+        app_id: None,
+        description: String::new(),
+        spec: button(BTN_SIDE, 0),
+        seat: Some("seat0".to_string()),
+        held: false,
+    };
+    assert_eq!(
+        button_info.to_json(),
+        "{\"app_id\":null,\"description\":\"\",\"trigger\":\"BTN_SIDE\",\"kind\":\"button\",\"code\":275,\"modifiers\":[],\"tap\":false,\"seat\":\"seat0\",\"held\":false}"
+    );
+    let tap = HotkeyInfo {
+        app_id: None,
+        description: String::new(),
+        spec: key(Keysym::Super_L, 0),
+        seat: None,
+        held: false,
+    };
+    assert!(tap.to_json().contains("\"tap\":true"));
 }

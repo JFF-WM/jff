@@ -108,7 +108,8 @@ hot-corner {
 //hot-corner 6      // just the size
 
 // Global hotkeys (xx-hotkey-v1, off by default): clients may bind their own hotkeys, which then
-// work whatever has the keyboard. See also `forward-key` in binds.
+// work whatever has the keyboard. See also `forward-key` in binds. `jff msg hotkeys` lists what
+// is bound, by whom, and whether it is held.
 global-hotkeys #true
 
 // Tearing (off by default). With it on, a fullscreen window that covers the monitor and asked

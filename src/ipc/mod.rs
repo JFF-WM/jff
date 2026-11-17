@@ -45,6 +45,7 @@
 //! toggle-stats               show or hide the stats overlay (the `toggle-stats` action)
 //! status                     windows and workspace state in one reply (for panels)
 //! outputs                    every monitor: area, scanout, adaptive sync, colors and HDR
+//! hotkeys                    the global hotkeys clients bound (xx-hotkey-v1): who, which trigger, whether it is held
 //! hdr on|off|toggle [MONITOR]    turn HDR on a monitor on or off
 //! sdr-white [+|-]NITS [MONITOR]  SDR white on an HDR monitor, in cd/m²
 //! hdr-set MONITOR KEY VALUE...   change one HDR setting of a monitor (see below)
@@ -107,6 +108,17 @@
 //! below (`name`, `x`, `y`, `width`, `height`, `scanout`, `adaptive_sync`, `color`, `hdr`), as it is
 //! now. A script that wants one answer gets it here, a panel that wants to follow the changes
 //! uses `watch outputs`.
+//!
+//! `hotkeys` replies `{"ok":true,"enabled":true,"hotkeys":[HOTKEY,...]}`, `enabled` being whether
+//! `global-hotkeys` is on (off: the list is empty), the HOTKEYs in the order they were bound, which
+//! is the order that decides a clash (first come, first served). Each is
+//! `{"app_id":"org.mumble.Mumble","description":"Push to talk","trigger":"Ctrl+F13","kind":"key",
+//!   "code":65482,"modifiers":["ctrl"],"tap":false,"seat":null,"held":false}`: `app_id` is what the
+//! client claims (null when it gave none, a client can say anything), `trigger` the key or button as
+//! a binding writes it (`Super+Shift+b`, `BTN_SIDE`), `kind` `key` or `button`, `code` the keysym
+//! number or the button code, `modifiers` the ones that must be held (lowercase), `tap` a lone
+//! modifier that fires on release, `seat` the seat name it is limited to (null: all), and `held`
+//! whether its key or button is down now (a tap never is).
 //!
 //! Watching: `watch [GROUP...]`
 //!
@@ -321,6 +333,7 @@ use crate::ipc::events::{
 use crate::primitives::json::{json_opt, json_str, pretty};
 use crate::primitives::layout::MonitorTarget;
 use crate::protocol::layer_shell::{is_mapped, Under};
+use crate::protocol::xx_hotkey::HotkeyInfo;
 use crate::state::JffState;
 
 /// Requests longer than this are dropped.
@@ -390,6 +403,8 @@ pub enum Request {
     Status,
     /// `outputs`: every monitor, as `watch` describes them.
     Outputs,
+    /// `hotkeys`: the global hotkeys clients have bound (xx-hotkey-v1).
+    Hotkeys,
     Focused,
     Info(Option<u64>),
     Close(Option<u64>),
@@ -455,7 +470,7 @@ pub enum Request {
 pub const COMMANDS: &str =
     "windows, status, outputs, focused, window-info, close, maximize, unmaximize, toggle-maximize, \
      fullscreen, unfullscreen, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
-     screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, watch";
+     screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, hotkeys, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
     word.parse::<usize>()
@@ -592,6 +607,8 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         ("status", _) => return Err("status takes no arguments".to_string()),
         ("outputs", []) => return Ok(Request::Outputs),
         ("outputs", _) => return Err("outputs takes no arguments".to_string()),
+        ("hotkeys", []) => return Ok(Request::Hotkeys),
+        ("hotkeys", _) => return Err("hotkeys takes no arguments".to_string()),
         ("screenshot-area", []) => return Ok(Request::ScreenshotArea),
         ("screenshot-fullscreen", []) => return Ok(Request::ScreenshotFullscreen),
         ("screenshot-window", []) => return Ok(Request::ScreenshotWindow),
@@ -773,6 +790,15 @@ impl JffState {
                 Ok(format!(
                     "{{\"ok\":true,\"outputs\":[{}]}}\n",
                     outputs.join(",")
+                ))
+            }
+            Request::Hotkeys => {
+                let hotkeys: Vec<String> =
+                    self.hotkey_list().iter().map(HotkeyInfo::to_json).collect();
+                Ok(format!(
+                    "{{\"ok\":true,\"enabled\":{},\"hotkeys\":[{}]}}\n",
+                    self.hotkeys_enabled(),
+                    hotkeys.join(",")
                 ))
             }
             Request::Focused => Ok(match self.focused_window() {
@@ -1957,6 +1983,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         "Other",
         &[
             ("status", "the state of the compositor"),
+            ("hotkeys", "the global hotkeys clients have bound"),
             ("spawn PROGRAM [ARGS]", "run a program"),
             ("spawn-sh COMMAND LINE", "run a command line in the shell"),
             ("move-cursor X Y", "move the pointer"),

@@ -441,6 +441,13 @@ fn outputs_takes_no_arguments() {
     assert!(COMMANDS.contains("outputs"));
 }
 
+#[test]
+fn hotkeys_takes_no_arguments() {
+    assert_eq!(parse_request(" hotkeys \n"), Ok(Request::Hotkeys));
+    assert!(parse_request("hotkeys 1").is_err());
+    assert!(COMMANDS.contains("hotkeys"));
+}
+
 fn words(line: &str) -> Vec<String> {
     line.split_whitespace().map(str::to_string).collect()
 }

@@ -28,6 +28,7 @@ use smithay::utils::{Clock, Monotonic, SERIAL_COUNTER};
 use super::xx_hotkey_bindings::server::xx_hotkey_manager_v1::{self, XxHotkeyManagerV1};
 use super::xx_hotkey_bindings::server::xx_hotkey_v1::{self, DenyReason, XxHotkeyV1};
 use crate::input::{BTN_LEFT, BTN_RIGHT};
+use crate::primitives::json::{json_opt, json_str};
 use crate::state::JffState;
 
 pub const SHIFT: u32 = 1;
@@ -128,6 +129,91 @@ pub fn permitted(spec: &Spec) -> bool {
         Trigger::Key(sym) => {
             is_modifier_keysym(sym) || is_keypad(sym) || !(is_dead(sym) || produces_character(sym))
         }
+    }
+}
+
+/// The modifiers of a protocol bitmask as a binding spells them, Ctrl, Alt, Shift, Super.
+const MODIFIER_NAMES: [(u32, &str); 4] = [
+    (CTRL, "Ctrl"),
+    (ALT, "Alt"),
+    (SHIFT, "Shift"),
+    (SUPER, "Super"),
+];
+
+/// The names of the modifiers in `mods`, in the order of [`MODIFIER_NAMES`].
+pub fn modifier_names(mods: u32) -> Vec<&'static str> {
+    MODIFIER_NAMES
+        .iter()
+        .filter(|(bit, _)| mods & bit != 0)
+        .map(|(_, name)| *name)
+        .collect()
+}
+
+/// A pointer button code as its evdev name, or `button 0x..` for one that has none here.
+pub fn button_name(code: u32) -> String {
+    match code {
+        0x110 => "BTN_LEFT".to_string(),
+        0x111 => "BTN_RIGHT".to_string(),
+        0x112 => "BTN_MIDDLE".to_string(),
+        0x113 => "BTN_SIDE".to_string(),
+        0x114 => "BTN_EXTRA".to_string(),
+        0x115 => "BTN_FORWARD".to_string(),
+        0x116 => "BTN_BACK".to_string(),
+        0x117 => "BTN_TASK".to_string(),
+        other => format!("button 0x{other:x}"),
+    }
+}
+
+impl Spec {
+    /// The trigger as a person writes it: `Super+Shift+b`, `Ctrl+BTN_SIDE`, `F13`.
+    pub fn describe(&self) -> String {
+        let mut text = String::new();
+        for name in modifier_names(self.mods) {
+            text.push_str(name);
+            text.push('+');
+        }
+        match self.trigger {
+            Trigger::Key(sym) => text.push_str(&xkb::keysym_get_name(Keysym::new(sym))),
+            Trigger::Button(code) => text.push_str(&button_name(code)),
+        }
+        text
+    }
+}
+
+/// One bound hotkey, as `jff msg hotkeys` shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HotkeyInfo {
+    /// What the client said it is (advisory, a client can claim any name).
+    pub app_id: Option<String>,
+    pub description: String,
+    pub spec: Spec,
+    /// The seat it is restricted to, `None` for every seat of the client.
+    pub seat: Option<String>,
+    /// Its key or button is down right now. A tap (a lone modifier) is never held: it fires on
+    /// release.
+    pub held: bool,
+}
+
+impl HotkeyInfo {
+    pub fn to_json(&self) -> String {
+        let (kind, code) = match self.spec.trigger {
+            Trigger::Key(sym) => ("key", sym),
+            Trigger::Button(code) => ("button", code),
+        };
+        let modifiers: Vec<String> = modifier_names(self.spec.mods)
+            .iter()
+            .map(|name| json_str(&name.to_lowercase()))
+            .collect();
+        format!(
+            "{{\"app_id\":{},\"description\":{},\"trigger\":{},\"kind\":\"{kind}\",\"code\":{code},\"modifiers\":[{}],\"tap\":{},\"seat\":{},\"held\":{}}}",
+            json_opt(self.app_id.as_deref()),
+            json_str(&self.description),
+            json_str(&self.spec.describe()),
+            modifiers.join(","),
+            self.spec.is_tap(),
+            json_opt(self.seat.as_deref()),
+            self.held,
+        )
     }
 }
 
@@ -506,6 +592,36 @@ impl JffState {
             |entry| entry.seat.as_ref() == Some(seat),
             "the seat was removed",
         );
+    }
+
+    /// Whether the `xx_hotkey_manager_v1` global is offered (`global-hotkeys`).
+    pub fn hotkeys_enabled(&self) -> bool {
+        self.hotkeys.global.is_some()
+    }
+
+    /// The bound hotkeys of clients that are still connected, first come first.
+    pub fn hotkey_list(&self) -> Vec<HotkeyInfo> {
+        self.hotkeys
+            .entries
+            .iter()
+            .filter(|entry| entry.resource.is_alive())
+            .map(|entry| HotkeyInfo {
+                app_id: entry.app_id.clone(),
+                description: entry.description.clone(),
+                spec: entry.spec,
+                seat: entry.seat.as_ref().map(|seat| seat.name().to_string()),
+                held: self
+                    .hotkeys
+                    .held_keys
+                    .iter()
+                    .any(|(_, held)| *held == entry.resource)
+                    || self
+                        .hotkeys
+                        .held_buttons
+                        .iter()
+                        .any(|(_, held)| *held == entry.resource),
+            })
+            .collect()
     }
 
     fn on_main_seat(&self, entry: &Entry) -> bool {
