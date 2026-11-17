@@ -119,12 +119,13 @@ pub fn supported_intents(version: u32) -> Vec<RenderIntent> {
         .collect()
 }
 
-/// Optional parts of the protocol jff offers. Extended target volumes are not.
+/// Optional parts of the protocol jff offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Feature {
     /// 0. `create_icc_creator`: a client's ICC v2 or v4 profile (RGB, display or color space
-    /// class) becomes a parametric description, see `feature::icc::client_description`. What
-    /// a profile has beyond primaries, white and tone curve is not drawn.
+    /// class) becomes a parametric description, see `feature::icc::client_description`: primaries,
+    /// white, the tone curves of all three channels and the luminance range the profile states.
+    /// The bending of a lookup table's hues is not drawn.
     IccV2V4,
     /// 1.
     Parametric,
@@ -139,6 +140,13 @@ pub enum Feature {
     /// tone mapping to when the description has no `max_cll` (see
     /// [`ImageDescription::content_light`]).
     SetMasteringDisplayPrimaries,
+    /// 6. Target color volumes that reach beyond the primary one: mastering primaries outside
+    /// the triangle of the primaries, or a mastering luminance range wider than the primary
+    /// one. Nothing in the pipeline assumes the target lies inside the primary volume: the gamut
+    /// mapping measures the target against the *output* (`primitives/gamut.rs`) and the tone
+    /// mapping takes the peak from the mastering luminance ([`ImageDescription::content_light`]).
+    /// [`ImageDescription::extends_target_volume`] tells which descriptions use it.
+    ExtendedTargetVolume,
     /// 7. `create_windows_scrgb`: the sRGB-primaries, extended-linear, 80 cd/m² reference
     /// description that Mesa's Vulkan WSI and Wine/Proton use for fp16 HDR swapchains.
     WindowsScrgb,
@@ -156,6 +164,7 @@ impl Feature {
             Self::SetTfPower => 3,
             Self::SetLuminances => 4,
             Self::SetMasteringDisplayPrimaries => 5,
+            Self::ExtendedTargetVolume => 6,
             Self::WindowsScrgb => 7,
             Self::WindowsBt2100 => 8,
         }
@@ -178,6 +187,7 @@ pub const SUPPORTED_FEATURES: &[Feature] = &[
     Feature::SetTfPower,
     Feature::SetLuminances,
     Feature::SetMasteringDisplayPrimaries,
+    Feature::ExtendedTargetVolume,
     Feature::WindowsScrgb,
 ];
 
@@ -247,6 +257,32 @@ impl Chromaticities {
             return Err("the primaries are on one line");
         }
         Ok(())
+    }
+}
+
+impl Chromaticities {
+    /// Whether the triangle of `other`'s primaries lies inside the triangle of these (white
+    /// points are not looked at). A corner within a small margin of an edge counts as inside, so
+    /// a profile's rounding of the same gamut is not an extension of it.
+    pub fn contains_gamut(&self, other: &Chromaticities) -> bool {
+        const MARGIN: f64 = 0.002;
+        let scale = f64::from(CHROMA_SCALE);
+        let at = |p: [i32; 2]| (f64::from(p[0]) / scale, f64::from(p[1]) / scale);
+        let (r, g, b) = (at(self.red), at(self.green), at(self.blue));
+        let area = (g.0 - r.0) * (b.1 - r.1) - (g.1 - r.1) * (b.0 - r.0);
+        if area == 0.0 {
+            return false;
+        }
+        [other.red, other.green, other.blue]
+            .into_iter()
+            .all(|corner| {
+                let p = at(corner);
+                // Barycentric weights of the corner, each 0..1 when it is inside.
+                let wr = ((g.0 - p.0) * (b.1 - p.1) - (g.1 - p.1) * (b.0 - p.0)) / area;
+                let wg = ((b.0 - p.0) * (r.1 - p.1) - (b.1 - p.1) * (r.0 - p.0)) / area;
+                let wb = 1.0 - wr - wg;
+                wr >= -MARGIN && wg >= -MARGIN && wb >= -MARGIN
+            })
     }
 }
 
@@ -639,6 +675,20 @@ impl ImageDescription {
             ContentLight::Peak(peak) => Some(peak),
             _ => None,
         }
+    }
+
+    /// Whether the target color volume (the mastering display's primaries and luminance) reaches
+    /// beyond the primary volume: a mastering gamut that is not inside the triangle of the
+    /// primaries, or a mastering luminance range wider than the primary one. That is what the
+    /// protocol's `extended_target_volume` feature is about.
+    pub fn extends_target_volume(&self) -> bool {
+        let gamut = self
+            .mastering_primaries
+            .is_some_and(|target| !self.primaries.contains_gamut(&target));
+        let light = self
+            .mastering_luminance
+            .is_some_and(|m| m.max > self.luminance.max || m.min < self.luminance.min);
+        gamut || light
     }
 
     /// What `wp_image_description_info_v1` tells about this description, in the order it is

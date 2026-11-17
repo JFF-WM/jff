@@ -9,7 +9,9 @@
 //! kept: its primaries are the target volume that the gamut mapping fits to the output (see
 //! `primitives/gamut.rs`, `target_reach`), its luminance and `max_cll` tell an HDR monitor how
 //! bright the content of a PQ surface gets, so the monitor's tone mapping can be fitted to it (see
-//! `primitives/hdr_output.rs`, `ImageDescription::content_light`).
+//! `primitives/hdr_output.rs`, `ImageDescription::content_light`). A target volume that reaches
+//! beyond the primary one (`extended_target_volume`) is offered: nothing above assumes it lies
+//! inside (`ImageDescription::extends_target_volume` tells which descriptions use it).
 //! Windows-scRGB (`create_windows_scrgb`, what Mesa's Vulkan WSI and Wine/Proton use for fp16
 //! HDR swapchains) is offered: sRGB primaries, an extended linear curve, 1.0 at 80 cd/m². The rules for building a description, and
 //! what is offered, are in `primitives/color.rs`.

@@ -18,7 +18,8 @@
 //! [`description`] reads the same profile for `wp_color_management_v1`: what a client is told
 //! the panel looks like once those curves are applied (its primaries, tone curve and white).
 //! [`client_description`] reads a profile a client sends (`create_icc_creator`) the other way
-//! round: the colors its pixels have, from the profile's own colorants and tone curves.
+//! round: the colors its pixels have, from the profile's own colorants, tone curves and
+//! luminance range.
 
 pub mod lut;
 
@@ -28,7 +29,7 @@ use anyhow::{bail, Context};
 
 use crate::primitives::color::{
     Chromaticities, ImageDescription, Luminance, NamedTf, TransferFunction, CHROMA_SCALE,
-    EXPONENT_SCALE,
+    EXPONENT_SCALE, MIN_LUM_SCALE,
 };
 
 /// The three correction curves. Each channel has at least two entries, darkest first.
@@ -603,15 +604,29 @@ fn panel_tf(data: &[u8]) -> TransferFunction {
 /// The named curve closest to `trc`, or the power curve that gives the same light at half the code
 /// value. sRGB when nothing sensible fits.
 fn fit_tf(trc: &Trc) -> TransferFunction {
+    fit_tf_channels(&[trc])
+}
+
+/// The largest [`worst_gap`] of any of `trcs` from `curve`.
+fn worst_gap_of(trcs: &[&Trc], curve: fn(f64) -> f64) -> f64 {
+    trcs.iter()
+        .map(|trc| worst_gap(trc, curve))
+        .fold(0.0, f64::max)
+}
+
+/// [`fit_tf`] for one curve per channel: a named curve has to be close on every channel to be
+/// taken, and a power is the mean of what the channels give, so a profile whose red and blue
+/// curves differ from its green one is no longer described by the green one alone.
+fn fit_tf_channels(trcs: &[&Trc]) -> TransferFunction {
     let srgb = TransferFunction::Named(NamedTf::Srgb);
     let fits = [
-        (worst_gap(trc, srgb_to_light), srgb),
+        (worst_gap_of(trcs, srgb_to_light), srgb),
         (
-            worst_gap(trc, |x| x.powf(2.2)),
+            worst_gap_of(trcs, |x| x.powf(2.2)),
             TransferFunction::Named(NamedTf::Gamma22),
         ),
         (
-            worst_gap(trc, |x| x.powf(2.8)),
+            worst_gap_of(trcs, |x| x.powf(2.8)),
             TransferFunction::Named(NamedTf::Gamma28),
         ),
     ];
@@ -625,28 +640,88 @@ fn fit_tf(trc: &Trc) -> TransferFunction {
         return best.1;
     }
     // Not close to a named curve: the power that gives the same light at half the code value.
-    let half = trc.eval(0.5);
-    if half > 0.0 && half < 1.0 {
-        let exponent = (half.ln() / 0.5f64.ln()).clamp(1.0, 10.0);
+    let exponents: Vec<f64> = trcs
+        .iter()
+        .filter_map(|trc| {
+            let half = trc.eval(0.5);
+            (half > 0.0 && half < 1.0).then(|| (half.ln() / 0.5f64.ln()).clamp(1.0, 10.0))
+        })
+        .collect();
+    if !exponents.is_empty() {
+        let exponent = exponents.iter().sum::<f64>() / exponents.len() as f64;
         return TransferFunction::Power((exponent * EXPONENT_SCALE as f64).round() as u32);
     }
     srgb
 }
 
-/// The tone curve of the pixels of a client's profile: its green curve (`gTRC`) fitted by
-/// [`fit_tf`], or when the profile has lookup tables only, the green curve fitted to them.
-fn client_tf(data: &[u8]) -> Option<TransferFunction> {
+/// The tone curves of the pixels of a client's profile, red, green and blue: its `rTRC`, `gTRC`
+/// and `bTRC` (a missing red or blue one is the green one), or when the profile has lookup
+/// tables only, the curves fitted to them.
+fn client_trcs(data: &[u8]) -> Option<Vec<Trc>> {
     if let Some(tag) = find_tag(data, b"gTRC") {
-        return parse_trc(tag).ok().map(|trc| fit_tf(&trc));
+        let green = parse_trc(tag).ok()?;
+        let side = |sig: &[u8; 4]| find_tag(data, sig).and_then(|tag| parse_trc(tag).ok());
+        let red = side(b"rTRC").unwrap_or_else(|| green.clone());
+        let blue = side(b"bTRC").unwrap_or_else(|| green.clone());
+        return Some(vec![red, green, blue]);
     }
-    let [_, green, _] = lut::panel_model(data)?.trcs();
-    Some(fit_tf(&green))
+    Some(lut::panel_model(data)?.trcs().to_vec())
+}
+
+/// The black of a client's profile as a share of its white's luminance, when the profile says
+/// one: from its lookup table (what drive 0 gives against drive 1), else its `bkpt` tag, else
+/// from tone curves that do not start at 0. `None` when there is nothing to go by (an ideal
+/// matrix profile says nothing about black) or the number is not a believable black (10% of
+/// white or more).
+fn black_share(data: &[u8], trcs: &[Trc]) -> Option<f64> {
+    let share = if let Some((black, white)) = lut::panel_model(data).and_then(|m| m.black_white) {
+        if white[1] <= 1e-9 {
+            return None;
+        }
+        black[1] / white[1]
+    } else if let Some(point) = find_tag(data, b"bkpt").and_then(xyz) {
+        point[1]
+    } else {
+        let mut light = [0.0; 3];
+        for (slot, sig) in light.iter_mut().zip([b"rXYZ", b"gXYZ", b"bXYZ"]) {
+            *slot = xyz(find_tag(data, sig)?)?[1];
+        }
+        let white: f64 = light.iter().sum();
+        let black: f64 = light
+            .iter()
+            .zip(trcs)
+            .map(|(y, trc)| y * trc.eval(0.0))
+            .sum();
+        if white <= 0.0 || black <= 0.0 {
+            return None;
+        }
+        black / white
+    };
+    (0.0..0.1).contains(&share).then_some(share)
+}
+
+/// The luminance range a client's profile states: the white's luminance from `lumi` (as a
+/// monitor's is read, see [`panel_max_luminance`]) and the black from [`black_share`] of it.
+/// What the profile does not say stays at the SDR default.
+fn client_luminance(data: &[u8], trcs: &[Trc]) -> Luminance {
+    let mut luminance = Luminance::SDR;
+    if let Some(max) = panel_max_luminance(data) {
+        luminance.max = max;
+        luminance.reference = max;
+    }
+    if let Some(share) = black_share(data, trcs) {
+        luminance.min =
+            (share * f64::from(luminance.max) * f64::from(MIN_LUM_SCALE)).round() as u32;
+    }
+    luminance
 }
 
 /// What a client's ICC profile says about the colors of its pixels, as the parametric description
-/// jff draws: the primaries and white of the profile's colorants, and its tone curve. Anything a
-/// profile has beyond those (the bending of a lookup table's hues, rendering intents of its own, a
-/// black point) is not drawn, a table profile is the fit of [`lut::panel_model`].
+/// jff draws: the primaries and white of the profile's colorants, its tone curves (all three
+/// channels, see [`fit_tf_channels`]) and its luminance range (`lumi` for the white, the black
+/// from its table, `bkpt` or curves, see [`client_luminance`]). What is left out is what a
+/// parametric description has no words for: the bending of a lookup table's hues and the
+/// rendering intents of its own. A table profile is the fit of [`lut::panel_model`].
 ///
 /// What the protocol asks of the profile is checked: ICC version 2 or 4, class display or color
 /// space, three channels (RGB). The reason of an error says what is wrong, for the `failed` event.
@@ -672,12 +747,14 @@ pub fn client_description(data: &[u8]) -> Result<ImageDescription, &'static str>
     let Some(primaries) = panel_primaries(data) else {
         return Err("the ICC profile has no colorants that make a gamut");
     };
-    let Some(tf) = client_tf(data) else {
+    let Some(trcs) = client_trcs(data) else {
         return Err("the ICC profile has no tone curves");
     };
+    let tf = fit_tf_channels(&trcs.iter().collect::<Vec<_>>());
     Ok(ImageDescription {
         primaries,
         tf,
+        luminance: client_luminance(data, &trcs),
         ..ImageDescription::srgb()
     })
 }

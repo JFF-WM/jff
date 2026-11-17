@@ -384,6 +384,10 @@ pub struct PanelModel {
     /// Largest distance between the table and the fitted model over a 5x5x5 grid of drive
     /// values (A2B only, `None` for B2A), in XYZ units of the white's luminance.
     pub worst_error: Option<f64>,
+    /// XYZ (D50) the table gives for drive (0, 0, 0) and for (1, 1, 1): the black and the white
+    /// of the panel as the profile sees it. `None` from a `B2A` table, which is only sampled
+    /// along the grey axis.
+    pub black_white: Option<([f64; 3], [f64; 3])>,
 }
 
 /// Number of samples of each fitted curve.
@@ -436,6 +440,7 @@ fn fit_a2b(lut: &Lut, pcs: Pcs) -> PanelModel {
         curve_size: CURVE_SIZE,
         curves,
         worst_error: None,
+        black_white: Some((black, xyz([1.0; 3]))),
     };
     let white_y = xyz([1.0; 3])[1].max(1e-9);
     let mut worst = 0.0f64;
@@ -506,6 +511,7 @@ fn fit_b2a(lut: &Lut, pcs: Pcs) -> Option<PanelModel> {
         curve_size: CURVE_SIZE,
         curves,
         worst_error: None,
+        black_white: None,
     })
 }
 

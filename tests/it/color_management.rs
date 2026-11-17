@@ -66,9 +66,10 @@ fn offered_values_have_the_protocol_numbers() {
             .iter()
             .map(|f| f.raw())
             .collect::<Vec<_>>(),
-        [0, 1, 2, 3, 4, 5, 7]
+        [0, 1, 2, 3, 4, 5, 6, 7]
     );
-    // ICC (0) and Windows-scRGB (7) are offered, extended target volume (6) is not.
+    // ICC (0), extended target volume (6) and Windows-scRGB (7) are offered.
+    assert!(SUPPORTED_FEATURES.contains(&Feature::ExtendedTargetVolume));
     assert!(SUPPORTED_FEATURES.contains(&Feature::IccV2V4));
     assert!(SUPPORTED_FEATURES.contains(&Feature::Parametric));
     assert!(SUPPORTED_FEATURES.contains(&Feature::WindowsScrgb));
@@ -804,4 +805,54 @@ fn info_reports_the_mastering_primaries_as_the_target_primaries() {
         NamedPrimaries::Bt2020.chromaticities().to_array()
     )));
     assert!(!plain.contains(&InfoEvent::TargetPrimaries(p3.to_array())));
+}
+
+#[test]
+fn a_target_volume_beyond_the_primary_one_is_offered_and_kept() {
+    // sRGB content mastered on a BT.2020 display up to 4000 cd/m²: the target reaches outside
+    // the primary volume in both gamut and luminance.
+    let mut builder = srgb_builder();
+    builder
+        .set_mastering_display_primaries(BT2020_PRIMARIES)
+        .unwrap();
+    builder.set_mastering_luminance(50, 4_000).unwrap();
+    let described = builder.build().unwrap();
+    assert!(described.extends_target_volume());
+    assert_eq!(
+        described.mastering_primaries,
+        Some(NamedPrimaries::Bt2020.chromaticities())
+    );
+    // and what `info` reports is that target, not the primary volume
+    let events = described.info();
+    assert!(events.contains(&InfoEvent::TargetPrimaries(BT2020_PRIMARIES)));
+    assert!(events.contains(&InfoEvent::TargetLuminance {
+        min: 50,
+        max: 4_000
+    }));
+}
+
+#[test]
+fn a_target_volume_inside_the_primary_one_is_not_an_extension() {
+    let mut builder = ParamsBuilder::default();
+    builder.set_tf_named(SRGB_TF).unwrap();
+    builder.set_primaries_named(BT2020).unwrap();
+    // P3 inside BT.2020, luminance inside the SDR range
+    builder
+        .set_mastering_display_primaries(NamedPrimaries::DisplayP3.chromaticities().to_array())
+        .unwrap();
+    builder.set_mastering_luminance(2_000, 80).unwrap();
+    assert!(!builder.build().unwrap().extends_target_volume());
+    // no target at all, and a target equal to the primaries, are none either
+    assert!(!ImageDescription::srgb().extends_target_volume());
+    let mut same = srgb_builder();
+    same.set_mastering_display_primaries(NamedPrimaries::Srgb.chromaticities().to_array())
+        .unwrap();
+    assert!(!same.build().unwrap().extends_target_volume());
+}
+
+#[test]
+fn a_wider_mastering_luminance_alone_extends_the_target_volume() {
+    let mut builder = srgb_builder();
+    builder.set_mastering_luminance(2_000, 1_000).unwrap();
+    assert!(builder.build().unwrap().extends_target_volume());
 }

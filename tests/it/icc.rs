@@ -3,7 +3,7 @@
 use jff_wm::feature::icc::{
     client_description, description, parse, srgb_to_light, GammaTable, Kind,
 };
-use jff_wm::primitives::color::{ImageDescription, NamedTf, TransferFunction};
+use jff_wm::primitives::color::{ImageDescription, Luminance, NamedTf, TransferFunction};
 
 /// A minimal profile with the given tags.
 fn profile_tags(tags: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
@@ -401,4 +401,104 @@ fn a_profile_embedded_in_more_data_is_still_read() {
     let mut data = matrix_profile(gamma_curve(2.2));
     data.extend_from_slice(&[0u8; 64]);
     assert!(client_description(&data).is_ok());
+}
+
+// ---- client_description: luminance and per-channel curves --------------------------------
+
+/// [`matrix_profile`] with a curve per channel and more tags.
+fn matrix_profile_of(curves: [Vec<u8>; 3], extra: Vec<(&'static [u8; 4], Vec<u8>)>) -> Vec<u8> {
+    let mut tags = srgb_colorants();
+    let [red, green, blue] = curves;
+    tags.push((b"rTRC", red));
+    tags.push((b"gTRC", green));
+    tags.push((b"bTRC", blue));
+    tags.extend(extra);
+    client_profile(4, b"mntr", b"RGB ", &tags)
+}
+
+#[test]
+fn the_white_luminance_of_a_client_profile_is_kept() {
+    let curve = gamma_curve(2.2);
+    let profile = matrix_profile_of(
+        [curve.clone(), curve.clone(), curve],
+        vec![(b"lumi", xyz_tag(0.0, 120.0, 0.0))],
+    );
+    let d = client_description(&profile).unwrap();
+    assert_eq!((d.luminance.max, d.luminance.reference), (120, 120));
+    // a profile that says nothing keeps the SDR range
+    let plain = client_description(&matrix_profile(gamma_curve(2.2))).unwrap();
+    assert_eq!(plain.luminance, Luminance::SDR);
+}
+
+#[test]
+fn an_unbelievable_white_luminance_is_ignored() {
+    let curve = gamma_curve(2.2);
+    let profile = matrix_profile_of(
+        [curve.clone(), curve.clone(), curve],
+        vec![(b"lumi", xyz_tag(0.0, 5.0, 0.0))],
+    );
+    let d = client_description(&profile).unwrap();
+    assert_eq!(d.luminance, Luminance::SDR);
+}
+
+#[test]
+fn the_black_point_of_a_client_profile_is_kept() {
+    let curve = gamma_curve(2.2);
+    // `bkpt` 0.2% of the white, white 100 cd/m²: a black of 0.2 cd/m²
+    let profile = matrix_profile_of(
+        [curve.clone(), curve.clone(), curve],
+        vec![
+            (b"lumi", xyz_tag(0.0, 100.0, 0.0)),
+            (b"bkpt", xyz_tag(0.0, 0.002, 0.0)),
+        ],
+    );
+    let d = client_description(&profile).unwrap();
+    assert_eq!(d.luminance.max, 100);
+    assert!(
+        (d.luminance.min as i64 - 2_000).abs() < 20,
+        "{}",
+        d.luminance.min
+    );
+    // a black that is no black (a fifth of the white) is not believed
+    let bad = matrix_profile_of(
+        [gamma_curve(2.2), gamma_curve(2.2), gamma_curve(2.2)],
+        vec![(b"bkpt", xyz_tag(0.0, 0.2, 0.0))],
+    );
+    assert_eq!(
+        client_description(&bad).unwrap().luminance.min,
+        Luminance::SDR.min
+    );
+}
+
+#[test]
+fn all_three_curves_decide_the_tone_curve() {
+    // red and blue at 2.8, green at 2.2: green alone would have said gamma 2.2
+    let profile = matrix_profile_of(
+        [gamma_curve(2.8), gamma_curve(2.2), gamma_curve(2.8)],
+        vec![],
+    );
+    match client_description(&profile).unwrap().tf {
+        TransferFunction::Power(raw) => assert!((raw as i32 - 26_000).abs() < 300, "{raw}"),
+        other => panic!("expected a power between the curves, got {other:?}"),
+    }
+    // three equal curves are what they were
+    let equal = matrix_profile_of(
+        [gamma_curve(2.2), gamma_curve(2.2), gamma_curve(2.2)],
+        vec![],
+    );
+    assert_eq!(
+        client_description(&equal).unwrap().tf,
+        TransferFunction::Named(NamedTf::Gamma22)
+    );
+}
+
+#[test]
+fn a_profile_with_only_a_green_curve_uses_it_for_all() {
+    let mut tags = srgb_colorants();
+    tags.push((b"gTRC", gamma_curve(2.2)));
+    let profile = client_profile(4, b"mntr", b"RGB ", &tags);
+    assert_eq!(
+        client_description(&profile).unwrap().tf,
+        TransferFunction::Named(NamedTf::Gamma22)
+    );
 }
