@@ -217,6 +217,7 @@ pub fn run() -> anyhow::Result<()> {
 
     // Has to run after the satellite so DISPLAY ends up in the exported environment.
     crate::feature::portals::setup(state.backend.is_tty());
+    crate::feature::power::sync(state.config.power_key(), state.backend.is_tty());
 
     // Last on purpose: autostart programs should see WAYLAND_DISPLAY, DISPLAY and the portal vars.
     for action in state.config.autostart() {

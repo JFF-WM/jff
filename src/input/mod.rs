@@ -26,7 +26,7 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Serial, Size, SERIAL_COUNTER};
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
 
-use crate::config::{Action, Config, HotCorner};
+use crate::config::{Action, Config, HotCorner, PowerKey};
 use crate::desk::{Goto, WindowMode};
 use crate::feature::outputs::output_rect;
 use crate::feature::overview_mode::{overview_key, typed_char, OverviewKey};
@@ -434,6 +434,20 @@ impl JffState {
                     // XF86Switch_VT_1 ..= XF86Switch_VT_12
                     if (0x1008FE01..=0x1008FE0C).contains(&raw) {
                         return Bind::Vt((raw - 0x1008FE01 + 1) as i32);
+                    }
+                    // The PC's power button, unless a binding already uses the key. It works while locked or
+                    // inhibited too: logind no longer handles it.
+                    let power_sym = handle.raw_latin_sym_or_raw_current_sym();
+                    if raw == crate::feature::power::XF86_POWER_OFF
+                        && power_sym
+                            .and_then(|sym| state.config.action_for(mods, sym))
+                            .is_none()
+                    {
+                        return match state.config.power_key() {
+                            PowerKey::Suspend => Bind::Action(Action::Suspend),
+                            PowerKey::PowerOff => Bind::Action(Action::PowerOff),
+                            PowerKey::Ignore | PowerKey::System => Bind::Swallow,
+                        };
                     }
                     // Locked session: no bindings, only the VT keys above.
                     if state.session_locked() {
@@ -945,6 +959,8 @@ impl JffState {
             Action::ApplyContainerLayout(name) => self.container_layout_bind(&name, false),
             // Handled where the key is, it needs the key and its state.
             Action::ForwardKey(_) => {}
+            Action::Suspend => crate::feature::power::systemctl("suspend"),
+            Action::PowerOff => crate::feature::power::systemctl("poweroff"),
             Action::Quit => self.loop_signal.stop(),
         }
     }
@@ -1162,6 +1178,7 @@ impl JffState {
                 crate::protocol::color_management::sync_output_color(self);
                 self.apply_decoration_mode();
                 self.apply_hotkey_config();
+                crate::feature::power::sync(self.config.power_key(), self.backend.is_tty());
                 self.osd.dismiss(crate::feature::osd::Icon::Error);
                 if !self.warn_config_skipped() {
                     self.warn_hdr_hidden();

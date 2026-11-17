@@ -14,6 +14,7 @@ pub mod outputs;
 pub mod overview_mode;
 pub mod overview_search;
 pub mod portals;
+pub mod power;
 pub mod screenshot;
 pub mod stash;
 pub mod stats;

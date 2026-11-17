@@ -174,6 +174,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "warp-mouse-to-focus",
     "focus-follows-mouse",
     "allow-tearing",
+    "power-key",
     "global-hotkeys",
     "render-device",
     "restore-apps",
@@ -292,8 +293,26 @@ pub enum Action {
     /// Hand the key (press and release) to the window with this app id, wherever it is and
     /// whatever has the keyboard, so an app's own global hotkey works (`forward-key "com.obsproject.Studio"`).
     ForwardKey(String),
+    /// Suspend the machine (`systemctl suspend`).
+    Suspend,
+    /// Power the machine off (`systemctl poweroff`).
+    PowerOff,
     /// Stop the compositor.
     Quit,
+}
+
+/// What the PC's power button does (`power-key`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PowerKey {
+    /// Suspend the machine. The default.
+    #[default]
+    Suspend,
+    /// Power the machine off.
+    PowerOff,
+    /// Nothing.
+    Ignore,
+    /// Leave it to logind (`HandlePowerKey` in logind.conf).
+    System,
 }
 
 /// The modifier keys a binding requires, compared exactly.
@@ -1393,6 +1412,8 @@ pub struct Config {
     allow_tearing: bool,
     /// `global-hotkeys`: clients may bind their own global hotkeys (xx-hotkey-v1). Off by default.
     global_hotkeys: bool,
+    /// `power-key`: what the PC's power button does. Suspend by default.
+    power_key: PowerKey,
     /// `render-device "/dev/dri/cardN"`: the GPU that draws everything, `None` for the primary one.
     render_device: Option<String>,
     /// `restore-apps`: start the apps that were open in the last session, and remember the ones
@@ -1466,6 +1487,7 @@ impl Default for Config {
                 focus_follows_mouse: false,
                 allow_tearing: false,
                 global_hotkeys: false,
+                power_key: PowerKey::default(),
                 render_device: None,
                 restore_apps: false,
                 window_animations: WindowAnimations::default(),
@@ -1675,6 +1697,16 @@ impl Config {
         let focus_follows_mouse = parse_flag(&doc, "focus-follows-mouse", false)?;
         let allow_tearing = parse_flag(&doc, "allow-tearing", false)?;
         let global_hotkeys = parse_flag(&doc, "global-hotkeys", false)?;
+        let power_key = match doc.get("power-key") {
+            None => PowerKey::default(),
+            Some(node) => match string_arg(node)?.as_str() {
+                "suspend" => PowerKey::Suspend,
+                "power-off" => PowerKey::PowerOff,
+                "ignore" => PowerKey::Ignore,
+                "system" => PowerKey::System,
+                _ => bail!("power-key takes \"suspend\", \"power-off\", \"ignore\" or \"system\""),
+            },
+        };
         let render_device = match doc.get("render-device") {
             None => None,
             Some(node) => {
@@ -1844,6 +1876,7 @@ impl Config {
             focus_follows_mouse,
             allow_tearing,
             global_hotkeys,
+            power_key,
             render_device,
             restore_apps,
             window_animations,
@@ -2150,6 +2183,11 @@ impl Config {
     /// Whether a fullscreen window may be shown with tearing when it asks for it.
     pub fn allow_tearing(&self) -> bool {
         self.allow_tearing
+    }
+
+    /// What the PC's power button does.
+    pub fn power_key(&self) -> PowerKey {
+        self.power_key
     }
 
     /// Whether clients may bind their own global hotkeys (xx-hotkey-v1).
@@ -3514,6 +3552,8 @@ fn parse_action(node: &KdlNode) -> anyhow::Result<Action> {
                 _ => Action::MoveWorkspaceToMonitor(target),
             })
         }
+        "suspend" => no_args(Action::Suspend),
+        "power-off" => no_args(Action::PowerOff),
         "quit" => no_args(Action::Quit),
         other => bail!("unknown action {other:?}"),
     }

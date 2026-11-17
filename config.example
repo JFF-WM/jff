@@ -117,6 +117,10 @@ global-hotkeys #true
 // is shown normally. Needs a Smithay with async page flips.
 // allow-tearing #true
 
+// The PC's power button: "suspend" (default), "power-off", "ignore", or "system" (leave it to
+// logind). Needs systemd-inhibit and systemctl. `suspend` and `power-off` also work in binds.
+// power-key "suspend"
+
 // ---------------------------------------------------------------------------------------------
 // Looks
 // ---------------------------------------------------------------------------------------------
