@@ -53,6 +53,7 @@ mod scroll_steps;
 mod stats;
 mod swipe;
 mod tile_tree;
+mod toplevel_icon;
 mod touch;
 mod window_anim;
 mod window_rules;

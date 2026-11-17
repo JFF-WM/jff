@@ -4,11 +4,17 @@
 //! from the last commit. The overview uses it for the app icon on a window's thumbnail, ahead of
 //! the icon of the desktop file the app id points at (see `crate::feature::overview_mode`): the
 //! app knows best, and some apps have no desktop file at all.
+//!
+//! Scripts and panels get it too: the `icon` member and event of `jff msg` (see [`ipc_icon`]) give
+//! the theme name and an image file, so a bar can show the icon of an app that has no desktop file.
+//! The protocol has no part in `wlr-foreign-toplevel`, which has no way to carry an icon.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::os::unix::fs::DirBuilderExt;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_shm;
@@ -19,6 +25,8 @@ use smithay::wayland::shm::with_buffer_contents;
 use smithay::wayland::xdg_toplevel_icon::ToplevelIconCachedState;
 
 use crate::feature::app_icons::{icon_for, scale, Icon, ICON_PX};
+use crate::feature::screenshot::save::encode_png;
+use crate::ipc::events::IconRef;
 
 /// Sizes (square edge, pixels) clients are told to prefer.
 pub const ICON_SIZES: [i32; 3] = [32, 64, 128];
@@ -82,6 +90,121 @@ pub fn client_icon(surface: &WlSurface) -> Option<(Arc<Icon>, bool)> {
         rgba: scale(&rgba, width, height, ICON_PX as u32),
     };
     Some((Arc::new(icon), width.max(height) >= ICON_PX as u32))
+}
+
+/// How many answers of [`ipc_icon`] are kept. A window that changes its icon all the time makes
+/// a new one each time, so the cache starts over when it has this many.
+const IPC_CACHE_MAX: usize = 512;
+
+fn ipc_cache() -> &'static Mutex<HashMap<u64, Option<IconRef>>> {
+    static CACHE: OnceLock<Mutex<HashMap<u64, Option<IconRef>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// What `jff msg` says about the icon `surface` set: its theme name and an image file. `None`
+/// when it set no icon, or nothing that can be told. Cheap to ask again and again: the answer is
+/// kept until the icon changes, and the PNG of a picture is written once.
+pub fn ipc_icon(surface: &WlSurface) -> Option<IconRef> {
+    let key = fingerprint(surface);
+    if key == 0 {
+        return None;
+    }
+    if let Some(found) = ipc_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&key)
+    {
+        return found.clone();
+    }
+    let icon = describe(surface);
+    let mut cache = ipc_cache().lock().unwrap_or_else(|p| p.into_inner());
+    if cache.len() >= IPC_CACHE_MAX {
+        cache.clear();
+    }
+    cache.insert(key, icon.clone());
+    icon
+}
+
+/// Work out [`ipc_icon`]'s answer. A theme name that can be found wins over pictures, as it does
+/// for [`client_icon`].
+fn describe(surface: &WlSurface) -> Option<IconRef> {
+    let (name, buffers) = with_states(surface, |states| {
+        let mut cached = states.cached_state.get::<ToplevelIconCachedState>();
+        let state = cached.current();
+        (
+            state
+                .icon_name()
+                .map(str::to_owned)
+                .filter(|name| !name.is_empty()),
+            state
+                .buffers()
+                .iter()
+                .map(|(buffer, _)| buffer.clone())
+                .collect::<Vec<_>>(),
+        )
+    });
+    if let Some(icon) = name.as_deref().and_then(icon_for) {
+        let path = icon.source.to_string_lossy().into_owned();
+        return Some(IconRef {
+            name,
+            path: Some(path),
+        });
+    }
+    // The biggest picture there is: the reader of the file can scale it down, not up.
+    let path = buffers
+        .iter()
+        .filter_map(read_picture)
+        .max_by_key(|(_, width, _)| *width)
+        .and_then(|(rgba, width, height)| {
+            let dir = icon_dir()?;
+            write_png(&dir, &rgba, width, height)
+        })
+        .map(|path| path.to_string_lossy().into_owned());
+    if name.is_none() && path.is_none() {
+        return None;
+    }
+    Some(IconRef { name, path })
+}
+
+/// Where the PNGs of icons go: `$XDG_RUNTIME_DIR/jff-wm/icons`. `None` without a runtime dir,
+/// the files are not worth putting where others can read them.
+fn icon_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join("jff-wm").join("icons"))
+}
+
+/// Write straight-alpha RGBA as a PNG in `dir` (made when missing, for the user alone), named
+/// after what it shows, so the same picture is one file however often it is set. Returns the
+/// file, `None` when it cannot be written.
+pub fn write_png(dir: &Path, rgba: &[u8], width: u32, height: u32) -> Option<PathBuf> {
+    // FNV-1a: the name has to be the same in every run of jff.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in width
+        .to_le_bytes()
+        .iter()
+        .chain(height.to_le_bytes().iter())
+        .chain(rgba)
+    {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    let path = dir.join(format!("{hash:016x}.png"));
+    if path.is_file() {
+        return Some(path);
+    }
+    let bytes = encode_png(rgba, width, height).ok()?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .ok()?;
+    // Never a half written file under the name.
+    let partial = dir.join(format!("{hash:016x}.png.part"));
+    std::fs::write(&partial, bytes).ok()?;
+    std::fs::rename(&partial, &path).ok()?;
+    Some(path)
 }
 
 /// An shm buffer as straight-alpha 8-bit RGBA with its size. `None` for other kinds of buffer,

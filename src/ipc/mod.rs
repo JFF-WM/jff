@@ -84,7 +84,7 @@
 //! A window is
 //! `{"id":1,"app_id":"foot","title":"~","x":40,"y":40,"width":800,"height":600,
 //!   "maximized":false,"fullscreen":false,"focused":true,"urgent":false,"output":"DP-1",
-//!   "workspace":1,"pid":4242,"container":null,"tag":null}`.
+//!   "workspace":1,"pid":4242,"container":null,"tag":null,"icon":null}`.
 //! `id` is assigned when the window appears and never reused while jff runs. `urgent` is true
 //! while the window asked for attention (an xdg-activation token without input, a terminal's
 //! bell or a finished download) and hasn't had the keyboard since, the `urgent` event tells when it
@@ -95,6 +95,13 @@
 //! other window. `tag` is the tag that `window-rule { match tag=".." }` sees: the one given with the
 //! `tag` command or a rule's `tag` line, else the one the app set itself with xdg-toplevel-tag, null
 //! when there is none, the `tag` event tells when it changes. It is in `windows`, `focused`, `window-info`, `status` and the `watch` snapshot.
+//!
+//! `icon` of a window is what the app set with xdg-toplevel-icon, `{"name":"org.example.App",
+//! "path":"/usr/share/icons/.../app.png"}`, null when it set none. `name` is the theme name it gave
+//! (null for pictures only) and `path` a file a bar can load: the theme's own file when the name can
+//! be found, else a PNG of the largest picture the app set, which jff wrote to
+//! `$XDG_RUNTIME_DIR/jff-wm/icons` (null when it cannot be written). The `icon` event tells when it
+//! changes. It is in the same places as the rest of a window.
 //!
 //! `containers` replies `{"ok":true,"workspace":2,"containers":[CONTAINER,...]}`, the
 //! containers on the shown workspace, oldest first. A container is
@@ -159,6 +166,7 @@
 //! title            id, title (string or null)                windows
 //! app-id           id, app_id (string or null)               windows
 //! tag              id, tag (string or null)                  windows
+//! icon             id, icon (object or null)                 windows
 //! geometry         id, x, y, width, height                   windows
 //! drag             id, on                                    windows
 //! maximized        id, on                                    windows
@@ -1218,9 +1226,11 @@ impl JffState {
         let focused = focused.is_some_and(|w| w == window);
         let workspace = self.desk.workspace_of(|w| w == window).unwrap_or(0) + 1;
 
-        let (mut app_id, mut title, mut fullscreen, mut tag) = (None, None, false, None);
+        let (mut app_id, mut title, mut fullscreen, mut tag, mut icon) =
+            (None, None, false, None, None);
         if let Some(toplevel) = window.toplevel() {
             tag = crate::protocol::toplevel_tag::tag_of(toplevel.wl_surface());
+            icon = crate::protocol::toplevel_icon::ipc_icon(toplevel.wl_surface());
             (app_id, title) = with_states(toplevel.wl_surface(), |states| {
                 states
                     .data_map
@@ -1259,6 +1269,7 @@ impl JffState {
             pid: self.window_pid(window),
             container: self.container_ref(window),
             tag,
+            icon,
         }
     }
 

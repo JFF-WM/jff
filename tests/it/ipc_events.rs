@@ -1,8 +1,8 @@
 //! Tests for `jff_wm::ipc::events`.
 
 use jff_wm::ipc::events::{
-    diff, ContainerInfo, ContainerRef, Event, Group, GroupSet, LayerInfo, OutputColor, OutputHdr,
-    OutputInfo, PopupInfo, Snapshot, WindowInfo,
+    diff, ContainerInfo, ContainerRef, Event, Group, GroupSet, IconRef, LayerInfo, OutputColor,
+    OutputHdr, OutputInfo, PopupInfo, Snapshot, WindowInfo,
 };
 use jff_wm::primitives::color::{ImageDescription, NamedPrimaries};
 
@@ -24,6 +24,7 @@ fn window(id: u64) -> WindowInfo {
         pid: Some(4242),
         container: None,
         tag: None,
+        icon: None,
     }
 }
 
@@ -251,13 +252,75 @@ fn a_window_tag_appears_changes_and_goes() {
         }]
     );
     assert!(diff(&tagged, &tagged).is_empty());
-    assert_eq!(
-        diff(&tagged, &old),
-        vec![Event::Tag { id: 1, tag: None }]
-    );
+    assert_eq!(diff(&tagged, &old), vec![Event::Tag { id: 1, tag: None }]);
     assert!(tagged.windows[0]
         .to_json()
-        .ends_with("\"container\":null,\"tag\":\"browser\"}"));
+        .ends_with("\"container\":null,\"tag\":\"browser\",\"icon\":null}"));
+}
+
+#[test]
+fn a_window_icon_appears_changes_and_goes() {
+    let old = snapshot(vec![window(1)]);
+    let themed = IconRef {
+        name: Some("org.example.App".to_string()),
+        path: Some("/usr/share/icons/app.png".to_string()),
+    };
+    let mut set = old.clone();
+    set.windows[0].icon = Some(themed.clone());
+    assert_eq!(
+        diff(&old, &set),
+        vec![Event::Icon {
+            id: 1,
+            icon: Some(themed.clone())
+        }]
+    );
+    assert!(diff(&set, &set).is_empty());
+    // another picture is another event, going away is one too
+    let mut again = set.clone();
+    again.windows[0].icon = Some(IconRef {
+        name: None,
+        path: Some("/run/user/1000/jff-wm/icons/1.png".to_string()),
+    });
+    assert_eq!(diff(&set, &again).len(), 1);
+    assert_eq!(diff(&again, &old), vec![Event::Icon { id: 1, icon: None }]);
+}
+
+#[test]
+fn an_icon_is_written_as_name_and_path() {
+    let themed = IconRef {
+        name: Some("foot".to_string()),
+        path: Some("/usr/share/icons/foot.png".to_string()),
+    };
+    assert_eq!(
+        themed.to_json(),
+        "{\"name\":\"foot\",\"path\":\"/usr/share/icons/foot.png\"}"
+    );
+    let picture = IconRef {
+        name: None,
+        path: Some("/run/user/1000/jff-wm/icons/a.png".to_string()),
+    };
+    assert_eq!(
+        picture.to_json(),
+        "{\"name\":null,\"path\":\"/run/user/1000/jff-wm/icons/a.png\"}"
+    );
+    let mut v = window(1);
+    v.icon = Some(themed.clone());
+    assert!(v.to_json().ends_with(
+        "\"tag\":null,\"icon\":{\"name\":\"foot\",\"path\":\"/usr/share/icons/foot.png\"}}"
+    ));
+    assert_eq!(
+        Event::Icon {
+            id: 7,
+            icon: Some(themed)
+        }
+        .to_json(),
+        "{\"event\":\"icon\",\"id\":7,\"icon\":{\"name\":\"foot\",\"path\":\"/usr/share/icons/foot.png\"}}"
+    );
+    assert_eq!(
+        Event::Icon { id: 7, icon: None }.to_json(),
+        "{\"event\":\"icon\",\"id\":7,\"icon\":null}"
+    );
+    assert_eq!(Event::Icon { id: 7, icon: None }.group(), Group::Windows);
 }
 
 #[test]
@@ -677,13 +740,8 @@ fn every_event_belongs_to_its_group() {
             },
             Group::Windows,
         ),
-        (
-            Event::Tag {
-                id: 1,
-                tag: None,
-            },
-            Group::Windows,
-        ),
+        (Event::Tag { id: 1, tag: None }, Group::Windows),
+        (Event::Icon { id: 1, icon: None }, Group::Windows),
         (
             Event::Geometry {
                 id: 1,
@@ -743,7 +801,7 @@ fn a_window_is_written_like_the_documented_example() {
         v.to_json(),
         "{\"id\":1,\"app_id\":\"foot\",\"title\":\"~\",\"x\":40,\"y\":40,\"width\":800,\
              \"height\":600,\"maximized\":false,\"fullscreen\":false,\"focused\":true,\"urgent\":false,\
-             \"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\"container\":null,\"tag\":null}"
+             \"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\"container\":null,\"tag\":null,\"icon\":null}"
     );
     v.app_id = None;
     v.title = None;
@@ -751,7 +809,9 @@ fn a_window_is_written_like_the_documented_example() {
     assert!(v.to_json().contains("\"app_id\":null,\"title\":null"));
     assert!(v.to_json().contains("\"output\":null"));
     v.pid = None;
-    assert!(v.to_json().contains("\"pid\":null,\"container\":null,\"tag\":null}"));
+    assert!(v
+        .to_json()
+        .contains("\"pid\":null,\"container\":null,\"tag\":null,\"icon\":null}"));
 }
 
 #[test]
@@ -761,17 +821,17 @@ fn a_window_in_a_container_names_it() {
         id: 3,
         name: Some("Terminals".to_string()),
     });
-    assert!(v
-        .to_json()
-        .ends_with("\"pid\":4242,\"container\":{\"id\":3,\"name\":\"Terminals\"},\"tag\":null}"));
+    assert!(v.to_json().ends_with(
+        "\"pid\":4242,\"container\":{\"id\":3,\"name\":\"Terminals\"},\"tag\":null,\"icon\":null}"
+    ));
     v.container = Some(ContainerRef { id: 4, name: None });
     assert!(v
         .to_json()
-        .ends_with("\"container\":{\"id\":4,\"name\":null},\"tag\":null}"));
+        .ends_with("\"container\":{\"id\":4,\"name\":null},\"tag\":null,\"icon\":null}"));
     // it is spliced flat into window-opened as well
     assert!(Event::WindowOpened(v)
         .to_json()
-        .ends_with("\"container\":{\"id\":4,\"name\":null},\"tag\":null}"));
+        .ends_with("\"container\":{\"id\":4,\"name\":null},\"tag\":null,\"icon\":null}"));
 }
 
 #[test]
@@ -863,7 +923,7 @@ fn events_are_written_as_one_json_line_each() {
             "{\"event\":\"window-opened\",\"id\":5,\"app_id\":\"foot\",\"title\":\"~\",\
                  \"x\":40,\"y\":40,\"width\":800,\"height\":600,\"maximized\":false,\
                  \"fullscreen\":false,\"focused\":false,\"urgent\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\
-                 \"container\":null,\"tag\":null}",
+                 \"container\":null,\"tag\":null,\"icon\":null}",
         ),
         (
             Event::WindowClosed { id: 5 },

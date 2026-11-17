@@ -110,6 +110,28 @@ pub struct WindowInfo {
     /// The tag of the window that rules see: the one the user gave it (a rule or the `tag`
     /// command), else the one the app set with xdg-toplevel-tag. `None` when it has neither.
     pub tag: Option<String>,
+    /// The icon the app gave the window itself (xdg-toplevel-icon), `None` when it gave none.
+    pub icon: Option<IconRef>,
+}
+
+/// The icon an app set for its window: by theme name, and as a file a script can open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IconRef {
+    /// The theme name the app set, `None` when it set pictures only.
+    pub name: Option<String>,
+    /// An image file of the icon: the theme's file when `name` can be found, else a PNG that jff
+    /// wrote of the largest picture the app set. `None` when there is no such file.
+    pub path: Option<String>,
+}
+
+impl IconRef {
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"name\":{},\"path\":{}}}",
+            json_opt(self.name.as_deref()),
+            json_opt(self.path.as_deref())
+        )
+    }
 }
 
 /// The tiling container a window is a member of: what a window says about it.
@@ -183,7 +205,7 @@ impl WindowInfo {
     fn members(&self) -> String {
         format!(
             "\"id\":{},\"app_id\":{},\"title\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\
-             \"maximized\":{},\"fullscreen\":{},\"focused\":{},\"urgent\":{},\"output\":{},\"workspace\":{},\"pid\":{},\"container\":{},\"tag\":{}",
+             \"maximized\":{},\"fullscreen\":{},\"focused\":{},\"urgent\":{},\"output\":{},\"workspace\":{},\"pid\":{},\"container\":{},\"tag\":{},\"icon\":{}",
             self.id,
             json_opt(self.app_id.as_deref()),
             json_opt(self.title.as_deref()),
@@ -200,6 +222,9 @@ impl WindowInfo {
             self.pid.map_or_else(|| "null".to_string(), |pid| pid.to_string()),
             json_container(self.container.as_ref()),
             json_opt(self.tag.as_deref()),
+            self.icon
+                .as_ref()
+                .map_or_else(|| "null".to_string(), IconRef::to_json),
         )
     }
 
@@ -624,6 +649,11 @@ pub enum Event {
         id: u64,
         tag: Option<String>,
     },
+    /// The app set another icon for the window, or took it away.
+    Icon {
+        id: u64,
+        icon: Option<IconRef>,
+    },
     Geometry {
         id: u64,
         x: i32,
@@ -701,6 +731,7 @@ impl Event {
             | Event::Title { .. }
             | Event::AppId { .. }
             | Event::Tag { .. }
+            | Event::Icon { .. }
             | Event::Geometry { .. }
             | Event::Drag { .. }
             | Event::Maximized { .. }
@@ -753,6 +784,11 @@ impl Event {
             Event::Tag { id, tag } => format!(
                 "{{\"event\":\"tag\",\"id\":{id},\"tag\":{}}}",
                 json_opt(tag.as_deref())
+            ),
+            Event::Icon { id, icon } => format!(
+                "{{\"event\":\"icon\",\"id\":{id},\"icon\":{}}}",
+                icon.as_ref()
+                    .map_or_else(|| "null".to_string(), IconRef::to_json)
             ),
             Event::Drag { id, on } => {
                 format!("{{\"event\":\"drag\",\"id\":{id},\"on\":{on}}}")
@@ -889,6 +925,12 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
             events.push(Event::Tag {
                 id,
                 tag: after.tag.clone(),
+            });
+        }
+        if before.icon != after.icon {
+            events.push(Event::Icon {
+                id,
+                icon: after.icon.clone(),
             });
         }
         if new.dragging == Some(id) && old.dragging != Some(id) {
