@@ -662,3 +662,239 @@ fn sdr_white_commands_are_parsed() {
     assert!(parse_request("sdr-white 1.5").is_err());
     assert!(parse_request("sdr-white 200 DP-1 more").is_err());
 }
+
+#[test]
+fn hdr_set_is_parsed_with_the_units_of_the_config() {
+    use jff_wm::feature::hdr_control::HdrSetting;
+    use jff_wm::primitives::gamut::GamutMap;
+    use jff_wm::primitives::hdr_output::ToneMap;
+    let set = |line: &str| match parse_request(line) {
+        Ok(Request::HdrSet(monitor, setting)) => (monitor, setting),
+        other => panic!("{line:?} gave {other:?}"),
+    };
+    assert_eq!(
+        set("hdr-set DP-1 contrast 1.2"),
+        ("DP-1".to_string(), HdrSetting::Contrast(Some(1200)))
+    );
+    assert_eq!(
+        set("hdr-set DP-1 hdr-contrast 1.2").1,
+        HdrSetting::Contrast(Some(1200))
+    );
+    assert_eq!(
+        set("hdr-set DP-1 hdr-peak 1000").1,
+        HdrSetting::Peak(Some(1000))
+    );
+    assert_eq!(set("hdr-set DP-1 peak default").1, HdrSetting::Peak(None));
+    assert_eq!(
+        set("hdr-set DP-1 tone-map bt2390").1,
+        HdrSetting::ToneMap(Some(ToneMap::Bt2390))
+    );
+    assert_eq!(
+        set("hdr-set DP-1 gamut-map clip").1,
+        HdrSetting::GamutMap(Some(GamutMap::Clip))
+    );
+    assert_eq!(
+        set("hdr-set DP-1 black-level -0.5").1,
+        HdrSetting::BlackLevel(Some(-500))
+    );
+    assert_eq!(
+        set("hdr-set DP-1 saturation 1.1").1,
+        HdrSetting::Saturation(Some(1100))
+    );
+    assert_eq!(
+        set("hdr-set DP-1 white-balance 1.0 0.95 0.9").1,
+        HdrSetting::WhiteBalance(Some([1000, 950, 900]))
+    );
+    assert_eq!(
+        set("hdr-set DP-1 white-balance default").1,
+        HdrSetting::WhiteBalance(None)
+    );
+}
+
+#[test]
+fn hdr_set_refuses_what_the_config_would_refuse() {
+    for line in [
+        "hdr-set",
+        "hdr-set DP-1",
+        "hdr-set DP-1 contrast",
+        "hdr-set DP-1 contrast 2.5",
+        "hdr-set DP-1 contrast high",
+        "hdr-set DP-1 contrast 1.2 1.3",
+        "hdr-set DP-1 peak 50",
+        "hdr-set DP-1 peak 1000.5",
+        "hdr-set DP-1 black-level 9",
+        "hdr-set DP-1 saturation -1",
+        "hdr-set DP-1 tone-map reinhard",
+        "hdr-set DP-1 gamut-map nearest",
+        "hdr-set DP-1 white-balance 1.0 1.0",
+        "hdr-set DP-1 white-balance 1.0 1.0 1.6",
+        "hdr-set DP-1 sdr-white 203",
+        "hdr-set DP-1 volume 3",
+    ] {
+        assert!(parse_request(line).is_err(), "{line:?} was accepted");
+    }
+}
+
+#[test]
+fn hdr_reset_is_parsed() {
+    assert_eq!(
+        parse_request("hdr-reset DP-1"),
+        Ok(Request::HdrReset("DP-1".to_string()))
+    );
+    assert!(parse_request("hdr-reset").is_err());
+    assert!(parse_request("hdr-reset DP-1 DP-2").is_err());
+    assert!(COMMANDS.contains("hdr-set"));
+    assert!(COMMANDS.contains("hdr-reset"));
+}
+
+#[test]
+fn an_hdr_setting_edits_its_own_field_and_reset_restores_the_file() {
+    use jff_wm::config::OutputConfig;
+    use jff_wm::feature::hdr_control::{restore_hdr_settings, HdrSetting};
+    let file = OutputConfig {
+        name: "DP-1".to_string(),
+        hdr: true,
+        sdr_white: Some(250),
+        hdr_contrast: Some(1100),
+        ..Default::default()
+    };
+    let mut running = file.clone();
+    running.scale = Some(240);
+    HdrSetting::Contrast(Some(1500)).apply(&mut running);
+    HdrSetting::Peak(Some(800)).apply(&mut running);
+    running.sdr_white = Some(400);
+    running.hdr = false;
+    assert_eq!(running.hdr_contrast, Some(1500));
+    assert_eq!(running.hdr_peak, Some(800));
+
+    restore_hdr_settings(&mut running, Some(&file));
+    assert!(running.hdr);
+    assert_eq!(running.sdr_white, Some(250));
+    assert_eq!(running.hdr_contrast, Some(1100));
+    assert_eq!(running.hdr_peak, None);
+    // what is not an HDR setting stays as it is running
+    assert_eq!(running.scale, Some(240));
+
+    // a monitor the file does not mention goes back to the defaults
+    restore_hdr_settings(&mut running, None);
+    assert!(!running.hdr);
+    assert_eq!(running.sdr_white, None);
+    assert_eq!(running.hdr_contrast, None);
+    assert_eq!(running.scale, Some(240));
+}
+
+#[test]
+fn hdr_get_is_parsed() {
+    assert_eq!(
+        parse_request("hdr-get DP-1"),
+        Ok(Request::HdrGet("DP-1".to_string()))
+    );
+    assert!(parse_request("hdr-get").is_err());
+    assert!(parse_request("hdr-get DP-1 DP-2").is_err());
+    assert!(COMMANDS.contains("hdr-get"));
+}
+
+fn hdr_entry() -> jff_wm::config::OutputConfig {
+    jff_wm::config::OutputConfig {
+        name: "DP-1".to_string(),
+        hdr: true,
+        sdr_white: Some(203),
+        hdr_contrast: Some(1100),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn hdr_get_lists_only_what_changed_as_lines_for_the_config() {
+    use jff_wm::feature::hdr_control::{hdr_changes, HdrSetting};
+    use jff_wm::primitives::hdr_output::ToneMap;
+    let file = hdr_entry();
+    assert!(hdr_changes(&file, Some(&file)).is_empty());
+
+    let mut running = file.clone();
+    running.sdr_white = Some(250);
+    HdrSetting::Contrast(Some(1200)).apply(&mut running);
+    HdrSetting::Peak(Some(1000)).apply(&mut running);
+    HdrSetting::ToneMap(Some(ToneMap::Bt2390)).apply(&mut running);
+    HdrSetting::BlackLevel(Some(-500)).apply(&mut running);
+    HdrSetting::Saturation(Some(1000)).apply(&mut running);
+    HdrSetting::WhiteBalance(Some([1000, 950, 900])).apply(&mut running);
+    assert_eq!(
+        hdr_changes(&running, Some(&file)),
+        vec![
+            ("sdr_white", "sdr-white 250".to_string()),
+            ("peak", "hdr-peak 1000".to_string()),
+            ("tone_map", "hdr-tone-map \"bt2390\"".to_string()),
+            ("contrast", "hdr-contrast 1.2".to_string()),
+            ("black_level", "hdr-black-level -0.5".to_string()),
+            ("saturation", "hdr-saturation 1.0".to_string()),
+            (
+                "white_balance",
+                "hdr-white-balance 1.0 0.95 0.9".to_string()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn hdr_get_says_to_remove_a_line_that_is_back_at_its_default() {
+    use jff_wm::feature::hdr_control::{hdr_changes, HdrSetting};
+    let file = hdr_entry();
+    let mut running = file.clone();
+    HdrSetting::Contrast(None).apply(&mut running);
+    running.hdr = false;
+    assert_eq!(
+        hdr_changes(&running, Some(&file)),
+        vec![
+            ("hdr", "// remove hdr".to_string()),
+            ("contrast", "// remove hdr-contrast".to_string()),
+        ]
+    );
+    // a monitor the file does not mention is compared with the defaults
+    assert_eq!(
+        hdr_changes(&file, None),
+        vec![
+            ("hdr", "hdr".to_string()),
+            ("sdr_white", "sdr-white 203".to_string()),
+            ("contrast", "hdr-contrast 1.1".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn hdr_get_replies_with_the_settings_and_the_changes() {
+    use jff_wm::feature::hdr_control::{hdr_get_json, HdrSetting};
+    let file = hdr_entry();
+    let mut running = file.clone();
+    HdrSetting::Contrast(Some(1200)).apply(&mut running);
+    HdrSetting::WhiteBalance(Some([1000, 950, 900])).apply(&mut running);
+    assert_eq!(
+        hdr_get_json("DP-1", &running, Some(Some(&file))),
+        "{\"ok\":true,\"output\":\"DP-1\",\"settings\":{\"hdr\":true,\"sdr_white\":203,\"sdr_transfer\":null,\
+         \"peak\":null,\"min_luminance\":null,\"tone_map\":null,\"contrast\":1.2,\"black_level\":null,\
+         \"saturation\":null,\"white_balance\":[1.0,0.95,0.9],\"gamut_map\":null,\"content_metadata\":null},\"changed\":[\"contrast\",\"white_balance\"],\
+         \"kdl\":\"hdr-contrast 1.2\\nhdr-white-balance 1.0 0.95 0.9\"}\n"
+    );
+    // nothing changed
+    assert!(hdr_get_json("DP-1", &file, Some(Some(&file))).contains("\"changed\":[],\"kdl\":\"\""));
+    // the file could not be read: the settings are still there
+    let json = hdr_get_json("DP-1", &running, None);
+    assert!(json.contains("\"changed\":null,\"kdl\":null"));
+    assert!(json.contains("\"contrast\":1.2"));
+}
+
+#[test]
+fn hdr_get_reports_the_settings_hdr_set_does_not_change_too() {
+    use jff_wm::feature::hdr_control::hdr_settings_json;
+    use jff_wm::primitives::hdr_output::SdrTransfer;
+    let config = jff_wm::config::OutputConfig {
+        sdr_transfer: Some(SdrTransfer::Gamma22),
+        hdr_min_luminance: Some(500),
+        hdr_content_metadata: Some(false),
+        ..Default::default()
+    };
+    let json = hdr_settings_json(&config);
+    assert!(json.contains("\"sdr_transfer\":\"gamma22\""));
+    assert!(json.contains("\"min_luminance\":0.05"));
+    assert!(json.contains("\"content_metadata\":false"));
+}

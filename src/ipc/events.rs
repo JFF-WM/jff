@@ -220,12 +220,14 @@ pub struct OutputInfo {
     pub adaptive_sync: bool,
     /// How jff takes the monitor's colors to be.
     pub color: OutputColor,
+    /// HDR: what is asked for, what the monitor really does, and how.
+    pub hdr: OutputHdr,
 }
 
 impl OutputInfo {
     fn members(&self) -> String {
         format!(
-            "\"name\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"scanout\":{},\"adaptive_sync\":{},\"color\":{}",
+            "\"name\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"scanout\":{},\"adaptive_sync\":{},\"color\":{},\"hdr\":{}",
             json_str(&self.name),
             self.x,
             self.y,
@@ -234,6 +236,7 @@ impl OutputInfo {
             self.scanout,
             self.adaptive_sync,
             self.color.to_json(),
+            self.hdr.to_json(),
         )
     }
 
@@ -306,6 +309,92 @@ impl OutputColor {
 impl Default for OutputColor {
     fn default() -> Self {
         Self::new(None, &ImageDescription::srgb(), false)
+    }
+}
+
+/// HDR on a monitor, as `outputs` and `watch` report it.
+///
+/// `requested` is the config's `hdr` (or `jff msg hdr on`), `active` is whether the monitor is
+/// really drawn and signalled as HDR. The members that describe the signal (`eotf`, `peak`,
+/// `peak_source`, `bits`) are `None` while it is not active, `sdr_white` is always the level
+/// that is configured, so a bar can show it before HDR turns on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputHdr {
+    pub requested: bool,
+    pub active: bool,
+    /// Why a requested HDR is not active. `None` when it is, or when it is not requested.
+    pub reason: Option<String>,
+    /// `PQ` or `HLG`.
+    pub eotf: Option<String>,
+    /// Peak luminance the frame is mapped to and the monitor is told, in cd/m².
+    pub peak: Option<u32>,
+    /// `edid`, `hdr-peak`, or `assumed` when neither gave a peak.
+    pub peak_source: Option<String>,
+    /// SDR white in cd/m² (`sdr-white`, 203 by default).
+    pub sdr_white: u32,
+    /// Bits per color the picture is carried and dithered at.
+    pub bits: Option<u32>,
+    /// A night light tint is applied to the picture.
+    pub night_light: bool,
+    /// `max_cll` of the window on the primary plane, `None` when there is none or it says none.
+    pub max_cll: Option<u32>,
+    /// `max_fall` of the window on the primary plane, `None` when there is none or it says none.
+    pub max_fall: Option<u32>,
+    /// The primary plane shows a client's buffer directly (the same as `scanout` of the monitor).
+    pub scanout: bool,
+    /// Why an HDR monitor is not scanning out directly. `None` while it does, and on a monitor
+    /// that is not active.
+    pub scanout_reason: Option<String>,
+}
+
+/// An SDR monitor with nothing asked for.
+impl Default for OutputHdr {
+    fn default() -> Self {
+        Self {
+            requested: false,
+            active: false,
+            reason: None,
+            eotf: None,
+            peak: None,
+            peak_source: None,
+            sdr_white: crate::primitives::hdr_output::DEFAULT_SDR_WHITE,
+            bits: None,
+            night_light: false,
+            max_cll: None,
+            max_fall: None,
+            scanout: false,
+            scanout_reason: None,
+        }
+    }
+}
+
+impl OutputHdr {
+    pub fn to_json(&self) -> String {
+        let number = |n: Option<u32>| n.map_or_else(|| "null".to_string(), |n| n.to_string());
+        let content = if self.max_cll.is_none() && self.max_fall.is_none() {
+            "null".to_string()
+        } else {
+            format!(
+                "{{\"max_cll\":{},\"max_fall\":{}}}",
+                number(self.max_cll),
+                number(self.max_fall)
+            )
+        };
+        format!(
+            "{{\"requested\":{},\"active\":{},\"reason\":{},\"eotf\":{},\"peak\":{},\"peak_source\":{},\"sdr_white\":{},\"bits\":{},\"night_light\":{},\"content_light\":{},\"scanout\":{{\"active\":{},\"reason\":{}}}}}",
+            self.requested,
+            self.active,
+            json_opt(self.reason.as_deref()),
+            json_opt(self.eotf.as_deref()),
+            number(self.peak),
+            json_opt(self.peak_source.as_deref()),
+            self.sdr_white,
+            number(self.bits),
+            self.night_light,
+            content,
+            self.scanout,
+            json_opt(self.scanout_reason.as_deref()),
+        )
     }
 }
 

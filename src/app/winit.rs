@@ -146,6 +146,33 @@ impl JffState {
             .collect()
     }
 
+    /// The HDR state of the winit output for `outputs` and `watch`: the simulation, which has no link, no plane and no night light.
+    pub fn winit_output_hdr(&self, output: &Output) -> crate::ipc::events::OutputHdr {
+        let config = self.config.output(&output.name());
+        let requested = config.is_some_and(|c| c.hdr);
+        let sdr_white = config
+            .and_then(|c| c.sdr_white)
+            .unwrap_or(hdr_output::DEFAULT_SDR_WHITE);
+        let peak_override = config.and_then(|c| c.hdr_peak);
+        crate::ipc::events::OutputHdr {
+            requested,
+            active: requested,
+            sdr_white,
+            eotf: requested.then(|| "PQ".to_string()),
+            peak: requested.then(|| peak_override.unwrap_or(SIMULATED_PEAK)),
+            peak_source: requested.then(|| {
+                if peak_override.is_some() {
+                    "hdr-peak"
+                } else {
+                    "assumed"
+                }
+                .to_string()
+            }),
+            bits: requested.then_some(WINDOW_BITS),
+            ..Default::default()
+        }
+    }
+
     /// The working space and final pass of the winit output for a screenshot, with the content peak of the last frame.
     pub fn winit_hdr_capture(&self, output: &Output) -> Option<(WorkingSpace, FinalPass)> {
         if self.outputs.first() != Some(output) {

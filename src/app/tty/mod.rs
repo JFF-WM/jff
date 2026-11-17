@@ -969,6 +969,81 @@ impl Tty {
             .any(|lit| lit.output == *output && lit.scanning_out)
     }
 
+    /// The HDR state of `output` for `outputs` and `watch`: what the config asks for, and what the monitor does with it.
+    pub fn output_hdr(&self, output: &Output, config: &Config) -> crate::ipc::events::OutputHdr {
+        use crate::ipc::events::OutputHdr;
+        let name = output.name();
+        let output_config = config.output(&name);
+        let requested = output_config.is_some_and(|c| c.hdr);
+        let sdr_white = output_config
+            .and_then(|c| c.sdr_white)
+            .unwrap_or(hdr_output::DEFAULT_SDR_WHITE);
+        let base = OutputHdr {
+            requested,
+            sdr_white,
+            ..OutputHdr::default()
+        };
+        let Some(((dev, _), lit)) = self.outputs.iter().find(|(_, lit)| lit.output == *output)
+        else {
+            return OutputHdr {
+                reason: requested.then(|| "the monitor is not lit".to_string()),
+                ..base
+            };
+        };
+        let scanout = lit.scanning_out;
+        let (Some(_), Some(plan)) = (&lit.hdr, lit.hdr_plan) else {
+            let reason = if !requested {
+                None
+            } else if *dev != DeviceId::PRIMARY {
+                Some("the monitor is on a secondary GPU, which is SDR only".to_string())
+            } else if let Status::Sdr(reason) = &lit.hdr_status {
+                Some(reason.to_string())
+            } else {
+                Some("HDR is not set up yet".to_string())
+            };
+            return OutputHdr {
+                reason,
+                scanout,
+                ..base
+            };
+        };
+        let scanout_reason = if scanout {
+            None
+        } else if let Some(reason) = lit.hdr_scanout.reason {
+            Some(reason.to_string())
+        } else if lit.hdr_scanout.declined.is_some() {
+            Some("the buffer did not reach the primary plane".to_string())
+        } else {
+            Some(hdr_scanout::Decline::NotCovering.to_string())
+        };
+        OutputHdr {
+            active: true,
+            eotf: Some(
+                match plan.eotf {
+                    OutputEotf::Pq => "PQ",
+                    OutputEotf::Hlg => "HLG",
+                }
+                .to_string(),
+            ),
+            peak: Some(u32::from(plan.max_luminance)),
+            peak_source: Some(
+                match plan.peak_source {
+                    hdr::PeakSource::Edid => "edid",
+                    hdr::PeakSource::Override => "hdr-peak",
+                    hdr::PeakSource::Assumed => "assumed",
+                }
+                .to_string(),
+            ),
+            bits: Some(link_bits(lit.compositor.format()).min(plan.max_bpc.unwrap_or(u32::MAX))),
+            night_light: lit.night_gain != [1.0; 3],
+            max_cll: lit.hdr_content.0,
+            max_fall: lit.hdr_content.1,
+            scanout,
+            scanout_reason,
+            ..base
+        }
+    }
+
     /// Whether variable refresh rate is on for `output` right now. False if it isn't lit.
     pub fn adaptive_sync(&self, output: &Output) -> bool {
         self.outputs

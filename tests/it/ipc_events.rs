@@ -1,8 +1,8 @@
 //! Tests for `jff_wm::ipc::events`.
 
 use jff_wm::ipc::events::{
-    diff, ContainerInfo, ContainerRef, Event, Group, GroupSet, LayerInfo, OutputColor, OutputInfo,
-    PopupInfo, Snapshot, WindowInfo,
+    diff, ContainerInfo, ContainerRef, Event, Group, GroupSet, LayerInfo, OutputColor, OutputHdr,
+    OutputInfo, PopupInfo, Snapshot, WindowInfo,
 };
 use jff_wm::primitives::color::{ImageDescription, NamedPrimaries};
 
@@ -36,6 +36,7 @@ fn output(name: &str, x: i32) -> OutputInfo {
         scanout: false,
         adaptive_sync: false,
         color: OutputColor::default(),
+        hdr: OutputHdr::default(),
     }
 }
 
@@ -450,6 +451,7 @@ fn outputs_added_removed_and_changed() {
             scanout: false,
             adaptive_sync: false,
             color: OutputColor::default(),
+            hdr: OutputHdr::default(),
         })]
     );
 }
@@ -469,7 +471,7 @@ fn adaptive_sync_changes_are_output_changes() {
     assert_eq!(
         diff(&old, &new)[0].to_json(),
         "{\"event\":\"output-changed\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-             \"height\":1080,\"scanout\":false,\"adaptive_sync\":true,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false}}"
+             \"height\":1080,\"scanout\":false,\"adaptive_sync\":true,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false},\"hdr\":{\"requested\":false,\"active\":false,\"reason\":null,\"eotf\":null,\"peak\":null,\"peak_source\":null,\"sdr_white\":203,\"bits\":null,\"night_light\":false,\"content_light\":null,\"scanout\":{\"active\":false,\"reason\":null}}}"
     );
     assert_eq!(
         diff(&new, &old),
@@ -575,7 +577,7 @@ fn scanout_changes_are_output_changes() {
     assert_eq!(
         diff(&old, &new)[0].to_json(),
         "{\"event\":\"output-changed\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-             \"height\":1080,\"scanout\":true,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false}}"
+             \"height\":1080,\"scanout\":true,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false},\"hdr\":{\"requested\":false,\"active\":false,\"reason\":null,\"eotf\":null,\"peak\":null,\"peak_source\":null,\"sdr_white\":203,\"bits\":null,\"night_light\":false,\"content_light\":null,\"scanout\":{\"active\":false,\"reason\":null}}}"
     );
     assert_eq!(
         diff(&new, &old),
@@ -1122,4 +1124,92 @@ fn click_event_names_the_layer() {
     assert!(json.contains("\"namespace\":\"Nbar-Top\""), "{json}");
     assert!(json.contains("\"popup\":false"), "{json}");
     assert_eq!(Group::parse("clicks"), Some(Group::Clicks));
+}
+
+fn hdr_on() -> OutputHdr {
+    OutputHdr {
+        requested: true,
+        active: true,
+        eotf: Some("PQ".to_string()),
+        peak: Some(1000),
+        peak_source: Some("edid".to_string()),
+        bits: Some(10),
+        ..OutputHdr::default()
+    }
+}
+
+#[test]
+fn an_sdr_monitor_reports_hdr_as_off_at_the_default_white() {
+    let hdr = OutputHdr::default();
+    assert!(!hdr.requested && !hdr.active);
+    assert_eq!(hdr.sdr_white, 203);
+    assert_eq!(
+        hdr.to_json(),
+        "{\"requested\":false,\"active\":false,\"reason\":null,\"eotf\":null,\"peak\":null,\
+         \"peak_source\":null,\"sdr_white\":203,\"bits\":null,\"night_light\":false,\
+         \"content_light\":null,\"scanout\":{\"active\":false,\"reason\":null}}"
+    );
+}
+
+#[test]
+fn an_active_hdr_monitor_reports_its_signal() {
+    let hdr = OutputHdr {
+        night_light: true,
+        max_cll: Some(800),
+        max_fall: None,
+        scanout: true,
+        ..hdr_on()
+    };
+    assert_eq!(
+        hdr.to_json(),
+        "{\"requested\":true,\"active\":true,\"reason\":null,\"eotf\":\"PQ\",\"peak\":1000,\
+         \"peak_source\":\"edid\",\"sdr_white\":203,\"bits\":10,\"night_light\":true,\
+         \"content_light\":{\"max_cll\":800,\"max_fall\":null},\
+         \"scanout\":{\"active\":true,\"reason\":null}}"
+    );
+}
+
+#[test]
+fn a_requested_hdr_that_is_not_active_says_why() {
+    let hdr = OutputHdr {
+        requested: true,
+        reason: Some("the EDID has no HDR static metadata block".to_string()),
+        ..OutputHdr::default()
+    };
+    assert!(hdr.to_json().contains(
+        "\"requested\":true,\"active\":false,\"reason\":\"the EDID has no HDR static metadata block\""
+    ));
+}
+
+#[test]
+fn hdr_and_sdr_white_changes_are_output_changes() {
+    let old = snapshot(vec![]);
+    let mut on = old.clone();
+    on.outputs[0].hdr = hdr_on();
+    assert_eq!(
+        diff(&old, &on),
+        vec![Event::OutputChanged(OutputInfo {
+            hdr: hdr_on(),
+            ..output("DP-1", 0)
+        })]
+    );
+    let json = diff(&old, &on)[0].to_json();
+    assert!(json.contains("\"hdr\":{\"requested\":true,\"active\":true"));
+
+    let mut brighter = on.clone();
+    brighter.outputs[0].hdr.sdr_white = 300;
+    let events = diff(&on, &brighter);
+    assert_eq!(names(&events), ["output-changed"]);
+    assert!(events[0].to_json().contains("\"sdr_white\":300"));
+
+    assert!(diff(&on, &on.clone()).is_empty());
+    assert_eq!(names(&diff(&on, &old)), ["output-changed"]);
+}
+
+#[test]
+fn hdr_is_in_the_outputs_snapshot() {
+    let mut snap = snapshot(vec![]);
+    snap.outputs[0].hdr = hdr_on();
+    let json = snap.to_json(GroupSet::from_groups(&[Group::Outputs]));
+    assert!(json.contains("\"hdr\":{\"requested\":true,\"active\":true,\"reason\":null"));
 }

@@ -44,7 +44,12 @@
 //!                            `"stats":null`
 //! toggle-stats               show or hide the stats overlay (the `toggle-stats` action)
 //! status                     windows and workspace state in one reply (for panels)
-//! outputs                    every monitor: area, scanout, adaptive sync and colors
+//! outputs                    every monitor: area, scanout, adaptive sync, colors and HDR
+//! hdr on|off|toggle [MONITOR]    turn HDR on a monitor on or off
+//! sdr-white [+|-]NITS [MONITOR]  SDR white on an HDR monitor, in cd/m²
+//! hdr-set MONITOR KEY VALUE...   change one HDR setting of a monitor (see below)
+//! hdr-get MONITOR            HDR settings in use, and the ones changed while jff runs
+//! hdr-reset MONITOR          HDR settings of a monitor back to the config file's
 //! screenshot-area            freeze the monitor under the pointer and pick a rectangle to save
 //! screenshot-fullscreen      save a picture of the monitor under the pointer
 //! screenshot-window          save a picture of the window the user works in
@@ -99,7 +104,7 @@
 //! `layout-save` replies `{"ok":true,"name":"Dev","layout":"h0.7(_,@browser)","slots":[null,"browser"]}`, `layout-apply` replies `{"ok":true,"name":"Dev","slots":2,"empty":0,"extra":0}`, `layout-list` replies `{"ok":true,"layouts":[{"name":..,"layout":..,"slots":[..]}]}`, a tagged window goes to the slot with its tag, layouts are in `$XDG_STATE_HOME/jff-wm/container-layouts`.
 //!
 //! `outputs` replies `{"ok":true,"outputs":[OUTPUT,...]}`, each OUTPUT what `watch` describes
-//! below (`name`, `x`, `y`, `width`, `height`, `scanout`, `adaptive_sync`, `color`), as it is
+//! below (`name`, `x`, `y`, `width`, `height`, `scanout`, `adaptive_sync`, `color`, `hdr`), as it is
 //! now. A script that wants one answer gets it here, a panel that wants to follow the changes
 //! uses `watch outputs`.
 //!
@@ -120,7 +125,7 @@
 //!  "workspace":2,"count":9,                the shown workspace (from 1) and how many there are
 //!  "focused":3,                            id of the window that has the keyboard, or null
 //!  "outputs":[{"name":"DP-1","x":0,"y":0,"width":1920,"height":1080,"scanout":false,
-//!              "adaptive_sync":false,"color":COLOR},...],
+//!              "adaptive_sync":false,"color":COLOR,"hdr":HDR},...],
 //!  "overview":false,"screenshot":false,    overview / screenshot selection is open
 //!  "locked":false,                         the session is locked
 //!  "popups":[POPUP,...],                   mapped menus and popovers
@@ -147,8 +152,8 @@
 //! window-container   id, container (see `container` above)     windows
 //! focus            id, previous (window ids, or null)          focus
 //! workspace        workspace, count                          workspaces
-//! output-added     name, x, y, width, height, scanout, adaptive_sync, color   outputs
-//! output-changed   name, x, y, width, height, scanout, adaptive_sync, color   outputs
+//! output-added     name, x, y, width, height, scanout, adaptive_sync, color, hdr   outputs
+//! output-changed   name, x, y, width, height, scanout, adaptive_sync, color, hdr   outputs
 //! output-removed   name                                      outputs
 //! overview         open                                      modes
 //! screenshot       open (the area selection)                 modes
@@ -204,6 +209,60 @@
 //! that is `srgb` here is one a profile says is sRGB, not just one nobody described.
 //! `icc_readable` is true when the profile was found and read. It is false without a profile
 //! too, `profile` being null tells that apart from a profile that is missing or broken.
+//!
+//! `hdr` is what the monitor is asked to do and what it really does, so a bar or a script can
+//! show it without guessing. A change of any member is an `output-changed` event, `jff msg hdr`
+//! and `jff msg sdr-white` included:
+//!
+//! ```text
+//! "hdr":{"requested":true,         `hdr` is set (config, or `jff msg hdr on`)
+//!        "active":true,            the monitor is really drawn and signalled as HDR
+//!        "reason":null,            why it is requested and not active, a sentence (the EDID has
+//!                                  no HDR static metadata block, the connector's max bpc is too
+//!                                  low, the renderer has no 16-bit float target, ...), else null
+//!        "eotf":"PQ",              PQ or HLG, null while not active
+//!        "peak":1000,              cd/m² the frame is mapped to and the monitor is told
+//!        "peak_source":"edid",     edid, hdr-peak, or assumed when neither gave a peak
+//!        "sdr_white":203,          cd/m², always the configured one, also while HDR is off
+//!        "bits":10,                bits per color the picture is carried and dithered at
+//!        "night_light":false,      a night light tint is applied
+//!        "content_light":{"max_cll":800,"max_fall":400},
+//!                                  light levels of the window on the primary plane, null when
+//!                                  none is there or it states none, either member may be null
+//!        "scanout":{"active":false,"reason":"the surface is not PQ in BT.2020"}}
+//! ```
+//!
+//! `scanout.active` is the monitor's `scanout`. `scanout.reason` says why an HDR monitor does not
+//! scan a window out directly (no fullscreen window, something drawn over it, the buffer is not a
+//! dmabuf, ...), and is null while it does and on a monitor that is not active. On a monitor
+//! without HDR, and on winit (which simulates it), `eotf`, `peak`, `peak_source` and `bits` are
+//! null or the simulation's, there is no night light, plane or `content_light`.
+//!
+//! `hdr`, `sdr-white`, `hdr-set` and `hdr-reset` change a monitor's config entry while jff runs,
+//! on a monitor jff drives directly, and reply `{"ok":true,"output":"DP-1","hdr":true,
+//! "active":true,"sdr_white":203}` (what is asked for, what the monitor does, SDR white). The
+//! change lasts until `reload-config`, and the `outputs` and `watch` `hdr` object follows it.
+//! `hdr-set MONITOR KEY VALUE` takes `peak` (cd/m², 100 to 10000), `tone-map` (`knee` or
+//! `bt2390`), `contrast` (0.5 to 2.0), `black-level` (cd/m², -5.0 to 5.0), `saturation` (0.0 to
+//! 2.0), `white-balance` (the gain of red, green and blue, each 0.5 to 1.5: `1.0 0.95 0.9`) and
+//! `gamut-map` (`clip` or `compress`), each also as in the config with `hdr-` in front. The value
+//! `default` puts the default back, a value out of range is refused. `hdr-reset MONITOR` gives a
+//! monitor the `hdr`, `sdr-white` and these settings the config file says (the defaults when the
+//! file has no entry for it). It reads the file for that and applies nothing else of it, so
+//! other runtime changes and the rest of the config stay as they are.
+//!
+//! `hdr-get MONITOR` replies with the settings in use and what differs from the config file:
+//! `{"ok":true,"output":"DP-1","settings":{"hdr":true,"sdr_white":250,"sdr_transfer":null,
+//! "peak":1000,"min_luminance":null,"tone_map":"bt2390","contrast":1.2,"black_level":null,
+//! "saturation":null,"white_balance":[1.0,0.95,0.9],"gamut_map":null,"content_metadata":null},
+//! "changed":["sdr_white","contrast"],"kdl":"sdr-white 250\nhdr-contrast 1.2"}`. `settings` has
+//! every HDR setting of the monitor, also those `hdr-set` does not change (`sdr_transfer`,
+//! `min_luminance` in cd/m², `content_metadata`). `null` in it is the default (the EDID's for
+//! `peak` and `min_luminance`, on for `content_metadata`). `changed` names the settings that differ from the file, and `kdl` holds the lines for
+//! the monitor's `output` block that give the file those values, one per change. A setting that
+//! is at its default now but has a value in the file comes as `// remove hdr-contrast`. When the
+//! file cannot be read, `changed` and `kdl` are null and `settings` is still there. It is a
+//! request, not part of `outputs` and `watch`.
 //!
 //! `drag` says the user started (`on` true) or stopped (`on` false) moving a window by its
 //! titlebar, or carrying its thumbnail in the overview (after the pointer moved far enough to
@@ -375,6 +434,12 @@ pub enum Request {
     ToggleOverview,
     /// `hdr on|off|toggle [MONITOR]` and `sdr-white [+|-]NITS [MONITOR]`: change HDR on a monitor until the config is reloaded.
     Hdr(crate::primitives::hdr_output::HdrChange, Option<String>),
+    /// `hdr-set MONITOR KEY VALUE...`: change one HDR setting of a monitor until the config is reloaded or `hdr-reset`.
+    HdrSet(String, crate::feature::hdr_control::HdrSetting),
+    /// `hdr-get MONITOR`: the HDR settings of a monitor, and which of them were changed while jff runs.
+    HdrGet(String),
+    /// `hdr-reset MONITOR`: the HDR settings of a monitor back to the config file's, without reloading the rest.
+    HdrReset(String),
     /// `stats`: the numbers of the stats overlay for the focused window, as JSON. Starts
     /// counting if nothing is (for a few seconds after the last request, nothing is drawn).
     Stats,
@@ -390,7 +455,7 @@ pub enum Request {
 pub const COMMANDS: &str =
     "windows, status, outputs, focused, window-info, close, maximize, unmaximize, toggle-maximize, \
      fullscreen, unfullscreen, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
-     screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, hdr, sdr-white, stats, toggle-stats, watch";
+     screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
     word.parse::<usize>()
@@ -409,6 +474,17 @@ fn parse_monitor(word: &str) -> Result<MonitorTarget, String> {
 fn layout_slots_json(template: &crate::primitives::layout_template::Template) -> String {
     let slots: Vec<String> = template.slots().into_iter().map(json_opt).collect();
     format!("[{}]", slots.join(","))
+}
+
+/// The reply of the commands that change HDR: what the monitor is set to now.
+fn hdr_report_json(report: &crate::feature::hdr_control::HdrReport) -> String {
+    format!(
+        "{{\"ok\":true,\"output\":{},\"hdr\":{},\"active\":{},\"sdr_white\":{}}}\n",
+        json_str(&report.output),
+        report.requested,
+        report.active,
+        report.sdr_white,
+    )
 }
 
 /// `layout-save` or `layout-apply` (`command`) for the layout `name` and the window `id`.
@@ -492,6 +568,20 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
                 "sdr-white needs cd/m² (203, +20, -20) and optionally a monitor".to_string(),
             );
         }
+        ("hdr-set", [monitor, key, values @ ..]) if !values.is_empty() => {
+            let setting = crate::feature::hdr_control::HdrSetting::parse(key, values)?;
+            return Ok(Request::HdrSet(monitor.to_string(), setting));
+        }
+        ("hdr-set", _) => {
+            return Err(format!(
+                "hdr-set needs a monitor, a setting and a value (hdr-set DP-1 contrast 1.2), settings: {}",
+                crate::feature::hdr_control::HdrSetting::KEYS
+            ))
+        }
+        ("hdr-get", [monitor]) => return Ok(Request::HdrGet(monitor.to_string())),
+        ("hdr-get", _) => return Err("hdr-get needs a monitor".to_string()),
+        ("hdr-reset", [monitor]) => return Ok(Request::HdrReset(monitor.to_string())),
+        ("hdr-reset", _) => return Err("hdr-reset needs a monitor".to_string()),
         ("toggle-overview", []) => return Ok(Request::ToggleOverview),
         ("toggle-overview", _) => return Err("toggle-overview takes no arguments".to_string()),
         ("stats", []) => return Ok(Request::Stats),
@@ -907,13 +997,16 @@ impl JffState {
             }
             Request::Hdr(change, output) => {
                 let report = self.change_hdr(output.as_deref(), change)?;
-                Ok(format!(
-                    "{{\"ok\":true,\"output\":{},\"hdr\":{},\"active\":{},\"sdr_white\":{}}}\n",
-                    json_str(&report.output),
-                    report.requested,
-                    report.active,
-                    report.sdr_white,
-                ))
+                Ok(hdr_report_json(&report))
+            }
+            Request::HdrSet(output, setting) => {
+                let report = self.set_hdr_setting(&output, setting)?;
+                Ok(hdr_report_json(&report))
+            }
+            Request::HdrGet(output) => self.hdr_get(&output),
+            Request::HdrReset(output) => {
+                let report = self.reset_hdr(&output)?;
+                Ok(hdr_report_json(&report))
             }
             Request::Stats => {
                 // Counts for a few seconds after this request, drawing nothing. The first
@@ -1186,6 +1279,10 @@ impl JffState {
                         _ => false,
                     },
                     color: self.output_color(&output.name()),
+                    hdr: match &self.backend {
+                        Backend::Tty(tty) => tty.output_hdr(output, &self.config),
+                        Backend::Winit(_) => self.winit_output_hdr(output),
+                    },
                 }
             })
             .collect()
@@ -1865,6 +1962,22 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("move-cursor X Y", "move the pointer"),
             ("click left|right|middle", "click a button"),
             ("toggle-overview", "open or close the overview"),
+            (
+                "hdr on|off|toggle [MONITOR]",
+                "turn HDR on a monitor on or off",
+            ),
+            (
+                "sdr-white [+|-]NITS [MONITOR]",
+                "set SDR white on an HDR monitor",
+            ),
+            (
+                "hdr-set MONITOR KEY VALUE",
+                "change an HDR setting of a monitor",
+            ),
+            (
+                "hdr-reset MONITOR",
+                "HDR settings back to the config file's",
+            ),
             ("stats", "frame statistics"),
             ("toggle-stats", "show or hide the statistics"),
         ],
