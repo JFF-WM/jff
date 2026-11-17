@@ -67,6 +67,7 @@ use crate::feature::screenshot::area::{
 use crate::feature::screenshot::save::{notify, spawn_save, spawn_save_hdr, HdrSaveJob, SaveJob};
 use crate::feature::window_anim::OpenFrame;
 use crate::input::BTN_LEFT;
+use crate::primitives::hdr::OutputEotf;
 use crate::primitives::hdr_output::FinalPass;
 use crate::primitives::layout::{self, Rect};
 use crate::protocol::color_management::{OutputColor, WorkingSpace};
@@ -335,6 +336,38 @@ fn render_to_dmabuf<E: RenderElement<GlesRenderer>>(
     // with it. This is the wait that is left: no readback, no copy.
     let _ = result.sync.wait();
     Ok(())
+}
+
+/// Render `elements` (already in the working space) into a new float texture of `size` and
+/// hand the texture over, for a final pass to draw from.
+fn render_to_working_texture(
+    renderer: &mut GlesRenderer,
+    size: (i32, i32),
+    scale: f64,
+    elements: &[JffElement],
+    clear: [f32; 4],
+) -> Result<GlesTexture, String> {
+    if size.0 <= 0 || size.1 <= 0 {
+        return Err("nothing to capture: the picture would be empty".to_string());
+    }
+    let buffer_size: Size<i32, BufferCoords> = size.into();
+    let physical: Size<i32, Physical> = size.into();
+    let mut texture: GlesTexture = renderer
+        .create_buffer(hdr_frame::WORKING_FORMAT, buffer_size)
+        .map_err(|err| format!("could not create a float buffer: {err:?}"))?;
+    {
+        let mut target = renderer
+            .bind(&mut texture)
+            .map_err(|err| format!("could not draw into the float buffer: {err:?}"))?;
+        let mut tracker = OutputDamageTracker::new(physical, scale, Transform::Normal);
+        // Blur and the like pick their texture format by this, as in the frame loop.
+        let _drawing = gamut::begin_hdr_draw();
+        let result = tracker
+            .render_output(renderer, &mut target, 0, elements, clear)
+            .map_err(|err| format!("could not render the picture: {err:?}"))?;
+        let _ = result.sync.wait();
+    }
+    Ok(texture)
 }
 
 /// Render `elements` (already in the working space) into a float texture of `size` and read it
@@ -623,6 +656,44 @@ impl JffState {
             pass,
             corner_radius: None,
         })
+    }
+
+    /// A picture of `output` in HDR mode as `capture_output_hdr` makes it, but coded as PQ by
+    /// the final pass on the GPU and drawn straight into the client's 10-bit `dmabuf`. The buffer
+    /// must be exactly the size of the picture. Gives the size of the picture.
+    pub(crate) fn capture_output_hdr_into(
+        &mut self,
+        output: &Output,
+        with_cursor: bool,
+        dmabuf: &mut Dmabuf,
+    ) -> Result<Size<i32, BufferCoords>, String> {
+        let (space, pass) = self
+            .hdr_capture(output)
+            .ok_or("the monitor is not shown as HDR")?;
+        let frame = self.output_frame(output, with_cursor, Some(space), false)?;
+        let size = dmabuf.size();
+        if (size.w, size.h) != frame.size {
+            return Err(format!(
+                "the buffer is {}x{}, the picture {}x{}",
+                size.w, size.h, frame.size.0, frame.size.1
+            ));
+        }
+        let renderer = self.backend.renderer();
+        let elements = hdr_frame::linearize(&mut *renderer, frame.elements, space);
+        let texture = render_to_working_texture(
+            renderer,
+            frame.size,
+            frame.scale,
+            &elements,
+            hdr_frame::clear_color(space, BACKGROUND),
+        )?;
+        // Same as a screenshot file: always PQ whatever the monitor is sent, and no dithering,
+        // the buffer has 10 bits.
+        let pass = pass.with_eotf(OutputEotf::Pq).with_dither(None);
+        let element =
+            hdr_frame::HdrFrameElement::for_capture(renderer, texture, frame.size.into(), pass)?;
+        render_to_dmabuf(renderer, dmabuf, frame.size, 1.0, &[element], [0.0; 4])?;
+        Ok(size)
     }
 
     /// Nothing on screen may be read while the session is locked, windows included.

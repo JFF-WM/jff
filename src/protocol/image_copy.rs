@@ -16,11 +16,12 @@
 //! shows (no overview). Buffers offered: `Argb8888` and `Xrgb8888`, and for a monitor in HDR mode
 //! also the 10-bit formats (`HDR_FORMATS`), listed after the 8-bit ones. Into a `wl_shm` buffer
 //! the render is read back to the CPU and written. Monitors on the TTY backend also offer dmabuf
-//! (`Argb8888` and `Xrgb8888` in the modifiers the renderer can draw into): a client that
+//! (`Argb8888` and `Xrgb8888` in the modifiers the renderer can draw into, and for a monitor in
+//! HDR mode `Argb2101010` and `Abgr2101010` as well, where it can): a client that
 //! allocates its buffer that way gets the monitor drawn straight into it, with no readback or
 //! copy. That picture is always whole: the damage sent with it is all of it, and a frame is
-//! still only drawn when the monitor drew since the last one. Windows, the 10-bit HDR formats
-//! and the winit backend stay on `wl_shm`.
+//! still only drawn when the monitor drew since the last one. Windows and the winit backend stay
+//! on `wl_shm`.
 //!
 //! HDR: the 8-bit formats always get the sRGB picture a screenshot file has, so a client that
 //! knows nothing about HDR is never handed a washed-out one. A client that asks for a 10-bit
@@ -198,6 +199,10 @@ const HDR_FORMATS: [wl_shm::Format; 4] = [
     wl_shm::Format::Abgr2101010,
 ];
 
+/// The dmabuf formats a client can pick for a monitor in HDR mode, besides the 8-bit ones: the
+/// same PQ coded 10 bits as `HDR_FORMATS`. Only the two with alpha are drawable by the GPU.
+const HDR_DMA_CODES: [Fourcc; 2] = [Fourcc::Argb2101010, Fourcc::Abgr2101010];
+
 /// Whether `format` is one of `HDR_FORMATS`, and if so whether it has red in the high bits.
 fn hdr_layout(format: wl_shm::Format) -> Option<bool> {
     match format {
@@ -229,6 +234,8 @@ pub struct ImageCopy {
     /// a capture buffer in. `None` and empty while dmabuf is not offered.
     dma_node: Option<DrmNode>,
     dma_formats: Vec<(Fourcc, Vec<Modifier>)>,
+    /// The 10-bit dmabuf formats, offered on top of `dma_formats` for a monitor in HDR mode.
+    hdr_dma_formats: Vec<(Fourcc, Vec<Modifier>)>,
 }
 
 impl ImageCopy {
@@ -254,6 +261,7 @@ impl ImageCopy {
             hdr_formats: Vec::new(),
             dma_node: None,
             dma_formats: Vec::new(),
+            hdr_dma_formats: Vec::new(),
         }
     }
 
@@ -404,7 +412,7 @@ impl JffState {
 
     /// Find out which GPU a capture buffer can be allocated for and in which formats, so that
     /// monitor captures can offer dmabuf. Only the TTY backend has a render node. The formats
-    /// are the 8-bit ones the renderer can draw into.
+    /// are the 8-bit ones the renderer can draw into, and the 10-bit ones for monitors in HDR mode.
     pub fn offer_capture_dmabuf(&mut self) {
         let Backend::Tty(tty) = &self.backend else {
             return;
@@ -413,39 +421,48 @@ impl JffState {
             return;
         };
         let render_formats = tty.renderer.egl_context().dmabuf_render_formats();
-        let mut formats: Vec<(Fourcc, Vec<Modifier>)> = Vec::new();
-        for code in [Fourcc::Argb8888, Fourcc::Xrgb8888] {
-            let modifiers: Vec<Modifier> = render_formats
-                .iter()
-                .filter(|format| format.code == code)
-                .map(|format| format.modifier)
-                .collect();
-            if !modifiers.is_empty() {
-                formats.push((code, modifiers));
+        let drawable = |codes: &[Fourcc]| {
+            let mut formats: Vec<(Fourcc, Vec<Modifier>)> = Vec::new();
+            for &code in codes {
+                let modifiers: Vec<Modifier> = render_formats
+                    .iter()
+                    .filter(|format| format.code == code)
+                    .map(|format| format.modifier)
+                    .collect();
+                if !modifiers.is_empty() {
+                    formats.push((code, modifiers));
+                }
             }
-        }
+            formats
+        };
+        let formats = drawable(&[Fourcc::Argb8888, Fourcc::Xrgb8888]);
+        let hdr_formats = drawable(&HDR_DMA_CODES);
         if formats.is_empty() {
             tracing::info!("image-copy-capture: the renderer can draw into no dmabuf format, capture stays on wl_shm");
             return;
         }
         tracing::info!(
-            "image-copy-capture: dmabuf offered for monitors, {} format(s)",
-            formats.len()
+            "image-copy-capture: dmabuf offered for monitors, {} format(s), {} more in HDR mode",
+            formats.len(),
+            hdr_formats.len()
         );
         self.image_copy.dma_node = Some(node);
         self.image_copy.dma_formats = formats;
+        self.image_copy.hdr_dma_formats = hdr_formats;
     }
 
     /// The dmabuf part of the constraints of a monitor capture, `None` when it is not offered.
-    fn dmabuf_constraints(&self) -> Option<DmabufConstraints> {
+    /// `hdr` is whether the monitor is shown as HDR, which adds the 10-bit formats.
+    fn dmabuf_constraints(&self, hdr: bool) -> Option<DmabufConstraints> {
         let node = self.image_copy.dma_node?;
         if self.image_copy.dma_formats.is_empty() {
             return None;
         }
-        Some(DmabufConstraints {
-            node,
-            formats: self.image_copy.dma_formats.clone(),
-        })
+        let mut formats = self.image_copy.dma_formats.clone();
+        if hdr {
+            formats.extend(self.image_copy.hdr_dma_formats.iter().cloned());
+        }
+        Some(DmabufConstraints { node, formats })
     }
 
     /// Answer `frame` with a picture of the monitor drawn into the client's `dmabuf`.
@@ -460,7 +477,13 @@ impl JffState {
             frame.fail(CaptureFailureReason::BufferConstraints);
             return true;
         };
-        if !matches!(dmabuf.format().code, Fourcc::Argb8888 | Fourcc::Xrgb8888) {
+        let code = dmabuf.format().code;
+        let ten_bit = HDR_DMA_CODES.contains(&code);
+        // The 10-bit formats are only on offer while the monitor is shown as HDR: otherwise
+        // there is no PQ picture to give.
+        let allowed = matches!(code, Fourcc::Argb8888 | Fourcc::Xrgb8888)
+            || (ten_bit && self.hdr_capture(output).is_some());
+        if !allowed {
             frame.fail(CaptureFailureReason::BufferConstraints);
             return true;
         }
@@ -471,7 +494,12 @@ impl JffState {
             return true;
         }
         let cursor = entry.session.draw_cursor();
-        match self.capture_output_into(output, cursor, &mut dmabuf) {
+        let drawn = if ten_bit {
+            self.capture_output_hdr_into(output, cursor, &mut dmabuf)
+        } else {
+            self.capture_output_into(output, cursor, &mut dmabuf)
+        };
+        match drawn {
             Ok(size) => {
                 entry.seen = Some(seen);
                 entry.last = Some(Last::Dmabuf);
@@ -499,12 +527,17 @@ impl JffState {
                 let size = frame_size(output)?;
                 // The 10-bit formats only while the monitor is shown as HDR: otherwise there
                 // is no PQ picture to give.
-                let extra = if self.hdr_capture(output).is_some() {
+                let hdr = self.hdr_capture(output).is_some();
+                let extra = if hdr {
                     &self.image_copy.hdr_formats[..]
                 } else {
                     &[]
                 };
-                Some(buffer_constraints(size, extra, self.dmabuf_constraints()))
+                Some(buffer_constraints(
+                    size,
+                    extra,
+                    self.dmabuf_constraints(hdr),
+                ))
             }
             Target::Window(window) => {
                 let (_, size) = self.window_capture_size(window).ok()?;
@@ -539,10 +572,12 @@ impl JffState {
 
         // The monitor changed mode or the window its size, or the monitor went into or out of HDR
         // mode (which adds or takes away formats): clients have to allocate new buffers.
-        let constraints_ok = entry
-            .session
-            .current_constraints()
-            .is_some_and(|c| c.size == wanted.size && c.shm == wanted.shm);
+        let constraints_ok = entry.session.current_constraints().is_some_and(|c| {
+            c.size == wanted.size
+                && c.shm == wanted.shm
+                && c.dma.as_ref().map(|dma| &dma.formats)
+                    == wanted.dma.as_ref().map(|dma| &dma.formats)
+        });
         if !constraints_ok {
             entry.session.update_constraints(wanted);
             entry.last = None;

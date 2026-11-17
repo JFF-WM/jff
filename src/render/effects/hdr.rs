@@ -276,6 +276,26 @@ pub struct HdrFrameElement {
     pass: FinalPass,
 }
 
+impl HdrFrameElement {
+    /// The element that codes a finished working-space `texture` through `pass`, for a picture that is not the frame of an output, such as a capture into a client's buffer. All of it counts as damaged.
+    pub fn for_capture(
+        renderer: &mut GlesRenderer,
+        texture: GlesTexture,
+        size: Size<i32, Physical>,
+        pass: FinalPass,
+    ) -> Result<Self, String> {
+        let program = program(renderer).ok_or("the final pass shader did not compile")?;
+        Ok(Self {
+            texture,
+            id: Id::new(),
+            size,
+            damage: DamageBag::default().snapshot(),
+            program,
+            pass,
+        })
+    }
+}
+
 impl Element for HdrFrameElement {
     fn id(&self) -> &Id {
         &self.id
