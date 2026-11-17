@@ -373,6 +373,8 @@ pub enum Request {
     MoveCursor(i32, i32),
     /// `toggle-overview`: open the overview, or close it when it is open.
     ToggleOverview,
+    /// `hdr on|off|toggle [MONITOR]` and `sdr-white [+|-]NITS [MONITOR]`: change HDR on a monitor until the config is reloaded.
+    Hdr(crate::primitives::hdr_output::HdrChange, Option<String>),
     /// `stats`: the numbers of the stats overlay for the focused window, as JSON. Starts
     /// counting if nothing is (for a few seconds after the last request, nothing is drawn).
     Stats,
@@ -388,7 +390,7 @@ pub enum Request {
 pub const COMMANDS: &str =
     "windows, status, outputs, focused, window-info, close, maximize, unmaximize, toggle-maximize, \
      fullscreen, unfullscreen, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
-     screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, stats, toggle-stats, watch";
+     screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, hdr, sdr-white, stats, toggle-stats, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
     word.parse::<usize>()
@@ -462,6 +464,34 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
     match (command, rest.as_slice()) {
         ("workspaces", []) => return Ok(Request::Workspaces),
         ("workspaces", _) => return Err("workspaces takes no arguments".to_string()),
+        ("hdr", [action]) | ("hdr", [action, _]) => {
+            use crate::primitives::hdr_output::HdrChange;
+            let change = match *action {
+                "on" => HdrChange::On,
+                "off" => HdrChange::Off,
+                "toggle" => HdrChange::Toggle,
+                other => return Err(format!("{other:?} is not on, off or toggle")),
+            };
+            return Ok(Request::Hdr(change, rest.get(1).map(|s| s.to_string())));
+        }
+        ("hdr", _) => {
+            return Err("hdr needs on, off or toggle and optionally a monitor".to_string())
+        }
+        ("sdr-white", [value]) | ("sdr-white", [value, _]) => {
+            use crate::primitives::hdr_output::HdrChange;
+            let not_nits = || format!("{value:?} is not a luminance in cd/m², use 203, +20 or -20");
+            let change = if value.starts_with(['+', '-']) {
+                HdrChange::SdrWhiteBy(value.parse().map_err(|_| not_nits())?)
+            } else {
+                HdrChange::SdrWhite(value.parse().map_err(|_| not_nits())?)
+            };
+            return Ok(Request::Hdr(change, rest.get(1).map(|s| s.to_string())));
+        }
+        ("sdr-white", _) => {
+            return Err(
+                "sdr-white needs cd/m² (203, +20, -20) and optionally a monitor".to_string(),
+            );
+        }
         ("toggle-overview", []) => return Ok(Request::ToggleOverview),
         ("toggle-overview", _) => return Err("toggle-overview takes no arguments".to_string()),
         ("stats", []) => return Ok(Request::Stats),
@@ -873,6 +903,16 @@ impl JffState {
                 Ok(format!(
                     "{{\"ok\":true,\"open\":{}}}\n",
                     self.overview_active()
+                ))
+            }
+            Request::Hdr(change, output) => {
+                let report = self.change_hdr(output.as_deref(), change)?;
+                Ok(format!(
+                    "{{\"ok\":true,\"output\":{},\"hdr\":{},\"active\":{},\"sdr_white\":{}}}\n",
+                    json_str(&report.output),
+                    report.requested,
+                    report.active,
+                    report.sdr_white,
                 ))
             }
             Request::Stats => {

@@ -332,7 +332,9 @@ cursor {
 //
 //         // HDR (off by default): signal this monitor as HDR10 (PQ, BT.2020) when its EDID and
 //         // the connector allow it. The settings below only apply to a monitor with `hdr`,
-//         // `jff check-config` warns when they stand alone.
+//         // `jff check-config` warns when they stand alone. While jff runs, `jff msg hdr
+//         // on|off|toggle [MONITOR]` and `jff msg sdr-white 203|+20|-20 [MONITOR]` change them until
+//         // the next `reload-config`. Night light (wlr-gamma-control) works in HDR too.
 //         hdr
 //         sdr-white 203                      // cd/m2 SDR white is shown at, 10 to 1000, 203 by default
 //         sdr-transfer "gamma22"             // how SDR windows are decoded: "srgb" (default) or "gamma22" (darker darks)

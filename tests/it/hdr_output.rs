@@ -1446,3 +1446,67 @@ fn hdr_with_color_management_on_or_a_monitor_off_is_not() {
             .unwrap();
     assert_eq!(off_monitor.hdr_hidden_warning(), None);
 }
+
+#[test]
+fn a_full_curve_is_no_gain_and_a_dimmer_one_is_less_light() {
+    use jff_wm::primitives::hdr_output::{night_gain, night_gains};
+    assert!((night_gain(65535) - 1.0).abs() < 1e-6);
+    assert_eq!(night_gain(0), 0.0);
+    let warm = night_gains([65535, 52428, 39321]);
+    assert!(warm[0] > warm[1] && warm[1] > warm[2]);
+    // the light follows the signal by a gamma, so 0.8 of the signal is under 0.8 of the light
+    assert!(warm[1] < 0.8 && warm[1] > 0.5);
+}
+
+#[test]
+fn the_night_light_tints_white_and_leaves_no_trace_without_it() {
+    use jff_wm::primitives::hdr_output::night_gains;
+    let plain = FinalPass::new(203.0, 1000.0, None);
+    assert_eq!(plain.night, [1.0; 3]);
+    assert_eq!(plain.with_night([1.0; 3]), plain);
+    let night = plain.with_night(night_gains([65535, 52428, 39321]));
+    let [r, g, b] = night.apply([1.0; 3]);
+    assert!(r > g && g > b);
+    let [pr, _, _] = plain.apply([1.0; 3]);
+    assert!((r - pr).abs() < 1e-5);
+}
+
+#[test]
+fn the_night_light_and_the_white_balance_multiply() {
+    let pass = FinalPass::new(203.0, 1000.0, None)
+        .with_white_balance([1.0, 0.9, 0.8])
+        .with_night([0.5, 0.5, 1.0]);
+    let gain = pass.light_gain();
+    assert!((gain[0] - 0.5).abs() < 1e-6);
+    assert!((gain[1] - 0.45).abs() < 1e-6);
+    assert!((gain[2] - 0.8).abs() < 1e-6);
+}
+
+#[test]
+fn hdr_changes_turn_it_on_and_off_and_keep_sdr_white() {
+    use jff_wm::primitives::hdr_output::HdrChange;
+    assert_eq!(HdrChange::On.apply(false, 203), (true, 203));
+    assert_eq!(HdrChange::Off.apply(true, 150), (false, 150));
+    assert_eq!(HdrChange::Toggle.apply(false, 203), (true, 203));
+    assert_eq!(HdrChange::Toggle.apply(true, 203), (false, 203));
+}
+
+#[test]
+fn sdr_white_changes_are_absolute_or_relative_and_stay_in_range() {
+    use jff_wm::primitives::hdr_output::HdrChange;
+    assert_eq!(HdrChange::SdrWhite(300).apply(true, 203), (true, 300));
+    assert_eq!(HdrChange::SdrWhiteBy(20).apply(false, 203), (false, 223));
+    assert_eq!(HdrChange::SdrWhiteBy(-50).apply(true, 203), (true, 153));
+    assert_eq!(
+        HdrChange::SdrWhite(5000).apply(true, 203).1,
+        *SDR_WHITE_RANGE.end()
+    );
+    assert_eq!(
+        HdrChange::SdrWhiteBy(-1000).apply(true, 203).1,
+        *SDR_WHITE_RANGE.start()
+    );
+    assert_eq!(
+        HdrChange::SdrWhiteBy(i32::MAX).apply(true, 203).1,
+        *SDR_WHITE_RANGE.end()
+    );
+}

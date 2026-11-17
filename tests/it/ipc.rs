@@ -616,3 +616,49 @@ fn bad_monitor_requests_are_refused() {
     assert!(parse_request("move-workspace-to-monitor").is_err());
     assert!(parse_request("move-workspace-to-monitor left 1").is_err());
 }
+
+#[test]
+fn hdr_commands_are_parsed() {
+    use jff_wm::primitives::hdr_output::HdrChange;
+    assert_eq!(
+        parse_request("hdr toggle"),
+        Ok(Request::Hdr(HdrChange::Toggle, None))
+    );
+    assert_eq!(
+        parse_request("hdr on DP-1"),
+        Ok(Request::Hdr(HdrChange::On, Some("DP-1".to_string())))
+    );
+    assert_eq!(
+        parse_request("hdr off"),
+        Ok(Request::Hdr(HdrChange::Off, None))
+    );
+    assert!(parse_request("hdr").is_err());
+    assert!(parse_request("hdr maybe").is_err());
+    assert!(parse_request("hdr on DP-1 extra").is_err());
+    assert!(COMMANDS.contains("hdr"));
+    assert!(COMMANDS.contains("sdr-white"));
+}
+
+#[test]
+fn sdr_white_commands_are_parsed() {
+    use jff_wm::primitives::hdr_output::HdrChange;
+    assert_eq!(
+        parse_request("sdr-white 250"),
+        Ok(Request::Hdr(HdrChange::SdrWhite(250), None))
+    );
+    assert_eq!(
+        parse_request("sdr-white +20 HDMI-A-2"),
+        Ok(Request::Hdr(
+            HdrChange::SdrWhiteBy(20),
+            Some("HDMI-A-2".to_string())
+        ))
+    );
+    assert_eq!(
+        parse_request("sdr-white -20"),
+        Ok(Request::Hdr(HdrChange::SdrWhiteBy(-20), None))
+    );
+    assert!(parse_request("sdr-white").is_err());
+    assert!(parse_request("sdr-white bright").is_err());
+    assert!(parse_request("sdr-white 1.5").is_err());
+    assert!(parse_request("sdr-white 200 DP-1 more").is_err());
+}

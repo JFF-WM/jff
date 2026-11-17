@@ -399,6 +399,8 @@ struct TtyOutput {
     hdr_content: (Option<u32>, Option<u32>),
     /// What the last sync decided about HDR, kept to log only when it changes.
     hdr_status: Status,
+    /// Gain of the light from the curves a client set (night light), applied by the HDR final pass because the display's own table cannot take them in HDR.
+    night_gain: [f32; 3],
     /// The HDR failure logged last, cleared when a frame succeeds or the HDR settings are synced.
     hdr_fault: Option<HdrFault>,
     /// Direct scanout of a fullscreen window on this monitor while it is HDR.
@@ -1435,6 +1437,7 @@ impl Tty {
             hdr_content: (None, None),
             hdr: None,
             hdr_status: Status::Off,
+            night_gain: [1.0; 3],
             hdr_fault: None,
             hdr_scanout: HdrScanout::default(),
             hdr_formats: hdr_wanted,
@@ -1619,6 +1622,7 @@ impl Tty {
                         .with_gamut_map(gamut_map)
                         .with_min_luminance(f32::from(plan.min_luminance) / 10_000.0)
                         .with_white_balance(white_balance)
+                        .with_night(lit.night_gain)
                         .with_saturation(saturation)
                         .with_contrast(contrast)
                         .with_tone_map(tone)
@@ -1688,7 +1692,13 @@ impl Tty {
     pub fn hdr_capture(&self, output: &Output) -> Option<(WorkingSpace, FinalPass)> {
         let lit = self.outputs.values().find(|lit| lit.output == *output)?;
         let hdr = lit.hdr.as_ref()?;
-        Some((hdr.space, hdr.pass.with_content_peak(hdr.content_peak)))
+        // the night light tints the screen, not what is saved
+        Some((
+            hdr.space,
+            hdr.pass
+                .with_night([1.0; 3])
+                .with_content_peak(hdr.content_peak),
+        ))
     }
 
     /// What clients are told about each monitor drawn in HDR: PQ in BT.2020 up to its peak (the EDID's or `hdr-peak`), with SDR white at its configured level.
@@ -1722,8 +1732,8 @@ impl Tty {
             }
             lit.gamma_pending = false;
             let curves = lit.client_gamma.as_ref().or(lit.gamma.as_ref());
-            // The table works on the signal the CRTC scans out. An HDR output sends PQ (or HLG), where curves made for sRGB would bend the whole picture, so none is set and one that is there is cleared.
-            if lit.hdr.is_some() && curves.is_some() {
+            // The table works on the signal the CRTC scans out. An HDR output sends PQ (or HLG), where curves made for sRGB would bend the whole picture, so none is set and one that is there is cleared. A client's curves (night light) are made light gains of the final pass instead, see `set_client_gamma`.
+            if lit.hdr.is_some() && lit.client_gamma.is_none() && curves.is_some() {
                 tracing::warn!(
                     "monitor {}: calibration curves are not applied while it is in HDR mode",
                     lit.output.name()
@@ -2047,6 +2057,16 @@ impl JffState {
         let Some(lit) = tty.outputs.values_mut().find(|lit| lit.output == *output) else {
             return false;
         };
+        // the same curves on an HDR output are light gains of its final pass
+        lit.night_gain = table.as_ref().map_or([1.0; 3], |t| {
+            let top = |curve: &[u16]| curve.last().copied().unwrap_or(u16::MAX);
+            hdr_output::night_gains([top(&t.red), top(&t.green), top(&t.blue)])
+        });
+        let night = lit.night_gain;
+        if let Some(hdr) = lit.hdr.as_mut() {
+            hdr.pass = hdr.pass.with_night(night);
+            lit.queue_redraw();
+        }
         lit.client_gamma = table;
         lit.gamma_pending = true;
         tty.apply_gamma();
@@ -2459,8 +2479,10 @@ impl JffState {
                         } else {
                             None
                         },
+                        // A night light tint is drawn by the final pass, which the plane skips.
                         effects: !crate::render::effects::yuv::corrections(&surface).is_empty()
-                            || !crate::render::effects::pixel_alpha::modes(&surface).is_empty(),
+                            || !crate::render::effects::pixel_alpha::modes(&surface).is_empty()
+                            || lit.night_gain != [1.0; 3],
                         tag,
                         buffer_format,
                         swapchain_format: lit.compositor.format() as u32,

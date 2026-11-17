@@ -346,7 +346,7 @@ impl RenderElement<GlesRenderer> for HdrFrameElement {
             Uniform::new("gamut_compress", pass.gamut_map.shader_param()),
             Uniform::new("min_luminance", pass.min_luminance),
             Uniform::new("black_level", pass.black_level),
-            Uniform::new("white_balance", pass.white_balance),
+            Uniform::new("white_balance", pass.light_gain()),
             Uniform::new("saturation", pass.saturation),
             Uniform::new("contrast", pass.contrast),
             Uniform::new("tone_kind", pass.tone.shader_param()),

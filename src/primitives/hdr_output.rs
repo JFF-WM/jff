@@ -21,6 +21,50 @@ pub const DEFAULT_SDR_WHITE: u32 = 203;
 /// Smallest and largest `sdr-white` accepted, in cd/m².
 pub const SDR_WHITE_RANGE: std::ops::RangeInclusive<u32> = 10..=1000;
 
+/// Gamma a monitor is taken to turn a signal into light with, for the curves a client sets with wlr-gamma-control.
+const NIGHT_GAMMA: f32 = 2.2;
+
+/// Gain of the light for a client's curve that ends at `top` (of 65535): the curve scales the signal, the monitor makes light of it by [`NIGHT_GAMMA`].
+pub fn night_gain(top: u16) -> f32 {
+    (f32::from(top) / 65535.0).powf(NIGHT_GAMMA)
+}
+
+/// [`night_gain`] for the ends of the red, green and blue curves.
+pub fn night_gains(tops: [u16; 3]) -> [f32; 3] {
+    tops.map(night_gain)
+}
+
+/// What `jff msg hdr` and `jff msg sdr-white` ask for on a monitor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HdrChange {
+    On,
+    Off,
+    Toggle,
+    /// SDR white at this many cd/m².
+    SdrWhite(u32),
+    /// SDR white this many cd/m² brighter, or darker when negative.
+    SdrWhiteBy(i32),
+}
+
+impl HdrChange {
+    /// HDR on or off and SDR white after the change, given what they are now. SDR white stays in [`SDR_WHITE_RANGE`].
+    pub fn apply(self, enabled: bool, sdr_white: u32) -> (bool, u32) {
+        let clamp = |nits: i64| {
+            nits.clamp(
+                i64::from(*SDR_WHITE_RANGE.start()),
+                i64::from(*SDR_WHITE_RANGE.end()),
+            ) as u32
+        };
+        match self {
+            Self::On => (true, sdr_white),
+            Self::Off => (false, sdr_white),
+            Self::Toggle => (!enabled, sdr_white),
+            Self::SdrWhite(nits) => (enabled, clamp(i64::from(nits))),
+            Self::SdrWhiteBy(by) => (enabled, clamp(i64::from(sdr_white) + i64::from(by))),
+        }
+    }
+}
+
 /// Smallest and largest `hdr-peak` accepted, in cd/m².
 pub const HDR_PEAK_RANGE: std::ops::RangeInclusive<u32> = 100..=10_000;
 
@@ -398,6 +442,8 @@ pub struct FinalPass {
     pub black_level: f32,
     /// Gain of the red, green and blue of BT.2020 light, 1.0 for none.
     pub white_balance: [f32; 3],
+    /// Gain of the light from the curves a client set with wlr-gamma-control (night light), 1.0 for none. It stays out of screenshots.
+    pub night: [f32; 3],
     /// Saturation of the colors, 1.0 for none, 0 for gray.
     pub saturation: f32,
     /// Contrast around SDR white, 1.0 for none.
@@ -451,6 +497,7 @@ impl FinalPass {
             min_luminance: DEFAULT_MIN_LUMINANCE,
             black_level: DEFAULT_BLACK_LEVEL,
             white_balance: DEFAULT_WHITE_BALANCE,
+            night: [1.0; 3],
             saturation: DEFAULT_SATURATION,
             contrast: DEFAULT_CONTRAST,
             tone: ToneMap::default(),
@@ -514,6 +561,16 @@ impl FinalPass {
         Self { eotf, ..self }
     }
 
+    /// The same pass with the night light's `gain` on the red, green and blue of the light, `[1.0, 3]` for none.
+    pub fn with_night(self, night: [f32; 3]) -> Self {
+        Self { night, ..self }
+    }
+
+    /// The gain of the light the shader applies: the white balance and the night light together.
+    pub fn light_gain(&self) -> [f32; 3] {
+        [0, 1, 2].map(|i| self.white_balance[i] * self.night[i])
+    }
+
     /// The same pass fitted to content that goes up to `content_peak` cd/m², `None` for the configured tone curve.
     pub fn with_content_peak(self, content_peak: Option<f32>) -> Self {
         Self {
@@ -525,7 +582,7 @@ impl FinalPass {
     /// The shader on one pixel: linear BT.2020 (1.0 is SDR white) in, signal code values out.
     pub fn apply(&self, working: [f32; 3]) -> [f32; 3] {
         let mut nits = working.map(|v| v.max(0.0) * self.sdr_white);
-        for (v, gain) in nits.iter_mut().zip(self.white_balance) {
+        for (v, gain) in nits.iter_mut().zip(self.light_gain()) {
             *v *= gain;
         }
         // Saturating keeps the luminance, so `y` is the one of the color before and after.
