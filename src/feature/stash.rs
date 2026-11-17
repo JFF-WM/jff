@@ -57,8 +57,19 @@ impl JffState {
     }
 
     /// Minimize `window`: out of sight until [`JffState::unminimize_window`] or an activation.
+    ///
+    /// When the taskbar that asked told where its button is (`wlr-foreign-toplevel`
+    /// `set_rectangle`), the window flies into the button while it fades.
     pub fn minimize_window(&mut self, window: &Window) {
+        // The picture has to be taken while the window is shown, and a ghost is only kept when
+        // the window did go away.
+        let ghost = self
+            .foreign_toplevel_rectangle(window)
+            .and_then(|button| self.minimize_ghost(window, button));
         if self.hide_window(window, false) {
+            if let Some(ghost) = ghost {
+                self.closing.push(ghost);
+            }
             tracing::info!("window minimized");
         }
     }
@@ -73,16 +84,23 @@ impl JffState {
     /// Bring a minimized `window` back, on the workspace it came from, and give it the
     /// keyboard. Does nothing for one that is not hidden.
     pub fn unminimize_window(&mut self, window: &Window) {
-        let hidden = self
+        let minimized = self
             .desk
             .find_by(|w| w == window)
-            .is_some_and(|e| e.hidden.is_some());
-        if !hidden {
+            .filter(|e| e.hidden.is_some())
+            .map(|e| !e.scratch);
+        let Some(minimized) = minimized else {
             return;
-        }
+        };
         self.show_workspace_of(window);
         self.focus_window(window);
         self.refresh_pointer_focus();
+        // A window of the scratchpad did not go into a button.
+        if minimized {
+            if let Some(button) = self.foreign_toplevel_rectangle(window) {
+                self.start_restore_fly(window, button);
+            }
+        }
     }
 
     /// `unminimize`: the window that was minimized last comes back.

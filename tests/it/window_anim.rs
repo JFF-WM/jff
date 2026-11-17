@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use jff_wm::config::{Config, OpenStyle};
-use jff_wm::feature::window_anim::{open_alpha, open_frame, OpenFrame};
+use jff_wm::feature::window_anim::{ghost_frame, open_alpha, open_frame, GhostMotion, OpenFrame};
 
 const OPEN: Duration = Duration::from_millis(100);
 
@@ -110,4 +110,71 @@ fn a_rule_opacity_does_not_unsettle_a_window() {
     let shown = Instant::now();
     let opening = open_frame(OpenStyle::Fade, Some(shown), shown, OPEN).with_opacity(1.0);
     assert!(!opening.settled());
+}
+
+const WINDOW: (i32, i32, i32, i32) = (100, 80, 800, 600);
+const BUTTON: (i32, i32, i32, i32) = (400, 1040, 160, 32);
+
+fn rect_of(t: f32, motion: GhostMotion) -> (f32, (f64, f64, f64, f64)) {
+    ghost_frame(motion, WINDOW, t)
+}
+
+fn as_f64(r: (i32, i32, i32, i32)) -> (f64, f64, f64, f64) {
+    (r.0 as f64, r.1 as f64, r.2 as f64, r.3 as f64)
+}
+
+#[test]
+fn a_closed_window_fades_out_where_it_was() {
+    let (start, rect) = rect_of(0.0, GhostMotion::Stay);
+    assert_eq!((start, rect), (1.0, as_f64(WINDOW)));
+    let (end, rect) = rect_of(1.0, GhostMotion::Stay);
+    assert_eq!((end, rect), (0.0, as_f64(WINDOW)));
+}
+
+#[test]
+fn a_minimized_window_flies_into_the_button() {
+    let motion = GhostMotion::Minimize(BUTTON);
+    let (alpha, rect) = rect_of(0.0, motion);
+    assert_eq!((alpha, rect), (1.0, as_f64(WINDOW)));
+    let (alpha, rect) = rect_of(1.0, motion);
+    assert_eq!((alpha, rect), (0.0, as_f64(BUTTON)));
+    // On the way it is smaller than before and nearer the button, and still mostly there.
+    let (alpha, rect) = rect_of(0.5, motion);
+    assert!(alpha > 0.5 && alpha < 1.0, "{alpha}");
+    assert!(rect.2 < 800.0 && rect.2 > 160.0, "{rect:?}");
+    assert!(rect.1 > 80.0 && rect.1 < 1040.0, "{rect:?}");
+}
+
+#[test]
+fn a_restored_window_flies_out_of_the_button() {
+    let motion = GhostMotion::Restore(BUTTON);
+    let (alpha, rect) = rect_of(0.0, motion);
+    assert_eq!((alpha, rect), (0.0, as_f64(BUTTON)));
+    let (alpha, rect) = rect_of(1.0, motion);
+    assert_eq!((alpha, rect), (1.0, as_f64(WINDOW)));
+}
+
+#[test]
+fn a_minimized_window_only_ever_shrinks_and_fades() {
+    let motion = GhostMotion::Minimize(BUTTON);
+    let (mut last_alpha, first) = rect_of(0.0, motion);
+    let mut last_width = first.2;
+    for step in 1..=20 {
+        let (alpha, rect) = rect_of(step as f32 / 20.0, motion);
+        assert!(alpha <= last_alpha, "step {step}: {alpha} > {last_alpha}");
+        assert!(
+            rect.2 <= last_width,
+            "step {step}: {} > {last_width}",
+            rect.2
+        );
+        last_alpha = alpha;
+        last_width = rect.2;
+    }
+}
+
+#[test]
+fn a_ghost_frame_outside_zero_to_one_is_clamped() {
+    let motion = GhostMotion::Minimize(BUTTON);
+    assert_eq!(rect_of(-1.0, motion), rect_of(0.0, motion));
+    assert_eq!(rect_of(2.0, motion), rect_of(1.0, motion));
 }

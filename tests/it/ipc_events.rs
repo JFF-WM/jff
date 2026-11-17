@@ -763,15 +763,15 @@ fn a_window_in_a_container_names_it() {
     });
     assert!(v
         .to_json()
-        .ends_with("\"pid\":4242,\"container\":{\"id\":3,\"name\":\"Terminals\"}}"));
+        .ends_with("\"pid\":4242,\"container\":{\"id\":3,\"name\":\"Terminals\"},\"tag\":null}"));
     v.container = Some(ContainerRef { id: 4, name: None });
     assert!(v
         .to_json()
-        .ends_with("\"container\":{\"id\":4,\"name\":null}}"));
+        .ends_with("\"container\":{\"id\":4,\"name\":null},\"tag\":null}"));
     // it is spliced flat into window-opened as well
     assert!(Event::WindowOpened(v)
         .to_json()
-        .ends_with("\"container\":{\"id\":4,\"name\":null}}"));
+        .ends_with("\"container\":{\"id\":4,\"name\":null},\"tag\":null}"));
 }
 
 #[test]

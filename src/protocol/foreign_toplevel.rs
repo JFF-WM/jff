@@ -7,9 +7,18 @@
 //! takes the window list (the one `jff msg windows` shows), compares it with what clients were told,
 //! and sends the difference. Nothing is computed while no client has bound the protocol.
 //!
+//! `set_rectangle` says where the taskbar's button for a window is (in the taskbar's own surface).
+//! It is kept per window and read when the window is minimized or restored: the minimize then
+//! flies the window's picture into the button, and the restore flies it back out (see
+//! `feature::window_anim`). The rectangle is turned into the shared space when it is used, so a
+//! taskbar that has moved since still gets it right. Without one there is no animation, the
+//! window just goes or comes. A zero width and height takes the rectangle away again.
+//!
+//! The `parent` event (version 3) says which window a dialog belongs to, so a taskbar can group
+//! it under that window. It follows the transient parent of the toplevel, and is sent once both
+//! windows have been announced.
+//!
 //! Not supported:
-//! - `set_rectangle` (where the taskbar button is, for a minimize animation): ignored.
-//! - the `parent` event: never sent.
 //! - urgency: the protocol has no state for "asks for attention" (only maximized, minimized,
 //!   activated and fullscreen), so a window that is urgent looks like any other here. The
 //!   `urgent` member and event of `jff msg` and the `urgent` state of `ext-workspace-v1` carry it.
@@ -23,16 +32,21 @@ use smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::{
     zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
     zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
 };
+use std::collections::HashMap;
+
 use smithay::reexports::wayland_server::backend::GlobalId;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 
 use crate::ipc::events::WindowInfo;
 use crate::ipc::WindowId;
+use crate::primitives::layout::Rect;
+use crate::protocol::text_input::surface_rect;
 use crate::state::JffState;
 
-/// Highest version jff speaks. 3 only adds the `parent` event, which we never send.
+/// Highest version jff speaks. 3 adds the `parent` event.
 const VERSION: u32 = 3;
 
 /// `zwlr_foreign_toplevel_handle_v1::state` values.
@@ -94,6 +108,8 @@ struct Toplevel {
     id: u64,
     /// What the clients were told last.
     last: Info,
+    /// The window id of the window clients were told is its parent.
+    parent: Option<u64>,
     /// The manager a handle was created for, and the handle.
     handles: Vec<(ZwlrForeignToplevelManagerV1, ZwlrForeignToplevelHandleV1)>,
 }
@@ -102,6 +118,9 @@ struct Toplevel {
 pub struct ForeignToplevel {
     managers: Vec<ZwlrForeignToplevelManagerV1>,
     toplevels: Vec<Toplevel>,
+    /// Where a taskbar said its button for a window is, by window id: the taskbar's surface and
+    /// the rectangle in it (x, y, width, height).
+    rectangles: HashMap<u64, (WlSurface, Rect)>,
     _global: GlobalId,
 }
 
@@ -111,6 +130,7 @@ impl ForeignToplevel {
         Self {
             managers: Vec::new(),
             toplevels: Vec::new(),
+            rectangles: HashMap::new(),
             _global: display
                 .create_global::<JffState, ZwlrForeignToplevelManagerV1, ()>(VERSION, ()),
         }
@@ -170,10 +190,12 @@ impl JffState {
         self.foreign_toplevel.managers.retain(|m| m.is_alive());
         if self.foreign_toplevel.managers.is_empty() {
             self.foreign_toplevel.toplevels.clear();
+            self.foreign_toplevel.rectangles.clear();
             return;
         }
 
         let windows = self.window_list();
+        let parents = self.window_parents();
         let minimized: Vec<u64> = self
             .desk
             .all_top_down()
@@ -194,6 +216,8 @@ impl JffState {
             }
             alive
         });
+        ft.rectangles
+            .retain(|id, _| windows.iter().any(|v| v.id == *id));
 
         for window in &windows {
             let info = Info::from_window(window, minimized.contains(&window.id));
@@ -214,6 +238,7 @@ impl JffState {
                     let mut toplevel = Toplevel {
                         id: window.id,
                         last: info,
+                        parent: None,
                         handles: Vec::new(),
                     };
                     for manager in &ft.managers {
@@ -223,6 +248,56 @@ impl JffState {
                 }
             }
         }
+
+        // Parents go last, when every handle exists: a dialog is above its parent, so it is
+        // announced first. A parent that clients have not heard of yet is waited for.
+        let known: Vec<u64> = ft.toplevels.iter().map(|t| t.id).collect();
+        let changes: Vec<(usize, Option<u64>)> = ft
+            .toplevels
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| {
+                let want = parents.get(&t.id).copied().filter(|p| known.contains(p));
+                (want != t.parent).then_some((i, want))
+            })
+            .collect();
+        for (i, want) in changes {
+            let parent_handles = want
+                .and_then(|pid| ft.toplevels.iter().find(|t| t.id == pid))
+                .map(|t| t.handles.clone())
+                .unwrap_or_default();
+            let toplevel = &mut ft.toplevels[i];
+            send_parent(&toplevel.handles, &parent_handles);
+            toplevel.parent = want;
+        }
+    }
+
+    /// For every window that is a dialog of another, the window id of the one it belongs to.
+    fn window_parents(&self) -> HashMap<u64, u64> {
+        let id_of = |window: &Window| window.user_data().get::<WindowId>().map(|id| id.0);
+        self.desk
+            .all_top_down()
+            .filter_map(|entry| {
+                let parent = entry.window.toplevel()?.parent()?;
+                let parent_entry = self.desk.find_by(|w| {
+                    w.toplevel()
+                        .is_some_and(|toplevel| *toplevel.wl_surface() == parent)
+                })?;
+                Some((id_of(&entry.window)?, id_of(&parent_entry.window)?))
+            })
+            .collect()
+    }
+
+    /// Where a taskbar said its button for `window` is, in the shared space. `None` when none
+    /// did, or its taskbar is gone or not placed.
+    pub fn foreign_toplevel_rectangle(&self, window: &Window) -> Option<Rect> {
+        let id = window.user_data().get::<WindowId>()?.0;
+        let (surface, (x, y, width, height)) = self.foreign_toplevel.rectangles.get(&id)?;
+        if !surface.is_alive() {
+            return None;
+        }
+        let origin = surface_rect(&self.desk, &self.outputs, surface)?.loc;
+        Some((origin.x + x, origin.y + y, *width, *height))
     }
 
     /// The window with the window id `id`.
@@ -230,6 +305,25 @@ impl JffState {
         self.desk
             .find_by(|w| w.user_data().get::<WindowId>() == Some(&WindowId(id)))
             .map(|entry| entry.window.clone())
+    }
+}
+
+/// Tell every handle of `handles` (of a version that has the event) its parent: the handle of
+/// the parent that belongs to the same manager, none when `parent_handles` has none.
+fn send_parent(
+    handles: &[(ZwlrForeignToplevelManagerV1, ZwlrForeignToplevelHandleV1)],
+    parent_handles: &[(ZwlrForeignToplevelManagerV1, ZwlrForeignToplevelHandleV1)],
+) {
+    for (manager, handle) in handles {
+        if handle.version() < 3 {
+            continue;
+        }
+        let parent = parent_handles
+            .iter()
+            .find(|(m, _)| m == manager)
+            .map(|(_, h)| h);
+        handle.parent(parent);
+        handle.done();
     }
 }
 
@@ -276,6 +370,26 @@ impl GlobalDispatch<ZwlrForeignToplevelManagerV1, ()> for JffState {
         let ft = &mut state.foreign_toplevel;
         for toplevel in &mut ft.toplevels {
             announce(display, &manager, toplevel, &outputs);
+        }
+        // ... and which of them are dialogs.
+        let handle_of = |toplevels: &[Toplevel], id: u64| {
+            toplevels
+                .iter()
+                .find(|t| t.id == id)
+                .and_then(|t| t.handles.iter().find(|(m, _)| *m == manager))
+                .map(|(_, handle)| handle.clone())
+        };
+        for (id, parent) in ft
+            .toplevels
+            .iter()
+            .filter_map(|t| t.parent.map(|parent| (t.id, parent)))
+        {
+            if let Some(child) = handle_of(&ft.toplevels, id) {
+                if child.version() >= 3 {
+                    child.parent(handle_of(&ft.toplevels, parent).as_ref());
+                    child.done();
+                }
+            }
         }
         ft.managers.push(manager);
     }
@@ -355,8 +469,20 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, u64> for JffState {
             Request::Close => toplevel.send_close(),
             Request::SetMinimized => state.minimize_window(&window),
             Request::UnsetMinimized => state.unminimize_window(&window),
-            // No animation that needs the button's place.
-            Request::SetRectangle { .. } => {}
+            Request::SetRectangle {
+                surface,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let rectangles = &mut state.foreign_toplevel.rectangles;
+                if width == 0 && height == 0 {
+                    rectangles.remove(id);
+                } else if width > 0 && height > 0 {
+                    rectangles.insert(*id, (surface, (x, y, width, height)));
+                }
+            }
             _ => {}
         }
     }

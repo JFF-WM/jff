@@ -269,6 +269,14 @@ impl<W> Desk<W> {
         true
     }
 
+    /// Start the open animation of the first window matching `pred` again, from now (a window
+    /// that comes back from a minimize fades in under the picture that flies to its place).
+    pub fn mark_shown_where(&mut self, pred: impl Fn(&W) -> bool) {
+        if let Some(e) = self.entries.iter_mut().find(|e| pred(&e.window)) {
+            e.shown = Some(std::time::Instant::now());
+        }
+    }
+
     /// Draw the first window matching `pred` with this opacity (clamped to 0 to 1).
     pub fn set_opacity_where(&mut self, pred: impl Fn(&W) -> bool, opacity: f32) {
         if let Some(e) = self.entries.iter_mut().find(|e| pred(&e.window)) {

@@ -67,7 +67,7 @@ fn is_toplevel_of(window: &Window, surface: &WlSurface) -> bool {
 
 /// Where `surface`'s origin is (a window, or a layer surface like a launcher), in desktop
 /// coordinates, plus its size.
-fn surface_rect(
+pub(crate) fn surface_rect(
     desk: &Desk<Window>,
     outputs: &[Output],
     surface: &WlSurface,
