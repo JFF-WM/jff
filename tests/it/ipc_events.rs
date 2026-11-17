@@ -712,7 +712,7 @@ fn a_window_is_written_like_the_documented_example() {
     assert_eq!(
         v.to_json(),
         "{\"id\":1,\"app_id\":\"foot\",\"title\":\"~\",\"x\":40,\"y\":40,\"width\":800,\
-             \"height\":600,\"maximized\":false,\"fullscreen\":false,\"focused\":true,\
+             \"height\":600,\"maximized\":false,\"fullscreen\":false,\"focused\":true,\"urgent\":false,\
              \"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\"container\":null}"
     );
     v.app_id = None;
@@ -832,7 +832,7 @@ fn events_are_written_as_one_json_line_each() {
             Event::WindowOpened(window(5)),
             "{\"event\":\"window-opened\",\"id\":5,\"app_id\":\"foot\",\"title\":\"~\",\
                  \"x\":40,\"y\":40,\"width\":800,\"height\":600,\"maximized\":false,\
-                 \"fullscreen\":false,\"focused\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\
+                 \"fullscreen\":false,\"focused\":false,\"urgent\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\
                  \"container\":null}",
         ),
         (
@@ -906,7 +906,8 @@ fn events_are_written_as_one_json_line_each() {
         (
             Event::OutputAdded(output("DP-1", 0)),
             "{\"event\":\"output-added\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-                 \"height\":1080,\"scanout\":false,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false}}",
+                 \"height\":1080,\"scanout\":false,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false},\
+                 \"hdr\":{\"requested\":false,\"active\":false,\"reason\":null,\"eotf\":null,\"peak\":null,\"peak_source\":null,\"sdr_white\":203,\"bits\":null,\"night_light\":false,\"content_light\":null,\"scanout\":{\"active\":false,\"reason\":null}}}",
         ),
         (
             Event::OutputRemoved {
@@ -917,7 +918,8 @@ fn events_are_written_as_one_json_line_each() {
         (
             Event::OutputChanged(output("DP-1", 0)),
             "{\"event\":\"output-changed\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-                 \"height\":1080,\"scanout\":false,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false}}",
+                 \"height\":1080,\"scanout\":false,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false},\
+                 \"hdr\":{\"requested\":false,\"active\":false,\"reason\":null,\"eotf\":null,\"peak\":null,\"peak_source\":null,\"sdr_white\":203,\"bits\":null,\"night_light\":false,\"content_light\":null,\"scanout\":{\"active\":false,\"reason\":null}}}",
         ),
         (
             Event::Overview { open: true },

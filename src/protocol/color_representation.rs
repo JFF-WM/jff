@@ -235,16 +235,24 @@ pub fn supported_coefficients(yuv: bool) -> Vec<(Coefficients, Range)> {
     pairs
 }
 
-/// Whether a pixel format (a DRM fourcc or a `wl_shm` format, by its `Debug` name such as
-/// `Nv12` or `Argb8888`) stores YCbCr rather than RGB. The names are what both enums share, so
-/// one test serves the two and does not depend on which variants a Smithay version has.
+/// Whether a pixel format (a DRM fourcc or a `wl_shm` format, by its `Debug` text) stores YCbCr
+/// rather than RGB. A `wl_shm` format prints as its name (`Nv12`, `Argb8888`), a DRM fourcc as
+/// `DrmFourcc(NV12)` with its four letter code (`AR24` for `Argb8888`), so the text is cut down
+/// to the part that names the format and compared in upper case, by the start of the name or of
+/// the code. That does not depend on which variants a Smithay version has.
 pub fn format_is_yuv(format: impl std::fmt::Debug) -> bool {
-    let name = format!("{format:?}");
+    let text = format!("{format:?}");
+    let inner = text
+        .split_once('(')
+        .map_or(text.as_str(), |(_, rest)| rest.trim_end_matches(')'));
+    let name = inner.to_ascii_uppercase();
+    // Names (`YUYV`, `YUV420`, `NV12`, `P010`, `AYUV`, `XVYU2101010`...) and the codes of the
+    // same formats (`YU12`, `NV12`, `P010`, `XV30`, `VU24`...) start alike.
     const PREFIXES: &[&str] = &[
-        "Yuyv", "Yvyu", "Uyvy", "Vyuy", "Nv", "P0", "P2", "P3", "Yuv", "Yvu", "Ayuv", "Avuy",
-        "Xyuv", "Xvuy", "Xvyu", "Vuy", "Q4", "Q0",
+        "YU", "YV", "UYVY", "VYUY", "IYU", "NV", "P0", "P2", "P3", "AYUV", "AVUY", "XYUV", "XVUY",
+        "XV", "VU", "Q4", "Q0",
     ];
-    // Y210, Y412, Y0l2 and the like. `Yu`/`Yv` are covered above.
+    // Y210, Y412, Y0L2 and the like. `YU`/`YV` are covered above.
     let y_numbered = name
         .strip_prefix('Y')
         .and_then(|rest| rest.chars().next())

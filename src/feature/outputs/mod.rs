@@ -151,13 +151,21 @@ pub fn output_rect(output: &Output) -> Rect {
     (loc.x, loc.y, logical(size.0), logical(size.1))
 }
 
+/// The transform that undoes `transform`. Smithay's `Transform::invert` swaps 90 and 270, which is
+/// right for a turn, but it also swaps `Flipped90` and `Flipped270`. Those two are reflections
+/// across a diagonal, and a reflection is its own inverse, so they stay as they are.
+fn undo(transform: Transform) -> Transform {
+    match transform {
+        Transform::Flipped90 | Transform::Flipped270 => transform,
+        other => other.invert(),
+    }
+}
+
 /// Where a point of a panel's own picture (`native` pixels, `point` in them) is in the upright
 /// frame drawn for it: what `transform` did to the frame, undone.
 pub fn upright_point(transform: Transform, native: (i32, i32), point: (f64, f64)) -> (f64, f64) {
     let area: Size<f64, Logical> = (f64::from(native.0), f64::from(native.1)).into();
-    let upright = transform
-        .invert()
-        .transform_point_in(Point::from(point), &area);
+    let upright = undo(transform).transform_point_in(Point::from(point), &area);
     (upright.x, upright.y)
 }
 

@@ -836,9 +836,9 @@ fn a_target_volume_inside_the_primary_one_is_not_an_extension() {
     let mut builder = ParamsBuilder::default();
     builder.set_tf_named(SRGB_TF).unwrap();
     builder.set_primaries_named(BT2020).unwrap();
-    // P3 inside BT.2020, luminance inside the SDR range
+    // BT.709 inside BT.2020 (P3's red corner is just outside it), luminance inside the SDR range
     builder
-        .set_mastering_display_primaries(NamedPrimaries::DisplayP3.chromaticities().to_array())
+        .set_mastering_display_primaries(NamedPrimaries::Srgb.chromaticities().to_array())
         .unwrap();
     builder.set_mastering_luminance(2_000, 80).unwrap();
     assert!(!builder.build().unwrap().extends_target_volume());

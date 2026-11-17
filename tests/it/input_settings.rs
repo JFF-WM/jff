@@ -64,7 +64,7 @@ fn a_touchpad_block_sets_everything_it_names() {
 #[test]
 fn touchpad_and_mouse_blocks_stay_apart() {
     let config =
-        Config::parse("input { touchpad { natural-scroll; } mouse { accel-profile \"flat\"; } }")
+        Config::parse("input { touchpad { natural-scroll; }; mouse { accel-profile \"flat\"; } }")
             .unwrap();
     let touchpad = config.input().settings_for(TOUCHPAD, DeviceKind::Touchpad);
     let mouse = config.input().settings_for(MOUSE, DeviceKind::Mouse);

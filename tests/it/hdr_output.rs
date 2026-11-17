@@ -1439,10 +1439,10 @@ fn hdr_with_color_management_on_or_a_monitor_off_is_not() {
     let on = Config::parse(r#"outputs { output "DP-1" { hdr; } }"#).unwrap();
     assert_eq!(on.hdr_hidden_warning(), None);
     let no_hdr =
-        Config::parse(r#"color-management { off; } outputs { output "DP-1" { } }"#).unwrap();
+        Config::parse(r#"color-management { off; }; outputs { output "DP-1" { } }"#).unwrap();
     assert_eq!(no_hdr.hdr_hidden_warning(), None);
     let off_monitor =
-        Config::parse(r#"color-management { off; } outputs { output "DP-1" { off; hdr; } }"#)
+        Config::parse(r#"color-management { off; }; outputs { output "DP-1" { off; hdr; } }"#)
             .unwrap();
     assert_eq!(off_monitor.hdr_hidden_warning(), None);
 }
