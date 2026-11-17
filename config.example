@@ -363,11 +363,11 @@ cursor {
 //     fullscreen-passthrough     // never convert a fullscreen window, so it can still be scanned out
 // }
 
-// Color representation (wp-color-representation). Off by default. With `yuv`, video that says
+// Color representation (wp-color-representation). On by default. With `yuv`, video that says
 // which YUV matrix and range it uses (BT.709 limited range, say) is drawn with exactly those,
 // instead of whatever the graphics driver assumes (BT.601 limited). Such a surface is drawn
-// by the renderer, so it does not get direct scanout.
-// color-representation { yuv }
+// by the renderer, so it does not get direct scanout. Turn it off to keep scanout for video:
+// color-representation { yuv false }
 
 // ---------------------------------------------------------------------------------------------
 // Window rules. Any number of blocks.

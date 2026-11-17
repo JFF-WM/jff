@@ -1429,7 +1429,7 @@ pub struct Config {
     /// `container-rule` blocks, in file order.
     container_rules: Vec<ContainerRule>,
     /// `color-representation { yuv }`: draw YUV buffers with the matrix and range the client
-    /// declared (wp-color-representation).
+    /// declared (wp-color-representation). On by default.
     color_representation_yuv: bool,
     /// `color-management { … }`.
     color_management: ColorManagementConfig,
@@ -1489,7 +1489,7 @@ impl Default for Config {
                 window_rules: Vec::new(),
                 tiling_containers: false,
                 container_rules: Vec::new(),
-                color_representation_yuv: false,
+                color_representation_yuv: true,
                 color_management: ColorManagementConfig::default(),
                 skipped: Vec::new(),
             }
@@ -1786,7 +1786,7 @@ impl Config {
             }
         }
 
-        let mut color_representation_yuv = false;
+        let mut color_representation_yuv = true;
         if let Some(node) = doc.get("color-representation") {
             for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
                 match child.name().value() {
