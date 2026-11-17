@@ -10,6 +10,8 @@
   </tr>
 </table>
 
+<https://github.com/user-attachments/assets/e10e5431-8724-4df3-af01-f3f9ed7c5c7c>
+
 ## What it does
 
 - **Windows:** stacking, click-to-focus, Alt+drag to move or resize anything,
