@@ -115,7 +115,7 @@
 //!
 //! `outputs` replies `{"ok":true,"outputs":[OUTPUT,...]}`, each OUTPUT what `watch` describes
 //! below (`name`, `x`, `y`, `width`, `height`, `scanout`, `adaptive_sync`, `color`, `hdr`), as it is
-//! now. A script that wants one answer gets it here, a panel that wants to follow the changes
+//! now, plus `focused`: true on the monitor the user is working on (the one the pointer is on), false on the others, and only here, not in `watch` or the snapshot. A script that wants one answer gets it here, a panel that wants to follow the changes
 //! uses `watch outputs`.
 //!
 //! `hotkeys` replies `{"ok":true,"enabled":true,"hotkeys":[HOTKEY,...]}`, `enabled` being whether
@@ -796,8 +796,12 @@ impl JffState {
                 ))
             }
             Request::Outputs => {
-                let outputs: Vec<String> =
-                    self.output_list().iter().map(OutputInfo::to_json).collect();
+                let active = self.active_output_name();
+                let outputs: Vec<String> = self
+                    .output_list()
+                    .iter()
+                    .map(|info| info.to_json_focused(info.name == active))
+                    .collect();
                 Ok(format!(
                     "{{\"ok\":true,\"outputs\":[{}]}}\n",
                     outputs.join(",")

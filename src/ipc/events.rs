@@ -272,6 +272,11 @@ impl OutputInfo {
     pub fn to_json(&self) -> String {
         format!("{{{}}}", self.members())
     }
+
+    /// [`Self::to_json`] with `focused` added, for the `outputs` request: whether this is the monitor the user is working on.
+    pub fn to_json_focused(&self, focused: bool) -> String {
+        format!("{{{},\"focused\":{}}}", self.members(), focused)
+    }
 }
 
 /// The colors of a monitor, as jff takes them to be and tells clients (`wp_color_management_v1`).
