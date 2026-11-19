@@ -97,8 +97,9 @@ pub fn fullscreen_surface(desk: &Desk<Window>, rect: Rect) -> Option<WlSurface> 
 }
 
 /// Whether the fullscreen window covering the monitor at `rect` (see `fullscreen_covers`) says
-/// its content is a game (wp_content_type_v1). False without a covering window, and for windows
-/// that never set a content type, like X11 ones.
+/// its content is a game (wp_content_type_v1, or a `content-type` window rule). False without a
+/// covering window, and for windows that never set a content type, like X11 ones, unless a
+/// rule says it for them.
 pub fn fullscreen_says_game(desk: &Desk<Window>, rect: Rect) -> bool {
     if !fullscreen_covers(desk, rect) {
         return false;

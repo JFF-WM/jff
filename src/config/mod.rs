@@ -7,7 +7,7 @@
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
 //! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
-//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `open-position X Y` (from the top left of the monitor, kept inside it, floating), `open-centered` (the middle of the monitor, floating, not together with `open-position`), `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), the first rule that fits a window applies), and
+//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `open-position X Y` (from the top left of the monitor, kept inside it, floating), `open-centered` (the middle of the monitor, floating, not together with `open-position`), `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), `content-type "game"|"none"` (what the window shows, whatever its client says through wp_content_type_v1: with `game`, a fullscreen window covering a monitor with `content-type-hint` makes jff tell the monitor a game is on screen, which X11 and Proton windows cannot say for themselves, `none` ignores what the client says, set when the window opens like `opacity`, a rule with only a `content-type` does not use up the one rule a window gets either), the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -1193,6 +1193,16 @@ pub struct WindowFacts<'a> {
     pub restored: bool,
 }
 
+/// `content-type` of a `window-rule`: what the window shows, instead of what its client says
+/// through wp_content_type_v1. Only the two cases jff acts on (the connector's `content type`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleContentType {
+    /// `"game"`: the window is a game.
+    Game,
+    /// `"none"`: it is not, whatever the client says.
+    NoType,
+}
+
 /// A `window-rule { match …, action … }` block. A window gets the first rule whose `match`
 /// lines all hold. A rule without `match` lines holds for every window.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1229,6 +1239,9 @@ pub struct WindowRule {
     /// `sdr`: the window is read as plain sRGB, whatever its client tagged it with. Its own
     /// step too.
     pub sdr: bool,
+    /// `content-type "game"`: what the window shows, whatever its client says. Its own step
+    /// too, see [`Config::content_type_for`].
+    pub content_type: Option<RuleContentType>,
 }
 
 impl WindowRule {
@@ -1256,6 +1269,7 @@ impl WindowRule {
             || self.tag.is_some()
             || self.opacity.is_some()
             || self.sets_sdr()
+            || self.content_type.is_some()
     }
 
     /// Whether the rule says how the window's colors are read: `sdr` or `sdr-white`.
@@ -1271,11 +1285,14 @@ impl WindowRule {
         }
     }
 
-    /// Whether `tag`, `opacity`, `sdr` and `sdr-white` are all the rule does. Such a rule only
-    /// names or dresses windows, so it does not use up the one rule a window gets for its
-    /// placement.
+    /// Whether `tag`, `opacity`, `sdr`, `sdr-white` and `content-type` are all the rule does.
+    /// Such a rule only names or dresses windows, so it does not use up the one rule a window
+    /// gets for its placement.
     pub fn only_tags(&self) -> bool {
-        (self.tag.is_some() || self.opacity.is_some() || self.sets_sdr())
+        (self.tag.is_some()
+            || self.opacity.is_some()
+            || self.sets_sdr()
+            || self.content_type.is_some())
             && self.output.is_none()
             && self.workspace.is_none()
             && self.container.is_none()
@@ -1631,6 +1648,14 @@ impl Config {
             if rule.sdr_white.is_some() && !config.outputs.iter().any(|output| output.hdr) {
                 warnings.push(format!(
                     "window-rule {n} has sdr-white, which does nothing without an output with `hdr`"
+                ));
+            }
+            if rule.content_type.is_some()
+                && !config.outputs.iter().any(|output| output.content_type_hint)
+            {
+                warnings.push(format!(
+                    "window-rule {n} has content-type, which does not reach any monitor without \
+                     an output with `content-type-hint`"
                 ));
             }
             if rule.container.is_some() && !config.tiling_containers() {
@@ -2140,6 +2165,16 @@ impl Config {
             .filter(|rule| rule.matches(window))
             .find(|rule| rule.sets_sdr())
             .map(WindowRule::window_sdr)
+    }
+
+    /// What the user's rules say a window shows: that of the first rule with a `content-type`
+    /// whose `match` lines all hold, which does not depend on which rule the window gets for
+    /// its placement. `None` when no rule says anything, and the client's own word counts.
+    pub fn content_type_for(&self, window: &WindowFacts<'_>) -> Option<RuleContentType> {
+        self.window_rules
+            .iter()
+            .filter(|rule| rule.matches(window))
+            .find_map(|rule| rule.content_type)
     }
 
     /// Whether windows can be grouped in tiling containers (`tiling-containers`, off by default).
@@ -2906,6 +2941,13 @@ fn parse_window_rule(node: &KdlNode) -> anyhow::Result<WindowRule> {
             }
             "sdr-white" => rule.sdr_white = Some(nits_arg(child, &SDR_WHITE_RANGE, 300)?),
             "sdr" => rule.sdr = flag_value(child)?,
+            "content-type" => {
+                rule.content_type = Some(match string_arg(child)?.as_str() {
+                    "game" => RuleContentType::Game,
+                    "none" => RuleContentType::NoType,
+                    _ => bail!("content-type takes \"game\" or \"none\""),
+                });
+            }
             other => bail!("unknown window-rule setting {other:?}"),
         }
     }

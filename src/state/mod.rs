@@ -1855,9 +1855,9 @@ impl JffState {
         }
     }
 
-    /// Draw the window of `root` the way the `window-rule`s say, if they do: the opacity, and how
-    /// its colors are read (`sdr`, `sdr-white`). Done once, when the window first shows: a
-    /// reload does not change windows that are open.
+    /// Draw the window of `root` the way the `window-rule`s say, if they do: the opacity, how
+    /// its colors are read (`sdr`, `sdr-white`), and what it shows (`content-type`). Done once,
+    /// when the window first shows: a reload does not change windows that are open.
     fn apply_rule_look(&mut self, root: &WlSurface, dialog: bool, restored: bool) {
         if self.config.window_rules().is_empty() {
             return;
@@ -1893,6 +1893,13 @@ impl JffState {
         if let Some(sdr) = self.config.sdr_for(&facts) {
             tracing::info!("window rule sdr {sdr:?} for app-id={app_id:?}");
             crate::protocol::window_sdr::set(root, sdr);
+        }
+        if let Some(kind) = self.config.content_type_for(&facts) {
+            tracing::info!("window rule content-type {kind:?} for app-id={app_id:?}");
+            crate::protocol::content_type::set_override(
+                root,
+                Some(kind == crate::config::RuleContentType::Game),
+            );
         }
     }
 

@@ -411,6 +411,12 @@ cursor {
 //   tag "NAME"             give the window a tag of yours, which `match tag` and every rule sees
 //                          from then on, whatever its title changes to. A rule with only a `tag`
 //                          does not use up the one rule a window gets
+//   content-type "game"    what the window shows, whatever its client says. A game that runs
+//                          through X11 (Proton) cannot say it is one itself: with `game`, an
+//                          output with `content-type-hint` tells its monitor so while the window
+//                          covers it fullscreen. "none" ignores what the client says. Set when
+//                          the window opens. A rule with only a `content-type` does not use up
+//                          the one rule a window gets
 //
 // Change DP-1 and HDMI-A-2 below to your monitor names.
 // ---------------------------------------------------------------------------------------------
@@ -419,6 +425,13 @@ cursor {
 // window-rule {
 //     match app-id="firefox-developer-edition" title="Picture-in-Picture"
 //     tag "picture-in-picture"
+// }
+
+// A game that cannot say it is one (X11 / Proton): the monitor is told while it is fullscreen.
+// Needs `content-type-hint` on the output. `toggle-stats` shows whether jff took it for a game.
+// window-rule {
+//     match app-id="steam_app_1245620"
+//     content-type "game"
 // }
 
 // A tagged browser window: first monitor, workspace 1, maximized.
