@@ -16,6 +16,17 @@ fn global_hotkeys_are_off_unless_asked_for() {
 }
 
 #[test]
+fn overview_animation_has_a_default_and_a_range() {
+    assert_eq!(Config::parse("").unwrap().overview().animation_ms, 320);
+    let config = Config::parse("overview { animation-ms 500; }").unwrap();
+    assert_eq!(config.overview().animation_ms, 500);
+    let config = Config::parse("overview { animation-ms 0; }").unwrap();
+    assert_eq!(config.overview().animation_ms, 0);
+    assert!(Config::parse("overview { animation-ms 2001; }").is_err());
+    assert!(Config::parse("overview { animation-ms -1; }").is_err());
+}
+
+#[test]
 fn forward_key_binds_a_key_to_an_app_id() {
     let config = Config::parse(
         r#"

@@ -102,7 +102,6 @@ use crate::input::grabs::resize::ResizeGrab;
 use crate::primitives::geom;
 use crate::primitives::layout;
 use crate::protocol::color_management::ColorManagement;
-use crate::protocol::xx_image_capture_color_management::XxImageCaptureColor;
 use crate::protocol::color_representation::ColorRepresentationManager;
 use crate::protocol::ext_foreign_toplevel::ExtForeignToplevel;
 use crate::protocol::fixes::Fixes;
@@ -124,6 +123,7 @@ use crate::protocol::virtual_pointer::VirtualPointerManager;
 use crate::protocol::wlr_screencopy::WlrScreencopy;
 use crate::protocol::workspace::ExtWorkspace;
 use crate::protocol::xx_hotkey::Hotkeys;
+use crate::protocol::xx_image_capture_color_management::XxImageCaptureColor;
 use crate::protocol::xx_zones::Zones;
 use crate::render::cursor::CursorManager;
 
@@ -409,6 +409,8 @@ pub struct JffState {
     pub fingers: crate::primitives::touch::Fingers<smithay::backend::input::TouchSlot, WlSurface>,
     /// The three-finger swipe on a touchscreen, when one is going on.
     pub touch_gesture: crate::primitives::touch::TouchGesture<smithay::backend::input::TouchSlot>,
+    /// The swipe out of a monitor's top-left corner that opens the overview (touch hot corner).
+    pub touch_corner: crate::primitives::touch::CornerSwipe<smithay::backend::input::TouchSlot>,
 }
 
 impl JffState {
@@ -737,6 +739,7 @@ impl JffState {
             popup_grab: None,
             fingers: Default::default(),
             touch_gesture: Default::default(),
+            touch_corner: Default::default(),
         };
         state
             .desk

@@ -338,6 +338,33 @@ pub fn ease_out_cubic(t: f64) -> f64 {
     1.0 - (1.0 - t).powi(3)
 }
 
+/// A CSS-style cubic Bézier easing with control points (`x1`, `y1`) and (`x2`, `y2`): the
+/// value of the curve at time `t`, 0.0 to 1.0. `x1` and `x2` must be in 0.0 to 1.0, which keeps
+/// the curve a function of time.
+pub fn cubic_bezier(x1: f64, y1: f64, x2: f64, y2: f64, t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    let at = |a: f64, b: f64, s: f64| {
+        3.0 * (1.0 - s) * (1.0 - s) * s * a + 3.0 * (1.0 - s) * s * s * b + s * s * s
+    };
+    // Bisection for the curve parameter whose x is `t`: x grows with it, 24 halvings are far
+    // finer than a pixel.
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    for _ in 0..24 {
+        let mid = 0.5 * (lo + hi);
+        if at(x1, x2, mid) < t {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    at(y1, y2, 0.5 * (lo + hi))
+}
+
+/// The curve of the overview opening and closing: a gentle start and a long, soft stop.
+pub fn ease_overview(t: f64) -> f64 {
+    cubic_bezier(0.2, 0.0, 0.0, 1.0, t)
+}
+
 pub fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
 }

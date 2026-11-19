@@ -6,9 +6,9 @@ use jff_wm::primitives::geom::Size;
 use jff_wm::primitives::layout;
 use jff_wm::primitives::layout::Rect;
 use jff_wm::primitives::overview_grid::{
-    anchor_in, arrange, cycle, dragged_thumb, drop_pos, ease_out_cubic, hit_test, lerp_thumb,
-    modifier_released, moved_past, neighbor, progress, shifted, slide_at, strip, strip_offset,
-    wall, wall_hit, wall_thumb, Dir, Thumb,
+    anchor_in, arrange, cubic_bezier, cycle, dragged_thumb, drop_pos, ease_out_cubic,
+    ease_overview, hit_test, lerp_thumb, modifier_released, moved_past, neighbor, progress,
+    shifted, slide_at, strip, strip_offset, wall, wall_hit, wall_thumb, Dir, Thumb,
 };
 
 const SCREEN: Rect = (0, 0, 1920, 1080);
@@ -195,6 +195,22 @@ fn easing_runs_from_zero_to_one() {
     assert_eq!(ease_out_cubic(-3.0), 0.0);
     assert_eq!(ease_out_cubic(7.0), 1.0);
     assert!(ease_out_cubic(0.5) > 0.5);
+}
+
+#[test]
+fn overview_easing_is_smooth_and_monotonic() {
+    assert!(ease_overview(0.0).abs() < 1e-9);
+    assert!((ease_overview(1.0) - 1.0).abs() < 1e-9);
+    // Gentler than ease_out_cubic at the start, and never going backwards.
+    assert!(ease_overview(0.05) < ease_out_cubic(0.05));
+    let mut last = 0.0;
+    for i in 0..=100 {
+        let value = ease_overview(f64::from(i) / 100.0);
+        assert!(value >= last);
+        last = value;
+    }
+    // A straight line when both control points lie on it.
+    assert!((cubic_bezier(1.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 0.4) - 0.4).abs() < 1e-6);
 }
 
 #[test]

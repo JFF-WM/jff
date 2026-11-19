@@ -87,8 +87,6 @@ use crate::state::JffState;
 const MARGIN: i32 = 150;
 /// Space between thumbnails.
 const GAP: i32 = 24;
-/// Open and close animation length.
-const ANIMATION: Duration = Duration::from_millis(180);
 /// Colour (straight alpha) of the ripples at the top-left corner when the overview opens.
 const RIPPLE_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.9];
 /// How far the pointer moves with the left button held before it's a drag, not a click.
@@ -360,8 +358,13 @@ pub struct Overview {
     /// Our pointer grab's serial, so we can recognise it when ending.
     grab_serial: Serial,
     opened: Instant,
+    /// How long opening and closing take (`overview { animation-ms }` when it opened).
+    animation: Duration,
     /// Set once we leave: input released, animation runs backwards.
     closing: Option<Instant>,
+    /// How far open the overview was (see [`Overview::progress`]) when it started closing, so
+    /// leaving halfway through opening goes back from there instead of jumping to fully open.
+    closing_from: f64,
     /// Stable id of the highlight, so damage tracking sees it move rather than reappear.
     highlight: Id,
     /// Stable ids of the fills of the workspace wall's squares, one per square.
@@ -422,10 +425,22 @@ impl Overview {
         }
         match self.closing {
             Some(since) => {
-                1.0 - overview::ease_out_cubic(overview::progress(since.elapsed(), ANIMATION))
+                self.closing_from
+                    * (1.0
+                        - overview::ease_overview(overview::progress(
+                            since.elapsed(),
+                            self.closing_total(),
+                        )))
             }
-            None => overview::ease_out_cubic(overview::progress(self.opened.elapsed(), ANIMATION)),
+            None => {
+                overview::ease_overview(overview::progress(self.opened.elapsed(), self.animation))
+            }
         }
+    }
+
+    /// How long closing takes: shorter when the overview was not fully open yet.
+    fn closing_total(&self) -> Duration {
+        self.animation.mul_f64(self.closing_from.clamp(0.3, 1.0))
     }
 }
 
@@ -1537,7 +1552,9 @@ impl JffState {
             layer_buttons: Vec::new(),
             grab_serial,
             opened: Instant::now(),
+            animation: Duration::from_millis(self.config.overview().animation_ms.into()),
             closing: None,
+            closing_from: 1.0,
             highlight: Id::new(),
             wall_ids: Vec::new(),
             cell_ids: Vec::new(),
@@ -1600,6 +1617,7 @@ impl JffState {
         ov.search.app_selected = None;
         ov.update_visible();
 
+        ov.closing_from = ov.progress();
         ov.closing = Some(Instant::now());
         ov.drag = None;
         ov.press_origin = None;
@@ -2285,7 +2303,10 @@ impl JffState {
         let Some(ov) = self.overview.as_ref() else {
             return;
         };
-        if ov.closing.is_some_and(|since| since.elapsed() >= ANIMATION) {
+        if ov
+            .closing
+            .is_some_and(|since| since.elapsed() >= ov.closing_total())
+        {
             self.overview = None;
             return;
         }

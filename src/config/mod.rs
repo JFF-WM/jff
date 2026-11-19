@@ -6,7 +6,7 @@
 //! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9, per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
-//! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
+//! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
 //! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `open-position X Y` (from the top left of the monitor, kept inside it, floating), `open-centered` (the middle of the monitor, floating, not together with `open-position`), `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
@@ -902,6 +902,10 @@ impl Default for SwitcherConfig {
     }
 }
 
+/// Default time (ms) the overview takes to open and close, and its upper bound.
+pub const DEFAULT_OVERVIEW_ANIMATION_MS: u32 = 320;
+pub const MAX_OVERVIEW_ANIMATION_MS: i32 = 2000;
+
 /// Default width (px) and colour of the outline around the selected thumbnail of the overview.
 /// The colour is straight (not premultiplied) alpha: it is translucent.
 pub const DEFAULT_SELECTION_WIDTH: i32 = 4;
@@ -911,7 +915,8 @@ pub const DEFAULT_SELECTION_COLOR: [f32; 4] = [0.35, 0.55, 0.95, 0.6];
 /// `selection-width` is the outline's width in pixels (0 draws none), `selection-color` its
 /// colour (`#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`). The square of the workspace wall the
 /// pointer is over uses the same outline. `auto-open` (on by default) opens the overview when
-/// the monitor in use has no windows.
+/// the monitor in use has no windows. `animation-ms` is how long the overview takes to open and
+/// close, 0 to skip the animation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OverviewConfig {
     pub selection_width: i32,
@@ -919,6 +924,7 @@ pub struct OverviewConfig {
     /// Open the overview by itself when the monitor in use has no windows (the last one closed,
     /// or you switched to an empty workspace), so an app can be started by typing its name.
     pub auto_open: bool,
+    pub animation_ms: u32,
 }
 
 impl Default for OverviewConfig {
@@ -927,6 +933,7 @@ impl Default for OverviewConfig {
             selection_width: DEFAULT_SELECTION_WIDTH,
             selection_color: DEFAULT_SELECTION_COLOR,
             auto_open: true,
+            animation_ms: DEFAULT_OVERVIEW_ANIMATION_MS,
         }
     }
 }
@@ -954,13 +961,20 @@ pub const MAX_HOT_CORNER_SIZE: i32 = 64;
 pub const DEFAULT_HOT_CORNER_DWELL_MS: i32 = 250;
 pub const MAX_HOT_CORNER_DWELL_MS: i32 = 5000;
 
+/// Default size (px) of the touchscreen's hot corner, and its upper bound.
+pub const DEFAULT_HOT_CORNER_TOUCH_SIZE: i32 = 48;
+pub const MAX_HOT_CORNER_TOUCH_SIZE: i32 = 200;
+
 /// The `hot-corner { … }` block: resting the pointer in a `size` px square at the top-left of a
-/// monitor for `dwell` opens the overview. `monitors` are the output names it is limited to,
-/// empty for every monitor. Only built for a `size` above 0, see [`Config::hot_corner`].
+/// monitor for `dwell` opens the overview. `touch_size` is the square a finger has to start in
+/// to open it with a swipe out of the corner (0: not on a touchscreen). `monitors` are the
+/// output names it is limited to, empty for every monitor. Only built for a `size` above 0, see
+/// [`Config::hot_corner`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HotCorner {
     pub size: i32,
     pub dwell: Duration,
+    pub touch_size: i32,
     pub monitors: Vec<String>,
 }
 
@@ -3025,6 +3039,9 @@ fn parse_overview(node: &KdlNode) -> anyhow::Result<OverviewConfig> {
             "selection-width" => config.selection_width = int_arg(child, MAX_BORDER_WIDTH)?,
             "selection-color" => config.selection_color = parse_color(&string_arg(child)?)?,
             "auto-open" => config.auto_open = flag_value(child)?,
+            "animation-ms" => {
+                config.animation_ms = u32::try_from(int_arg(child, MAX_OVERVIEW_ANIMATION_MS)?)?
+            }
             other => bail!("unknown overview setting {other:?}"),
         }
     }
@@ -3073,6 +3090,7 @@ fn parse_workspaces(node: &KdlNode) -> anyhow::Result<(usize, bool)> {
 fn parse_hot_corner(node: &KdlNode) -> anyhow::Result<Option<HotCorner>> {
     let mut size = DEFAULT_HOT_CORNER_SIZE;
     let mut dwell_ms = DEFAULT_HOT_CORNER_DWELL_MS;
+    let mut touch_size = DEFAULT_HOT_CORNER_TOUCH_SIZE;
     let mut monitors: Vec<String> = Vec::new();
     if !positional(node).is_empty() {
         size = int_arg(node, MAX_HOT_CORNER_SIZE)?;
@@ -3081,6 +3099,7 @@ fn parse_hot_corner(node: &KdlNode) -> anyhow::Result<Option<HotCorner>> {
         match child.name().value() {
             "size" => size = int_arg(child, MAX_HOT_CORNER_SIZE)?,
             "dwell-ms" => dwell_ms = int_arg(child, MAX_HOT_CORNER_DWELL_MS)?,
+            "touch-size" => touch_size = int_arg(child, MAX_HOT_CORNER_TOUCH_SIZE)?,
             "monitor" => monitors.push(string_arg(child)?),
             other => bail!("unknown hot-corner setting {other:?}"),
         }
@@ -3091,6 +3110,7 @@ fn parse_hot_corner(node: &KdlNode) -> anyhow::Result<Option<HotCorner>> {
     Ok(Some(HotCorner {
         size,
         dwell: Duration::from_millis(u64::try_from(dwell_ms)?),
+        touch_size,
         monitors,
     }))
 }

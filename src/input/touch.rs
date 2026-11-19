@@ -27,6 +27,11 @@
 //! client's surface, follows the finger and presses the left button. Other fingers are not
 //! emulated, and the pointer leaves the client when the finger lifts.
 //!
+//! A finger that starts in the top-left corner of a monitor and swipes diagonally away from it
+//! opens the overview, the touchscreen's hot corner (`hot-corner { touch-size }`). The app has
+//! the finger until the swipe counts, then it is cancelled like for the three-finger gesture.
+//! A tap in the corner, or a drag along an edge, is never taken.
+//!
 //! Not done yet: Alt+drag keeping its first press from the client.
 
 use smithay::backend::input::{
@@ -40,6 +45,7 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Serial, SERIAL_COUNTER};
 
 use super::BTN_LEFT;
+use crate::feature::outputs::output_rect;
 use crate::primitives::layout;
 use crate::primitives::touch::{touch_output_mapped, Finger};
 use crate::state::JffState;
@@ -58,6 +64,25 @@ impl JffState {
         let pos = self.absolute_on_output::<B, _>(self.outputs.get(index)?, event)
             + Point::from((rect.0 as f64, rect.1 as f64));
         Some(layout::clamp_to_rects((pos.x, pos.y), &self.pointer_bounds()).into())
+    }
+
+    /// Whether `p` is in the corner a finger starts the hot corner swipe in: `touch-size` px at
+    /// the top-left of a monitor the hot corner is on for, and not on one it is blocked on.
+    fn touch_corner_at(&self, p: Point<f64, Logical>) -> bool {
+        let Some(hot) = self.config.hot_corner() else {
+            return false;
+        };
+        if hot.touch_size <= 0 {
+            return false;
+        }
+        self.outputs
+            .iter()
+            .filter(|output| hot.monitors.is_empty() || hot.monitors.contains(&output.name()))
+            .map(output_rect)
+            .find(|rect| {
+                layout::contains(layout::hot_corner_rect(*rect, hot.touch_size), (p.x, p.y))
+            })
+            .is_some_and(|rect| !self.hot_corner_blocked(rect))
     }
 
     /// Move the seat pointer to the primary finger, without giving any client pointer focus.
@@ -171,6 +196,13 @@ impl JffState {
         if let Some(finger) = self.fingers.get_mut(slot) {
             finger.at = (pos.x, pos.y);
         }
+        // Only a lone finger can swipe out of the corner.
+        if primary && !modal && self.screenshot.is_none() {
+            let inside = self.touch_corner_at(pos);
+            self.touch_corner.begin(slot, (pos.x, pos.y), inside);
+        } else {
+            self.touch_corner.cancel();
+        }
 
         // Three fingers are the compositor's gesture. Once it is going, fingers that join
         // it belong to it too.
@@ -258,6 +290,13 @@ impl JffState {
             }
             return;
         }
+        if self.touch_corner.moved(slot, (pos.x, pos.y)) {
+            // Like the three-finger gesture: the app's touch is cancelled, and the overview
+            // takes over from the finger.
+            self.touch_begin_gesture(time);
+            self.open_overview();
+            return;
+        }
         if self.fingers.is_primary(slot) {
             let focus = if emulated {
                 self.pointer_focus_under(pos)
@@ -292,6 +331,7 @@ impl JffState {
         let Some(finger) = self.fingers.up(slot) else {
             return;
         };
+        self.touch_corner.cancel();
         self.touch_settle(slot, finger, time);
         if self.touch_gesture.is_active() {
             self.touch_gesture.lift(slot);

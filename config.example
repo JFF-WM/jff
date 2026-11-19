@@ -99,10 +99,13 @@ drag-modifier "Super"
 // Hot corner: resting the pointer in a square at the top-left of a monitor opens the overview
 // (and closes it again if it is open). Off unless this block (or `hot-corner N`) exists.
 // `hot-corner 0` turns it off. While it is on, the pointer cannot change monitor through the
-// corner's `size` px of edge.
+// corner's `size` px of edge. On a touchscreen, a finger that starts in the corner and swipes
+// diagonally away from it opens the overview; a tap, or a drag along an edge, stays with the app.
 hot-corner {
     size 10         // px, 0 to 64, 4 by default
     dwell-ms 50     // how long the pointer has to rest, 0 to 5000, 250 by default
+    touch-size 48   // px, the corner a finger starts the swipe in, 0 to 200, 0 for no touch
+                    // hot corner, 48 by default
     //monitor "DP-1" // only on this monitor, repeat the line for more. Default: every monitor
 }
 //hot-corner 6      // just the size
@@ -191,6 +194,8 @@ overview {
     selection-width 3         // px, 0 for no outline, 4 by default
     auto-open true            // open the overview when the monitor in use has no windows, so you
                               // can type an app's name and start it. On by default, false: off
+    animation-ms 320          // 0 to 2000, how long the overview takes to open and close, 0 = no
+                              // animation, 320 by default
 }
 
 // Window switcher (the `switch-window` binds): a row of thumbnails, most recently used first.

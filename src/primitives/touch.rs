@@ -247,3 +247,52 @@ impl<S: Copy + PartialEq> TouchGesture<S> {
         *self = Self::default();
     }
 }
+
+/// How far (px) a finger that started in the touch hot corner has to travel for the swipe to
+/// count.
+pub const CORNER_TRAVEL: f64 = 32.0;
+
+/// The swipe out of the top-left corner of a monitor that opens the overview, the touchscreen's
+/// hot corner. It starts with a finger down inside the corner and counts once the finger has
+/// travelled [`CORNER_TRAVEL`] px diagonally, away from the corner. A tap in the corner, and a
+/// drag that runs along an edge (a scroll, a window drag), are not it: the app keeps those.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CornerSwipe<S> {
+    tracked: Option<(S, (f64, f64))>,
+}
+
+impl<S> Default for CornerSwipe<S> {
+    fn default() -> Self {
+        Self { tracked: None }
+    }
+}
+
+impl<S: Copy + PartialEq> CornerSwipe<S> {
+    /// The finger `slot` touched down at `at`. `inside` says whether that is in the corner.
+    pub fn begin(&mut self, slot: S, at: (f64, f64), inside: bool) {
+        self.tracked = inside.then_some((slot, at));
+    }
+
+    /// The finger moved. True once, when the swipe counts, and it stops being followed. A
+    /// finger that went far enough in another direction stops being followed too.
+    pub fn moved(&mut self, slot: S, at: (f64, f64)) -> bool {
+        let Some((tracked, from)) = self.tracked else {
+            return false;
+        };
+        if tracked != slot {
+            return false;
+        }
+        let (dx, dy) = (at.0 - from.0, at.1 - from.1);
+        let distance = dx.hypot(dy);
+        if distance < CORNER_TRAVEL {
+            return false;
+        }
+        self.tracked = None;
+        dx >= 0.4 * distance && dy >= 0.4 * distance
+    }
+
+    /// Stop following: a finger lifted or another one joined.
+    pub fn cancel(&mut self) {
+        self.tracked = None;
+    }
+}

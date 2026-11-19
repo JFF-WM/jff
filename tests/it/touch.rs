@@ -3,10 +3,56 @@
 use jff_wm::config::Config;
 use jff_wm::primitives::swipe::Swipe;
 use jff_wm::primitives::touch::{
-    is_internal_panel, touch_output, touch_output_mapped, Fingers, TouchGesture,
+    is_internal_panel, touch_output, touch_output_mapped, CornerSwipe, Fingers, TouchGesture,
 };
 
 type F = Fingers<u32, &'static str>;
+
+#[test]
+fn a_diagonal_swipe_out_of_the_corner_counts_once() {
+    let mut swipe = CornerSwipe::<u32>::default();
+    swipe.begin(0, (10.0, 10.0), true);
+    assert!(!swipe.moved(0, (20.0, 20.0)));
+    assert!(swipe.moved(0, (40.0, 38.0)));
+    // it counted: no second time
+    assert!(!swipe.moved(0, (80.0, 80.0)));
+}
+
+#[test]
+fn a_drag_along_an_edge_is_not_the_corner_swipe() {
+    let mut swipe = CornerSwipe::<u32>::default();
+    swipe.begin(0, (10.0, 10.0), true);
+    // straight down: a scroll
+    assert!(!swipe.moved(0, (12.0, 80.0)));
+    // and it stays that way, even when it later bends
+    assert!(!swipe.moved(0, (80.0, 80.0)));
+}
+
+#[test]
+fn the_corner_swipe_needs_a_start_in_the_corner_and_the_same_finger() {
+    let mut swipe = CornerSwipe::<u32>::default();
+    swipe.begin(0, (500.0, 500.0), false);
+    assert!(!swipe.moved(0, (560.0, 560.0)));
+    swipe.begin(0, (10.0, 10.0), true);
+    assert!(!swipe.moved(1, (60.0, 60.0)));
+    swipe.cancel();
+    assert!(!swipe.moved(0, (60.0, 60.0)));
+}
+
+#[test]
+fn the_touch_hot_corner_has_a_default_and_can_be_turned_off() {
+    let size = |text: &str| {
+        Config::parse(text)
+            .unwrap()
+            .hot_corner()
+            .map(|hot| hot.touch_size)
+    };
+    assert_eq!(size("hot-corner { size 6; }"), Some(48));
+    assert_eq!(size("hot-corner { touch-size 80; }"), Some(80));
+    assert_eq!(size("hot-corner { touch-size 0; }"), Some(0));
+    assert_eq!(size("hot-corner 0"), None);
+    assert!(Config::parse("hot-corner { touch-size 201; }").is_err());
+}
 
 #[test]
 fn the_first_finger_is_the_primary_one() {
