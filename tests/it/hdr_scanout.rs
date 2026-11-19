@@ -4,7 +4,7 @@ use jff_wm::primitives::color::{
     ImageDescription, Luminance, NamedPrimaries, NamedTf, TransferFunction,
 };
 use jff_wm::primitives::hdr_scanout::{
-    decide, Decline, Facts, Over, Tried, ABGR2101010, ARGB2101010,
+    decide, Decline, Facts, Over, Tried, ABGR2101010, ARGB2101010, XBGR2101010, XRGB2101010,
 };
 
 fn pq_bt2020() -> ImageDescription {
@@ -33,6 +33,50 @@ fn the_fourcc_constants_are_the_drm_codes() {
     let code = |name: &[u8; 4]| u32::from_le_bytes(*name);
     assert_eq!(ARGB2101010, code(b"AR30"));
     assert_eq!(ABGR2101010, code(b"AB30"));
+    assert_eq!(XRGB2101010, code(b"XR30"));
+    assert_eq!(XBGR2101010, code(b"XB30"));
+}
+
+#[test]
+fn a_buffer_without_alpha_bits_matches_the_swapchain_with_them() {
+    let xr30 = Facts {
+        buffer_format: Some(XRGB2101010),
+        ..good()
+    };
+    assert_eq!(decide(&xr30), Ok(()));
+    let xb30 = Facts {
+        buffer_format: Some(XBGR2101010),
+        swapchain_format: ABGR2101010,
+        ..good()
+    };
+    assert_eq!(decide(&xb30), Ok(()));
+}
+
+#[test]
+fn the_channel_order_still_has_to_match() {
+    let swapped = Facts {
+        buffer_format: Some(XBGR2101010),
+        ..good()
+    };
+    assert_eq!(
+        decide(&swapped),
+        Err(Decline::FormatMismatch {
+            buffer: XBGR2101010,
+            swapchain: ARGB2101010,
+        })
+    );
+    let swapped = Facts {
+        buffer_format: Some(XRGB2101010),
+        swapchain_format: ABGR2101010,
+        ..good()
+    };
+    assert_eq!(
+        decide(&swapped),
+        Err(Decline::FormatMismatch {
+            buffer: XRGB2101010,
+            swapchain: ABGR2101010,
+        })
+    );
 }
 
 #[test]

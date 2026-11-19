@@ -409,6 +409,8 @@ fn surface_buffer_modifier(surface: &WlSurface) -> Option<u64> {
 const _: () = {
     assert!(Fourcc::Argb2101010 as u32 == hdr_scanout::ARGB2101010);
     assert!(Fourcc::Abgr2101010 as u32 == hdr_scanout::ABGR2101010);
+    assert!(Fourcc::Xrgb2101010 as u32 == hdr_scanout::XRGB2101010);
+    assert!(Fourcc::Xbgr2101010 as u32 == hdr_scanout::XBGR2101010);
 };
 
 /// How a monitor in HDR mode is drawn.
@@ -2879,7 +2881,18 @@ impl JffState {
             // Only a buffer in the swapchain's format, and no plane for the cursor: its pixels
             // would not be taken as PQ.
             FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT
+        } else if hdr_space.is_none() {
+            // A composited frame on an SDR monitor. The cursor still goes to its own plane, so
+            // moving the pointer neither redraws the desktop nor puts the cursor in the frame.
+            // The cursor elements are plain surface or memory elements drawn outside the
+            // colour-conversion scope, so the plane shows what the renderer would have, and
+            // the CRTC gamma (night light) applies to every plane. Screencopy and screenshots
+            // build their own frame and are not affected. If the plane cannot take the
+            // element, the compositor draws it into the frame as before.
+            FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
         } else {
+            // An HDR monitor: the frame is composited into its own texture and encoded by the
+            // final pass, which a cursor on a plane would skip.
             FrameFlags::empty()
         };
 

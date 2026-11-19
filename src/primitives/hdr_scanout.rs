@@ -10,6 +10,25 @@ pub const ARGB2101010: u32 = 0x3033_5241;
 /// DRM fourcc of the 10-bit format with alpha, blue in the high bits (`AB30`).
 pub const ABGR2101010: u32 = 0x3033_4241;
 
+/// DRM fourcc of `ARGB2101010` with the alpha bits unused (`XR30`).
+pub const XRGB2101010: u32 = 0x3033_5258;
+
+/// DRM fourcc of `ABGR2101010` with the alpha bits unused (`XB30`).
+pub const XBGR2101010: u32 = 0x3033_4258;
+
+/// The fourcc with its unused alpha bits counted as alpha, so `XR30` and `AR30` compare equal.
+///
+/// Only the 10-bit formats are folded. A window that reaches `decide` with `covering` set is
+/// opaque, so the alpha bits decide nothing, and the compositor exports an opaque buffer under
+/// the format without alpha anyway. The channel order is kept: `AR30` and `AB30` stay apart.
+fn with_alpha(code: u32) -> u32 {
+    match code {
+        XRGB2101010 => ARGB2101010,
+        XBGR2101010 => ABGR2101010,
+        other => other,
+    }
+}
+
 /// What is drawn above the window, which a buffer on the primary plane cannot have.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Over {
@@ -50,7 +69,8 @@ pub struct Facts {
     pub effects: bool,
     /// What the window's surface said its colors are, `None` when it said nothing.
     pub tag: Option<ImageDescription>,
-    /// The DRM fourcc of the surface's buffer, `None` when it is not a dmabuf.
+    /// The DRM fourcc of the surface's buffer, `None` when it is not a dmabuf. `XR30` for an
+    /// `AR30` swapchain (and `XB30` for `AB30`) is the same layout and passes.
     pub buffer_format: Option<u32>,
     /// The DRM fourcc of the output's swapchain.
     pub swapchain_format: u32,
@@ -150,7 +170,7 @@ pub fn decide(facts: &Facts) -> Result<(), Decline> {
     if !matches!(facts.swapchain_format, ARGB2101010 | ABGR2101010) {
         return Err(Decline::SwapchainNotTenBit(facts.swapchain_format));
     }
-    if buffer != facts.swapchain_format {
+    if with_alpha(buffer) != with_alpha(facts.swapchain_format) {
         return Err(Decline::FormatMismatch {
             buffer,
             swapchain: facts.swapchain_format,
