@@ -33,7 +33,8 @@ render_elements! {
     Rounded = RoundedSurfaceElement,
     /// An overview thumbnail with rounded corners.
     RoundedThumb = RoundedThumbElement,
-    /// The rounded outline around the selected overview thumbnail.
+    /// The rounded outline around the selected overview thumbnail, and the ripples at a monitor's
+    /// corner when the overview opens.
     Ring = PixelShaderElement,
     /// A window's border: a ring that keeps its id while it changes colour or turns.
     Border = BorderElement,

@@ -87,7 +87,9 @@ use crate::app::{Backend, BACKGROUND};
 use crate::config::{Config, ModeRequest, OutputTransform, Vrr};
 use crate::desk::Desk;
 use crate::feature::outputs::{output_rect, wanted_scale, Monitor, MonitorMode};
-use crate::feature::overview_mode::{overview_drag_elements, overview_elements};
+use crate::feature::overview_mode::{
+    overview_drag_elements, overview_elements, overview_ripple_elements,
+};
 use crate::feature::screenshot::screenshot_elements;
 use crate::primitives::color::ImageDescription;
 use crate::primitives::edid::{self, Edid, Identity};
@@ -2708,6 +2710,9 @@ impl JffState {
             // blur needs the frame composited.
             let blur = (!direct_scanout && hdr_scanout_try.is_none() && !self.config.blur().off)
                 .then(|| self.config.blur());
+            if let Some(plan) = overview_here {
+                elements.extend(overview_ripple_elements(&mut *renderer, plan));
+            }
             let above = layers_above(&fullscreen, rect, overview_here.is_some());
             elements.extend(layer_elements(
                 &mut *renderer,

@@ -12,7 +12,7 @@ use smithay::utils::{Logical, Physical, Point, Scale, Transform};
 use smithay::wayland::compositor::SurfaceData;
 
 use crate::feature::outputs::output_rect;
-use crate::feature::overview_mode::overview_elements;
+use crate::feature::overview_mode::{overview_elements, overview_ripple_elements};
 use crate::primitives::layout;
 use crate::protocol::layer_shell::{
     layer_body_elements, layer_elements, layer_popup_elements, layers_above, ABOVE_WINDOWS,
@@ -374,6 +374,9 @@ impl JffState {
                     ui,
                 ));
             } else {
+                if let Some(plan) = &overview {
+                    elements.extend(overview_ripple_elements(&mut *renderer, plan));
+                }
                 if let Some(output) = &layer_output {
                     elements.extend(layer_elements(
                         &mut *renderer,

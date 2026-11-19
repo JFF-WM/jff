@@ -12,6 +12,8 @@
 //! * `rounded`: rounded window corners (`radius` setting) - a texture shader masking the
 //!   window's surface. Also opt-in: nothing runs with `radius 0`.
 //!
+//! * `ripple`: the ripples at the top-left corner of a monitor when the overview opens, like
+//!   GNOME Shell's hot corner.
 //! * `yuv`: which surfaces need their YUV colors fixed (`color-representation { yuv }`), applied
 //!   by the same shader as `rounded`.
 //! * `pixel_alpha`: which surfaces declared straight or optical alpha, converted by the same
@@ -47,6 +49,7 @@ pub mod framebuffer_effect;
 pub mod gamut;
 pub mod hdr;
 pub mod pixel_alpha;
+pub mod ripple;
 pub mod rounded;
 pub mod surface_alpha;
 pub mod yuv;

@@ -16,6 +16,9 @@
 //! The Tab, arrow and Enter keys work on thumbnails only while nothing is typed. Not in the
 //! window switcher: letting go of Alt there picks a window.
 //!
+//! Opening, by keybind or hot corner, also plays ripples at the top-left corner of the monitor
+//! (see `render/effects/ripple.rs`). Not in the switcher.
+//!
 //! Closing runs the opening animation backwards. Input and focus release at once, only the
 //! picture lingers (`closing` is set), and the state is dropped when the animation is over.
 
@@ -75,6 +78,7 @@ use crate::render::effects::background_effect::render_for_surface_zoomed;
 use crate::render::effects::blur::BlurOptions;
 use crate::render::effects::framebuffer_effect::{FramebufferEffectElement, WallpaperSnapshot};
 use crate::render::effects::gamut;
+use crate::render::effects::ripple::ripple_element;
 use crate::render::effects::rounded::{is_fullscreen, ring_element, Rounding};
 use crate::render::elements::JffElement;
 use crate::state::JffState;
@@ -85,6 +89,8 @@ const MARGIN: i32 = 150;
 const GAP: i32 = 24;
 /// Open and close animation length.
 const ANIMATION: Duration = Duration::from_millis(180);
+/// Colour (straight alpha) of the ripples at the top-left corner when the overview opens.
+const RIPPLE_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.9];
 /// How far the pointer moves with the left button held before it's a drag, not a click.
 const DRAG_THRESHOLD: f64 = 8.0;
 
@@ -446,6 +452,9 @@ pub struct OverviewPlan {
     pub blur_windows: config::BlurWindows,
     /// The search box and the app list. Not in the switcher.
     pub search: Option<SearchPlan>,
+    /// How long ago the overview opened while the ripples at the monitor's top-left corner are
+    /// still going. `None` in the switcher, while closing, and once they are over.
+    ripple: Option<Duration>,
     /// The app icon badge of each of `thumbs` (same order), `None` for an app that has no app id.
     badges: Vec<Option<MemoryRenderBuffer>>,
     /// Fades the badges with the open and close animation.
@@ -659,6 +668,19 @@ pub(crate) fn thumb_elements(
             },
         );
     }
+}
+
+/// The ripples at the monitor's top-left corner, while they play. They go in front of the layer
+/// surfaces, so the renderers add them before those, right behind the cursor.
+pub fn overview_ripple_elements(
+    renderer: &mut GlesRenderer,
+    plan: &OverviewPlan,
+) -> Vec<JffElement> {
+    plan.ripple
+        .and_then(|elapsed| ripple_element(renderer, elapsed, RIPPLE_COLOR))
+        .map(JffElement::Ring)
+        .into_iter()
+        .collect()
 }
 
 /// Thumbnails and highlight, front to back. `origin` is the monitor's top-left in the shared
@@ -2572,6 +2594,8 @@ impl JffState {
             .collect();
         let output = ov.output.clone();
         let highlight = ov.highlight.clone();
+        let ripple =
+            Some(ov.opened.elapsed()).filter(|_| ov.switcher.is_none() && ov.closing.is_none());
         let radius = self.config.radius();
         let wall = (!wall_cells.is_empty()).then(|| WallPlan {
             ids: ov.wall_ids.clone(),
@@ -2593,6 +2617,7 @@ impl JffState {
             radius,
             blur_windows: self.config.blur_windows().clone(),
             search: self.search_plan(),
+            ripple,
             badges,
             badge_alpha: t as f32,
             badge_carry,
