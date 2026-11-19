@@ -7,7 +7,7 @@
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
 //! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
-//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `open-position X Y` (from the top left of the monitor, kept inside it, floating), `open-centered` (the middle of the monitor, floating, not together with `open-position`), `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), `content-type "game"|"none"` (what the window shows, whatever its client says through wp_content_type_v1: with `game`, a fullscreen window covering a monitor with `content-type-hint` makes jff tell the monitor a game is on screen, which X11 and Proton windows cannot say for themselves, `none` ignores what the client says, set when the window opens like `opacity`, a rule with only a `content-type` does not use up the one rule a window gets either), the first rule that fits a window applies), and
+//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `open-position X Y` (from the top left of the monitor, kept inside it, floating), `open-centered` (the middle of the monitor, floating, not together with `open-position`), `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), `content-type "game"|"video"|"photo"|"none"` (what the window shows, whatever its client says through wp_content_type_v1: with `game`, `video` or `photo`, a fullscreen window covering a monitor with `content-type-hint` makes jff tell the monitor a game, a video or a photo is on screen, which X11 and Proton windows cannot say for themselves, `none` ignores what the client says, set when the window opens like `opacity`, a rule with only a `content-type` does not use up the one rule a window gets either), the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -508,7 +508,8 @@ pub struct OutputConfig {
     pub icc_profile: Option<std::path::PathBuf>,
     /// Variable refresh rate.
     pub vrr: Vrr,
-    /// Set the connector's `content type` to Game while a fullscreen window says it is a game.
+    /// Set the connector's `content type` to Photo, Cinema or Game while a fullscreen window says
+    /// it shows a photo, video or game.
     pub content_type_hint: bool,
     /// `color-management "off"`: surfaces on this monitor are not converted to its colors.
     pub color_management_off: bool,
@@ -1194,12 +1195,16 @@ pub struct WindowFacts<'a> {
 }
 
 /// `content-type` of a `window-rule`: what the window shows, instead of what its client says
-/// through wp_content_type_v1. Only the two cases jff acts on (the connector's `content type`).
+/// through wp_content_type_v1. The cases jff acts on (the connector's `content type`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuleContentType {
     /// `"game"`: the window is a game.
     Game,
-    /// `"none"`: it is not, whatever the client says.
+    /// `"video"`: the window plays video (the connector's Cinema).
+    Video,
+    /// `"photo"`: the window shows photos.
+    Photo,
+    /// `"none"`: it shows none of these, whatever the client says.
     NoType,
 }
 
@@ -2944,8 +2949,10 @@ fn parse_window_rule(node: &KdlNode) -> anyhow::Result<WindowRule> {
             "content-type" => {
                 rule.content_type = Some(match string_arg(child)?.as_str() {
                     "game" => RuleContentType::Game,
+                    "video" => RuleContentType::Video,
+                    "photo" => RuleContentType::Photo,
                     "none" => RuleContentType::NoType,
-                    _ => bail!("content-type takes \"game\" or \"none\""),
+                    _ => bail!("content-type takes \"game\", \"video\", \"photo\" or \"none\""),
                 });
             }
             other => bail!("unknown window-rule setting {other:?}"),

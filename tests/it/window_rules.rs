@@ -75,9 +75,13 @@ fn centered_may_come_with_a_size_a_monitor_and_an_opacity() {
 // ---- content-type ---------------------------------------------------------------------------
 
 #[test]
-fn content_type_is_game_or_none() {
+fn content_type_is_game_video_photo_or_none() {
     let game = first_rule("window-rule { match app-id=\"a\"; content-type \"game\"; }");
     assert_eq!(game.content_type, Some(RuleContentType::Game));
+    let video = first_rule("window-rule { match app-id=\"a\"; content-type \"video\"; }");
+    assert_eq!(video.content_type, Some(RuleContentType::Video));
+    let photo = first_rule("window-rule { match app-id=\"a\"; content-type \"photo\"; }");
+    assert_eq!(photo.content_type, Some(RuleContentType::Photo));
     let none = first_rule("window-rule { match app-id=\"a\"; content-type \"none\"; }");
     assert_eq!(none.content_type, Some(RuleContentType::NoType));
     let unset = first_rule("window-rule { match app-id=\"a\"; opacity 0.9; }");
@@ -88,8 +92,9 @@ fn content_type_is_game_or_none() {
 fn a_bad_content_type_is_refused() {
     for body in [
         "content-type",
-        "content-type \"video\"",
+        "content-type \"Video\"",
         "content-type \"Game\"",
+        "content-type \"cinema\"",
         "content-type 3",
         "content-type #true",
     ] {

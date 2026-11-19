@@ -576,7 +576,8 @@ pub struct WindowFacts {
     pub app_id: String,
     pub fullscreen: bool,
     pub wants_tearing: bool,
-    pub says_game: bool,
+    /// What the window says it shows (wp_content_type_v1 or a `content-type` rule).
+    pub content: Option<crate::protocol::content_type::Content>,
     pub window_size: (i32, i32),
 }
 
@@ -590,7 +591,7 @@ pub fn window_facts(window: &Window) -> Option<(WlSurface, WindowFacts)> {
         fullscreen: toplevel
             .with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen)),
         wants_tearing: crate::protocol::tearing_control::wants_tearing(&surface),
-        says_game: crate::protocol::content_type::says_game(&surface),
+        content: crate::protocol::content_type::content(&surface),
         window_size: (size.w, size.h),
     };
     Some((surface, facts))

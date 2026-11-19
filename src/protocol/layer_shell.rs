@@ -96,24 +96,22 @@ pub fn fullscreen_surface(desk: &Desk<Window>, rect: Rect) -> Option<WlSurface> 
         .map(|toplevel| toplevel.wl_surface().clone())
 }
 
-/// Whether the fullscreen window covering the monitor at `rect` (see `fullscreen_covers`) says
-/// its content is a game (wp_content_type_v1, or a `content-type` window rule). False without a
-/// covering window, and for windows that never set a content type, like X11 ones, unless a
-/// rule says it for them.
-pub fn fullscreen_says_game(desk: &Desk<Window>, rect: Rect) -> bool {
+/// What the fullscreen window covering the monitor at `rect` (see `fullscreen_covers`) says its
+/// content is (wp_content_type_v1, or a `content-type` window rule). `None` without a covering
+/// window, and for windows that never set a content type, like X11 ones, unless a rule says it
+/// for them.
+pub fn fullscreen_content(
+    desk: &Desk<Window>,
+    rect: Rect,
+) -> Option<crate::protocol::content_type::Content> {
     if !fullscreen_covers(desk, rect) {
-        return false;
+        return None;
     }
-    let Some(entry) = desk.top_down().find(|entry| {
+    let entry = desk.top_down().find(|entry| {
         let size = entry.window.geometry().size;
         layout::intersects((entry.pos.0, entry.pos.1, size.w, size.h), rect)
-    }) else {
-        return false;
-    };
-    entry
-        .window
-        .toplevel()
-        .is_some_and(|toplevel| crate::protocol::content_type::says_game(toplevel.wl_surface()))
+    })?;
+    crate::protocol::content_type::content(entry.window.toplevel()?.wl_surface())
 }
 
 /// Whether the fullscreen window covering the monitor at `rect` (see `fullscreen_covers`) asked

@@ -131,7 +131,7 @@ fn snapshot() -> Snapshot {
         tearing: None,
         fullscreen: true,
         wants_tearing: false,
-        says_game: false,
+        says_content: None,
         client_sync: ClientSync::default(),
         buffer: BufferKind::Dmabuf(0x3432_5258, 0),
         buffer_size: Some((2560, 1440)),
@@ -143,7 +143,7 @@ fn snapshot() -> Snapshot {
         scanout_without_overlay: None,
         vrr: Vrr::On,
         hdr_output: false,
-        content_game: false,
+        content_told: None,
         async_flip: false,
     }
 }

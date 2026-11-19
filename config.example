@@ -332,7 +332,7 @@ cursor {
 //         scale 1.5                          // draw the desktop 1.5 times larger, 0.25 to 10, 1 by default (fractional scale, clients that know wp_fractional_scale draw sharp)
 //         transform "90"                     // turn the picture onto the panel: "normal" (default), "90", "180", "270", "flipped", "flipped-90", "flipped-180" or "flipped-270". Named as wl_output names them, 90 is a quarter turn counter-clockwise
 //         adaptive-sync "fullscreen"         // "off", "fullscreen" (default) or "always" (quoted)
-//         content-type-hint                  // tell the monitor what is on screen (game, video...)
+//         content-type-hint                  // tell the monitor what is on screen: a fullscreen window that says photo, video or game switches its picture mode
 //         icc-profile "~/.local/share/icc/panel.icc" // the monitor's colors, see color-management
 //         color-management #false            // this monitor is not color managed ("off" works too)
 //     }
@@ -411,12 +411,13 @@ cursor {
 //   tag "NAME"             give the window a tag of yours, which `match tag` and every rule sees
 //                          from then on, whatever its title changes to. A rule with only a `tag`
 //                          does not use up the one rule a window gets
-//   content-type "game"    what the window shows, whatever its client says. A game that runs
-//                          through X11 (Proton) cannot say it is one itself: with `game`, an
-//                          output with `content-type-hint` tells its monitor so while the window
-//                          covers it fullscreen. "none" ignores what the client says. Set when
-//                          the window opens. A rule with only a `content-type` does not use up
-//                          the one rule a window gets
+//   content-type "game"    what the window shows, whatever its client says: "game", "video" or
+//                          "photo". A game that runs through X11 (Proton) cannot say it is one
+//                          itself: with `game`, an output with `content-type-hint` tells its
+//                          monitor so while the window covers it fullscreen (`video` and `photo`
+//                          do the same for the monitor's cinema and photo modes). "none" ignores
+//                          what the client says. Set when the window opens. A rule with only a
+//                          `content-type` does not use up the one rule a window gets
 //
 // Change DP-1 and HDMI-A-2 below to your monitor names.
 // ---------------------------------------------------------------------------------------------
@@ -428,7 +429,8 @@ cursor {
 // }
 
 // A game that cannot say it is one (X11 / Proton): the monitor is told while it is fullscreen.
-// Needs `content-type-hint` on the output. `toggle-stats` shows whether jff took it for a game.
+// Needs `content-type-hint` on the output. `toggle-stats` shows what jff took the window for.
+// `video` and `photo` work the same way, for a player that does not say what it shows.
 // window-rule {
 //     match app-id="steam_app_1245620"
 //     content-type "game"

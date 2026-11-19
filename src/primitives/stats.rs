@@ -728,7 +728,8 @@ pub struct Snapshot {
     // what the client asked for
     pub fullscreen: bool,
     pub wants_tearing: bool,
-    pub says_game: bool,
+    /// What the window says it shows: "photo", "video" or "game".
+    pub says_content: Option<&'static str>,
     /// fifo, commit timing and explicit sync, as far as the window's surface uses them.
     pub client_sync: ClientSync,
     pub buffer: BufferKind,
@@ -749,8 +750,8 @@ pub struct Snapshot {
     // what the hardware did
     pub vrr: Vrr,
     pub hdr_output: bool,
-    /// The monitor is told the content is a game.
-    pub content_game: bool,
+    /// What the monitor is told the content is: "photo", "video" or "game".
+    pub content_told: Option<&'static str>,
     /// The frame was flipped asynchronously (tearing).
     pub async_flip: bool,
 }
@@ -856,6 +857,15 @@ fn fps_text(fps: f64) -> String {
         format!("{fps:.0}")
     } else {
         format!("{fps:.1}")
+    }
+}
+
+/// "a game", "video" or "a photo", for the overlay's "says it shows …" row.
+fn content_phrase(content: &str) -> &str {
+    match content {
+        "game" => "a game",
+        "photo" => "a photo",
+        other => other,
     }
 }
 
@@ -1161,8 +1171,12 @@ pub fn sections(s: &Snapshot) -> Vec<Section> {
         },
         Tone::Neutral,
     ));
-    if s.says_game {
-        asked.push(row("Content", "says it is a game", Tone::Neutral));
+    if let Some(content) = s.says_content {
+        asked.push(row(
+            "Content",
+            format!("says it shows {}", content_phrase(content)),
+            Tone::Neutral,
+        ));
     }
     let buffer = match s.buffer {
         BufferKind::Dmabuf(code, _) => {
@@ -1374,8 +1388,12 @@ pub fn sections(s: &Snapshot) -> Vec<Section> {
         (_, false, true) => row("Conversion", "HDR window tone-mapped to SDR", Tone::Warn),
         (_, false, false) => row("Conversion", "none needed", Tone::Good),
     });
-    if s.content_game {
-        did.push(row("Content type", "monitor told: game", Tone::Neutral));
+    if let Some(content) = s.content_told {
+        did.push(row(
+            "Content type",
+            format!("monitor told: {content}"),
+            Tone::Neutral,
+        ));
     }
     out.push(Section {
         title: "Hardware did",
@@ -1517,9 +1535,9 @@ pub fn to_json(s: &Snapshot) -> String {
     });
     format!(
         "{{\"app_id\":{},\"output\":{},\"client\":{},\"shown\":{},\"display_hz\":{:.2},\"cost\":{},\"sync\":{},\"latency\":{},\"blame\":{},\
-         \"client_asked\":{{\"fullscreen\":{},\"tearing\":{},\"game\":{},\"buffer\":{},\"buffer_modifier\":{},\"sync_protocols\":{},\"buffer_size\":{},\"window_size\":{},\"colors\":{}}},\
+         \"client_asked\":{{\"fullscreen\":{},\"tearing\":{},\"game\":{},\"content\":{},\"buffer\":{},\"buffer_modifier\":{},\"sync_protocols\":{},\"buffer_size\":{},\"window_size\":{},\"colors\":{}}},\
          \"compositor\":{{\"path\":\"{}\",\"reason\":{},\"scanout_without_overlay\":{},\"allow_tearing\":{},\"adaptive_sync_policy\":{}}},\
-         \"hardware\":{{\"vrr\":\"{}\",\"hdr\":{},\"async_flip\":{},\"tearing_observed\":{},\"content_type_game\":{}}}}}",
+         \"hardware\":{{\"vrr\":\"{}\",\"hdr\":{},\"async_flip\":{},\"tearing_observed\":{},\"content_type_game\":{},\"content_type\":{}}}}}",
         json_str(&s.app_id),
         json_str(&s.output),
         json_timing(&s.client),
@@ -1536,7 +1554,8 @@ pub fn to_json(s: &Snapshot) -> String {
         },
         s.fullscreen,
         s.wants_tearing,
-        s.says_game,
+        s.says_content == Some("game"),
+        s.says_content.map_or("null".to_owned(), json_str),
         buffer,
         buffer_modifier,
         sync_protocols,
@@ -1553,6 +1572,7 @@ pub fn to_json(s: &Snapshot) -> String {
         s.hdr_output,
         s.async_flip,
         json_tearing(&s.tearing),
-        s.content_game,
+        s.content_told == Some("game"),
+        s.content_told.map_or("null".to_owned(), json_str),
     )
 }

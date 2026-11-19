@@ -100,6 +100,7 @@ use crate::primitives::hdr_scanout::{self, Decline, Facts, Over, Tried};
 use crate::primitives::layout;
 use crate::primitives::stats as nerd;
 use crate::protocol::color_management::WorkingSpace;
+use crate::protocol::content_type::Content;
 use crate::protocol::layer_shell::{
     fullscreen_covers, fullscreen_surface, layer_body_elements, layer_elements,
     layer_popup_elements, layers_above, layers_shown, BELOW_WINDOWS,
@@ -368,7 +369,7 @@ fn stats_snapshot(
         tearing: None,
         fullscreen: win.fullscreen,
         wants_tearing: win.wants_tearing,
-        says_game: win.says_game,
+        says_content: win.content.map(Content::name),
         client_sync: crate::protocol::presentation::surface_sync_use(surface),
         buffer,
         buffer_size,
@@ -388,7 +389,7 @@ fn stats_snapshot(
             _ => nerd::Vrr::Off,
         },
         hdr_output: lit.hdr.is_some(),
-        content_game: lit.content_game,
+        content_told: lit.content_told.map(Content::name),
         async_flip,
     }
 }
@@ -449,8 +450,8 @@ struct TtyOutput {
     vrr_on: bool,
     /// From the config (`content-type-hint`), refreshed on reload.
     content_hint: bool,
-    /// The connector's `content type` is Game right now.
-    content_game: bool,
+    /// What the connector's `content type` says right now (`None` is no data).
+    content_told: Option<Content>,
     /// Curves from the ICC profile named in the config, if any.
     gamma: Option<crate::feature::icc::GammaTable>,
     /// Curves a client set with wlr-gamma-control, they win over `gamma`.
@@ -829,6 +830,8 @@ fn set_gamma(
 
 /// Fixed values of the connector's `content type` enum (`DRM_MODE_CONTENT_TYPE_*`).
 const CONTENT_TYPE_NO_DATA: u64 = 0;
+const CONTENT_TYPE_PHOTO: u64 = 2;
+const CONTENT_TYPE_CINEMA: u64 = 3;
 const CONTENT_TYPE_GAME: u64 = 4;
 
 fn lease_description(name: &str) -> String {
@@ -946,11 +949,12 @@ fn hdr_target(
     hdr::plan(edid, &kernel, peak_override).map(|plan| plan.with_min_luminance(min_override))
 }
 
-/// Set the connector's `content type` property to Game, or back to no data.
+/// Set the connector's `content type` property to Photo, Cinema (video) or Game, or back to no
+/// data.
 fn set_connector_content_type(
     drm: &DrmDevice,
     connector: connector::Handle,
-    game: bool,
+    content: Option<Content>,
 ) -> anyhow::Result<()> {
     let props = drm
         .get_properties(connector)
@@ -964,10 +968,11 @@ fn set_connector_content_type(
                 .is_ok_and(|info| info.name().to_bytes() == b"content type")
         })
         .context("this connector has no content type property")?;
-    let value = if game {
-        CONTENT_TYPE_GAME
-    } else {
-        CONTENT_TYPE_NO_DATA
+    let value = match content {
+        Some(Content::Photo) => CONTENT_TYPE_PHOTO,
+        Some(Content::Video) => CONTENT_TYPE_CINEMA,
+        Some(Content::Game) => CONTENT_TYPE_GAME,
+        None => CONTENT_TYPE_NO_DATA,
     };
     drm.set_property(connector, property, value)
         .context("error setting the content type")
@@ -1586,7 +1591,7 @@ impl Tty {
             hdr_scanout: HdrScanout::default(),
             hdr_formats: hdr_wanted,
             content_hint: false,
-            content_game: false,
+            content_told: None,
             compositor,
             output,
             connector: info.handle(),
@@ -2349,13 +2354,13 @@ impl JffState {
 
         // VRR follows the config, for `fullscreen`, whether a fullscreen window is on top. A
         // switch that needs a modeset blanks the screen, so only `always` does one.
-        // wp_content_type_v1: does the fullscreen window on top say it's a game? Only checked
+        // wp_content_type_v1: what does the fullscreen window on top say it shows? Only checked
         // when the config uses it.
-        let says_game = (lit.content_hint || lit.content_game)
-            && crate::protocol::layer_shell::fullscreen_says_game(
-                &self.desk,
-                output_rect(&lit.output),
-            );
+        let says_content = if lit.content_hint || lit.content_told.is_some() {
+            crate::protocol::layer_shell::fullscreen_content(&self.desk, output_rect(&lit.output))
+        } else {
+            None
+        };
         let want_vrr = match lit.vrr_mode {
             Vrr::Off => false,
             Vrr::Always => !matches!(lit.vrr_support, VrrSupport::NotSupported),
@@ -2403,16 +2408,16 @@ impl JffState {
             }
         }
 
-        // connector `content type` is Game while a fullscreen game is on top. A failure is
-        // logged once, not retried every frame.
-        let want_game = lit.content_hint && says_game;
-        if want_game != lit.content_game {
-            lit.content_game = want_game;
-            match set_connector_content_type(drm, lit.connector, want_game) {
+        // connector `content type` follows what the fullscreen window on top shows: Photo,
+        // Cinema or Game. A failure is logged once, not retried every frame.
+        let want_content = if lit.content_hint { says_content } else { None };
+        if want_content != lit.content_told {
+            lit.content_told = want_content;
+            match set_connector_content_type(drm, lit.connector, want_content) {
                 Ok(()) => tracing::info!(
                     "monitor {}: content type {}",
                     lit.output.name(),
-                    if want_game { "game" } else { "no data" }
+                    want_content.map_or("no data", Content::name)
                 ),
                 Err(err) => tracing::warn!(
                     "monitor {}: cannot set the content type: {err:#}",

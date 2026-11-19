@@ -1896,9 +1896,16 @@ impl JffState {
         }
         if let Some(kind) = self.config.content_type_for(&facts) {
             tracing::info!("window rule content-type {kind:?} for app-id={app_id:?}");
+            use crate::config::RuleContentType as Rule;
+            use crate::protocol::content_type::Content;
             crate::protocol::content_type::set_override(
                 root,
-                Some(kind == crate::config::RuleContentType::Game),
+                Some(match kind {
+                    Rule::Game => Some(Content::Game),
+                    Rule::Video => Some(Content::Video),
+                    Rule::Photo => Some(Content::Photo),
+                    Rule::NoType => None,
+                }),
             );
         }
     }
