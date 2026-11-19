@@ -1,6 +1,7 @@
 //! Compositor state and the Wayland protocol handlers.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -142,6 +143,11 @@ pub struct JffState {
     /// What the nested (winit) HDR simulation keeps between frames, see `app/winit.rs`.
     pub winit_hdr: crate::app::winit::WinitHdr,
     pub outputs: Vec<Output>,
+    /// What `refresh_window_outputs` last told the windows and panels, as a hash of everything
+    /// it depends on (see `window_outputs_signature`), and whether a surface committed since.
+    /// It skips the whole pass while neither changed.
+    pub window_outputs_sig: AtomicU64,
+    pub window_outputs_dirty: AtomicBool,
     /// The `wl_output` global of every active output, by output name.
     pub output_globals: HashMap<String, GlobalId>,
     /// Globals of unplugged outputs and who still has to acknowledge their removal: destroyed
@@ -629,6 +635,9 @@ impl JffState {
             damage_tracker,
             winit_hdr: Default::default(),
             outputs,
+            window_outputs_sig: AtomicU64::new(0),
+            // The first pass always runs.
+            window_outputs_dirty: AtomicBool::new(true),
             output_globals,
             retiring_globals: Vec::new(),
             compositor_state,
@@ -889,6 +898,10 @@ impl CompositorHandler for JffState {
         // Imports the attached buffer so the renderer can draw it. Also reached when a barrier
         // or a blocker clears and a held commit applies, outside any client request.
         on_commit_buffer_handler::<Self>(surface);
+        // A commit can map a subsurface or popup, or a panel: it has to hear which monitor it
+        // is on, which the signature of `refresh_window_outputs` cannot see.
+        self.window_outputs_dirty
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.queue_redraw_all();
 
         // Popups need their own commit bookkeeping before they can be drawn.

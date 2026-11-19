@@ -1,8 +1,10 @@
 //! Monitors in the shared desktop space: where each one sits, and what that means for windows
 //! and the pointer. Backend-agnostic, the TTY backend calls in when monitors come and go.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use smithay::backend::input::{AbsolutePositionEvent, InputBackend, InputTime};
@@ -11,7 +13,7 @@ use smithay::desktop::space::SpaceElement;
 use smithay::input::pointer::MotionEvent;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::backend::ClientId;
-use smithay::reexports::wayland_server::Client;
+use smithay::reexports::wayland_server::{Client, Resource};
 use smithay::utils::{Logical, Point, Rectangle, Size, Transform, SERIAL_COUNTER};
 use smithay::wayland::fractional_scale::with_fractional_scale;
 
@@ -501,11 +503,51 @@ impl JffState {
         pointer.frame(self);
     }
 
+    /// A hash of what [`Self::refresh_window_outputs`] decides from: every monitor's name, place
+    /// and scale, and every window's surface, position, size and whether it is visible. Costs one
+    /// pass over the windows and nothing is sent or locked, unlike the pass it guards.
+    fn window_outputs_signature(&self, outputs: &[(&Output, Rect)]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        outputs.len().hash(&mut hasher);
+        for (output, rect) in outputs {
+            output.name().hash(&mut hasher);
+            rect.hash(&mut hasher);
+            output
+                .current_scale()
+                .fractional_scale()
+                .to_bits()
+                .hash(&mut hasher);
+        }
+        for entry in self.desk.all_top_down() {
+            // A window with no toplevel (X11) is told apart by its place alone.
+            entry
+                .window
+                .toplevel()
+                .map(|toplevel| toplevel.wl_surface().id())
+                .hash(&mut hasher);
+            let size = entry.window.geometry().size;
+            entry.pos.hash(&mut hasher);
+            (size.w, size.h).hash(&mut hasher);
+            self.desk.is_visible(entry).hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     /// Tell every window which monitors it's on (clients use it for scale, and to pause
     /// animations on windows nobody can see). A window on a hidden workspace is on no monitor.
+    ///
+    /// Runs every frame of every monitor, so it does nothing unless something it reads has
+    /// changed: a surface committed (a new subsurface, popup or panel), or the signature of the
+    /// monitors and the windows' places differs from the last pass.
     pub fn refresh_window_outputs(&self) {
         let outputs: Vec<(&Output, Rect)> =
             self.outputs.iter().map(|o| (o, output_rect(o))).collect();
+        let dirty = self.window_outputs_dirty.swap(false, Ordering::Relaxed);
+        let signature = self.window_outputs_signature(&outputs);
+        if !dirty && self.window_outputs_sig.load(Ordering::Relaxed) == signature {
+            return;
+        }
+        self.window_outputs_sig.store(signature, Ordering::Relaxed);
         let overlap = Rectangle::<i32, Logical>::from_size(Size::from((i32::MAX, i32::MAX)));
         for entry in self.desk.all_top_down() {
             let size = entry.window.geometry().size;
