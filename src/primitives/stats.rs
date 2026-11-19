@@ -22,6 +22,10 @@
 //! carried it to the flip that showed it, and how far that flip was from the vblank predicted
 //! for it (the drift). The flip time is the one jff reports to the client in `wp_presentation`'s
 //! `presented`, so the delay here is the one a video player or a game is told about.
+//!
+//! Tearing is observed, not only requested ([`flip_off_grid`], [`Tearings`]): a flip that waits
+//! for the vblank lands a whole number of refreshes after the one before it, a tearing flip
+//! lands wherever the game committed.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -271,6 +275,101 @@ pub fn countable_prediction(
 ) -> Option<Duration> {
     let last = last_vblank?;
     (predicted.saturating_sub(last) <= refresh * 2).then_some(predicted)
+}
+
+/// How many refreshes apart two flips may be for the grid to hold between them. Further apart
+/// the monitor idled, and the refresh rate is never exactly the one the mode says.
+const GRID_SPAN: f64 = 8.0;
+
+/// Whether a flip at `now` came off the vblank grid, counted from the flip before it at
+/// `previous` (the kernel's stamps of both, CLOCK_MONOTONIC). A flip that waits for the vblank
+/// lands a whole number of refreshes after the one before it, a tearing flip lands wherever
+/// the game committed. `None` when it can not be told: the flips are too far apart, the clock
+/// went back, or the refresh is unknown. Not for VRR, whose flips are off the grid by design.
+///
+/// This tells tearing, it does not count it: a tearing flip that lands within an eighth of a
+/// refresh of the grid looks like a vsync one, which is about one in four. The share found is
+/// a lower bound, and a vsync flip is not taken for a tearing one unless the stamps are off by
+/// more than that.
+pub fn flip_off_grid(previous: Duration, now: Duration, refresh: Duration) -> Option<bool> {
+    if refresh.is_zero() {
+        return None;
+    }
+    let gap = now.checked_sub(previous)?.as_secs_f64();
+    let refresh = refresh.as_secs_f64();
+    let periods = (gap / refresh).round();
+    if periods > GRID_SPAN {
+        return None;
+    }
+    // less than half a refresh after the last flip: a display can not do that in sync
+    if periods < 1.0 {
+        return Some(true);
+    }
+    Some((gap - periods * refresh).abs() > refresh / 8.0)
+}
+
+/// Whether recent flips were off the vblank grid, newest last. Times are on one clock
+/// (CLOCK_MONOTONIC).
+#[derive(Clone, Debug, Default)]
+pub struct Tearings {
+    /// (when it flipped, whether it was off the grid)
+    flips: VecDeque<(Duration, bool)>,
+}
+
+impl Tearings {
+    /// A flip at `at`, `off_grid` or not.
+    pub fn push(&mut self, at: Duration, off_grid: bool) {
+        if self.flips.back().is_some_and(|(last, _)| at < *last) {
+            // the clock went back (a new session): start over
+            self.flips.clear();
+        }
+        self.flips.push_back((at, off_grid));
+        while self.flips.len() > KEEP {
+            self.flips.pop_front();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.flips.clear();
+    }
+
+    /// The flips of the last [`TIMING_SPAN`] before `now`, `None` when there were none.
+    pub fn summary(&self, now: Duration) -> Option<TearingSummary> {
+        let from = now.saturating_sub(TIMING_SPAN);
+        let (flips, off_grid) = self
+            .flips
+            .iter()
+            .filter(|(at, _)| *at > from)
+            .fold((0usize, 0usize), |(n, off), (_, is_off)| {
+                (n + 1, off + usize::from(*is_off))
+            });
+        (flips > 0).then_some(TearingSummary { flips, off_grid })
+    }
+}
+
+/// What [`Tearings::summary`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TearingSummary {
+    /// Flips the figures are over.
+    pub flips: usize,
+    /// Of those, the ones that came off the vblank grid.
+    pub off_grid: usize,
+}
+
+impl TearingSummary {
+    /// Flips it takes before the figures say anything.
+    pub const MIN_FLIPS: usize = 8;
+
+    /// Enough flips to judge by.
+    pub fn told(&self) -> bool {
+        self.flips >= Self::MIN_FLIPS
+    }
+
+    /// The display tears: one flip in twenty off the grid is far more than the stamps' noise
+    /// (none in a vsync run), and well under what real tearing gives (about three in four).
+    pub fn seen(&self) -> bool {
+        self.told() && self.off_grid * 20 >= self.flips
+    }
 }
 
 /// What [`Syncs::summary`] found.
@@ -622,6 +721,9 @@ pub struct Snapshot {
     pub sync: Option<SyncSummary>,
     /// Commit to screen and the drift from the predicted vblank over [`TIMING_SPAN`].
     pub latency: Option<LatencySummary>,
+    /// How many of the last flips came off the vblank grid. `None` before there are two
+    /// stamped flips to tell by, and with VRR.
+    pub tearing: Option<TearingSummary>,
 
     // what the client asked for
     pub fullscreen: bool,
@@ -1165,7 +1267,26 @@ pub fn sections(s: &Snapshot) -> Vec<Section> {
     ));
     if s.wants_tearing {
         let result = if s.async_flip {
-            row("Tearing result", "async flip requested", Tone::Good)
+            match s.tearing.filter(TearingSummary::told) {
+                Some(t) if t.seen() => row(
+                    "Tearing result",
+                    format!(
+                        "seen: {} of {} flips off the vblank grid",
+                        t.off_grid, t.flips
+                    ),
+                    Tone::Good,
+                ),
+                // asked for, and every flip still waited for the vblank
+                Some(t) => row(
+                    "Tearing result",
+                    format!(
+                        "requested, not seen: {} of {} flips off the vblank grid",
+                        t.off_grid, t.flips
+                    ),
+                    Tone::Warn,
+                ),
+                None => row("Tearing result", "async flip requested", Tone::Good),
+            }
         } else if !s.allow_tearing {
             row(
                 "Tearing result",
@@ -1328,6 +1449,17 @@ fn json_sync(sync: &Option<SyncSummary>) -> String {
     }
 }
 
+fn json_tearing(tearing: &Option<TearingSummary>) -> String {
+    tearing.map_or("null".to_owned(), |t| {
+        format!(
+            "{{\"flips\":{},\"off_grid\":{},\"seen\":{}}}",
+            t.flips,
+            t.off_grid,
+            t.seen()
+        )
+    })
+}
+
 fn json_latency(latency: &Option<LatencySummary>) -> String {
     let Some(l) = latency else {
         return "null".to_owned();
@@ -1387,7 +1519,7 @@ pub fn to_json(s: &Snapshot) -> String {
         "{{\"app_id\":{},\"output\":{},\"client\":{},\"shown\":{},\"display_hz\":{:.2},\"cost\":{},\"sync\":{},\"latency\":{},\"blame\":{},\
          \"client_asked\":{{\"fullscreen\":{},\"tearing\":{},\"game\":{},\"buffer\":{},\"buffer_modifier\":{},\"sync_protocols\":{},\"buffer_size\":{},\"window_size\":{},\"colors\":{}}},\
          \"compositor\":{{\"path\":\"{}\",\"reason\":{},\"scanout_without_overlay\":{},\"allow_tearing\":{},\"adaptive_sync_policy\":{}}},\
-         \"hardware\":{{\"vrr\":\"{}\",\"hdr\":{},\"async_flip\":{},\"content_type_game\":{}}}}}",
+         \"hardware\":{{\"vrr\":\"{}\",\"hdr\":{},\"async_flip\":{},\"tearing_observed\":{},\"content_type_game\":{}}}}}",
         json_str(&s.app_id),
         json_str(&s.output),
         json_timing(&s.client),
@@ -1420,6 +1552,7 @@ pub fn to_json(s: &Snapshot) -> String {
         vrr,
         s.hdr_output,
         s.async_flip,
+        json_tearing(&s.tearing),
         s.content_game,
     )
 }

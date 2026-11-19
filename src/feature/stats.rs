@@ -43,7 +43,7 @@ use crate::feature::osd::{
 use crate::primitives::layout::{self, Rect};
 use crate::primitives::stats::{
     budget_of, commit_latency, drift_ms, missed_vblank, Costs, FrameCost, Latencies, Presented,
-    Section, Snapshot, Syncs, Ticks, Tone,
+    Section, Snapshot, Syncs, Tearings, Ticks, Tone,
 };
 use crate::render::elements::JffElement;
 use crate::state::JffState;
@@ -115,6 +115,8 @@ pub struct StatsOverlay {
     syncs: Syncs,
     /// Commit to screen and drift of the flips of `output`.
     latencies: Latencies,
+    /// Which flips of `output` came off the vblank grid (a tearing flip does).
+    tearing: Tearings,
     /// The vblank the frame in flight was drawn for and the refresh interval it is counted
     /// with. `None` when it can not be told (VRR, tearing, no fresh frame clock).
     predicted: Option<(Duration, Duration)>,
@@ -151,6 +153,7 @@ impl StatsOverlay {
             costs: Costs::default(),
             syncs: Syncs::default(),
             latencies: Latencies::default(),
+            tearing: Tearings::default(),
             predicted: None,
             seen_total: 0,
             in_flight: None,
@@ -220,6 +223,7 @@ impl StatsOverlay {
         self.costs.clear();
         self.syncs.clear();
         self.latencies.clear();
+        self.tearing.clear();
         self.predicted = None;
         self.seen_total = 0;
         self.in_flight = None;
@@ -241,6 +245,7 @@ impl StatsOverlay {
             self.costs.clear();
             self.syncs.clear();
             self.latencies.clear();
+            self.tearing.clear();
             self.predicted = None;
             self.seen_total = 0;
             self.in_flight = None;
@@ -252,6 +257,7 @@ impl StatsOverlay {
             self.costs.clear();
             self.syncs.clear();
             self.latencies.clear();
+            self.tearing.clear();
             self.predicted = None;
             self.in_flight = None;
             self.in_flight_commit = None;
@@ -298,12 +304,16 @@ impl StatsOverlay {
         }
     }
 
-    /// `output` flipped at `at`.
-    pub fn note_flip(&mut self, output: &str, at: Duration) {
+    /// `output` flipped at `at`. `off_grid`: the flip came off the vblank grid, `None` when that
+    /// can not be told (see `flip_off_grid`).
+    pub fn note_flip(&mut self, output: &str, at: Duration, off_grid: Option<bool>) {
         if output != self.output {
             return;
         }
         self.flips.push(at);
+        if let Some(off_grid) = off_grid {
+            self.tearing.push(at, off_grid);
+        }
         let predicted = self.predicted.take();
         if let Some((predicted, refresh)) = predicted {
             self.syncs.push(at, missed_vblank(predicted, at, refresh));
@@ -341,6 +351,7 @@ impl StatsOverlay {
         snapshot.cost = self.costs.summary(mono, budget);
         snapshot.sync = self.syncs.summary(mono);
         snapshot.latency = self.latencies.summary(mono, budget);
+        snapshot.tearing = self.tearing.summary(mono);
         self.built = Some(now);
         self.last = Some(snapshot);
     }

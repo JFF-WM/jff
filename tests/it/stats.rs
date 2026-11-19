@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use jff_wm::primitives::color::{ImageDescription, NamedPrimaries, NamedTf, TransferFunction};
 use jff_wm::primitives::stats::{
-    blame, budget_of, ClientSync, commit_latency, countable_prediction, drift_ms, fourcc, missed_vblank,
-    modifier_name, primaries_name, sections, tf_name, to_json, Blame, BufferKind, Costs, FrameCost, Latencies,
-    Path, Presented, Row, Snapshot, SyncSummary, Syncs, Ticks, Timing, Tone, Vrr, Why,
-    SYNC_TARGET, MODIFIER_INVALID,
+    blame, budget_of, commit_latency, countable_prediction, drift_ms, flip_off_grid, fourcc,
+    missed_vblank, modifier_name, primaries_name, sections, tf_name, to_json, Blame, BufferKind,
+    ClientSync, Costs, FrameCost, Latencies, Path, Presented, Row, Snapshot, SyncSummary, Syncs,
+    TearingSummary, Tearings, Ticks, Timing, Tone, Vrr, Why, MODIFIER_INVALID, SYNC_TARGET,
 };
 
 fn ms(n: u64) -> Duration {
@@ -74,7 +74,11 @@ fn a_hitch_shows_in_worst_jitter_and_one_percent_low() {
     assert!((timing.worst_ms - 50.0).abs() < 0.01);
     assert!(timing.jitter_ms > 3.0);
     // the slowest 1% of 100 intervals is that one frame: 1000 / 50
-    assert!((timing.low1_fps - 20.0).abs() < 0.5, "low was {}", timing.low1_fps);
+    assert!(
+        (timing.low1_fps - 20.0).abs() < 0.5,
+        "low was {}",
+        timing.low1_fps
+    );
     assert!(timing.avg_ms > 10.0 && timing.avg_ms < 11.0);
 }
 
@@ -124,6 +128,7 @@ fn snapshot() -> Snapshot {
         cost: None,
         sync: None,
         latency: None,
+        tearing: None,
         fullscreen: true,
         wants_tearing: false,
         says_game: false,
@@ -156,7 +161,10 @@ fn direct_scanout_is_good_news() {
     let row = find(&snapshot(), "Direct scanout");
     assert!(row.value.starts_with("yes"));
     assert_eq!(row.tone, Tone::Good);
-    assert_eq!(find(&snapshot(), "Conversion").value, "none: passed through");
+    assert_eq!(
+        find(&snapshot(), "Conversion").value,
+        "none: passed through"
+    );
 }
 
 #[test]
@@ -193,7 +201,9 @@ fn tearing_that_was_asked_for_says_what_became_of_it() {
     s.wants_tearing = true;
     s.allow_tearing = false;
     s.path = Path::Composited(Why::StatsOverlay);
-    assert!(find(&s, "Tearing result").value.contains("allow-tearing is off"));
+    assert!(find(&s, "Tearing result")
+        .value
+        .contains("allow-tearing is off"));
 
     s.allow_tearing = true;
     assert!(find(&s, "Tearing result").value.contains("this overlay"));
@@ -503,15 +513,31 @@ fn a_flip_on_the_predicted_vblank_is_on_time() {
     let predicted = ms(1000);
     assert!(!missed_vblank(predicted, predicted, refresh_60()));
     // a little jitter in the kernel's timestamp is not a miss
-    assert!(!missed_vblank(predicted, predicted + Duration::from_micros(300), refresh_60()));
-    assert!(!missed_vblank(predicted, predicted - Duration::from_micros(300), refresh_60()));
+    assert!(!missed_vblank(
+        predicted,
+        predicted + Duration::from_micros(300),
+        refresh_60()
+    ));
+    assert!(!missed_vblank(
+        predicted,
+        predicted - Duration::from_micros(300),
+        refresh_60()
+    ));
 }
 
 #[test]
 fn a_flip_a_refresh_late_missed() {
     let predicted = ms(1000);
-    assert!(missed_vblank(predicted, predicted + refresh_60(), refresh_60()));
-    assert!(missed_vblank(predicted, predicted + refresh_60() * 3, refresh_60()));
+    assert!(missed_vblank(
+        predicted,
+        predicted + refresh_60(),
+        refresh_60()
+    ));
+    assert!(missed_vblank(
+        predicted,
+        predicted + refresh_60() * 3,
+        refresh_60()
+    ));
 }
 
 #[test]
@@ -521,9 +547,15 @@ fn only_a_fresh_frame_clock_is_counted() {
     assert_eq!(countable_prediction(None, ms(1000), refresh), None);
     // the usual case: drawn a refresh after the last vblank
     let last = ms(1000);
-    assert_eq!(countable_prediction(Some(last), last + refresh, refresh), Some(last + refresh));
+    assert_eq!(
+        countable_prediction(Some(last), last + refresh, refresh),
+        Some(last + refresh)
+    );
     // the monitor idled for a second: the grid has drifted
-    assert_eq!(countable_prediction(Some(last), last + ms(1000), refresh), None);
+    assert_eq!(
+        countable_prediction(Some(last), last + ms(1000), refresh),
+        None
+    );
 }
 
 #[test]
@@ -572,7 +604,12 @@ fn syncs_start_over_when_the_clock_goes_back() {
 
 #[test]
 fn the_target_is_one_miss_in_a_thousand() {
-    let at = |flips, missed| SyncSummary { flips, missed, recent_flips: 0, recent_missed: 0 };
+    let at = |flips, missed| SyncSummary {
+        flips,
+        missed,
+        recent_flips: 0,
+        recent_missed: 0,
+    };
     assert!(at(1000, 1).on_target());
     assert!(!at(1000, 2).on_target());
     assert!(at(0, 0).on_target());
@@ -582,7 +619,12 @@ fn the_target_is_one_miss_in_a_thousand() {
 fn with_sync(flips: u64, missed: u64, recent_missed: usize) -> Snapshot {
     let mut s = snapshot();
     s.vrr = Vrr::Off;
-    s.sync = Some(SyncSummary { flips, missed, recent_flips: 300, recent_missed });
+    s.sync = Some(SyncSummary {
+        flips,
+        missed,
+        recent_flips: 300,
+        recent_missed,
+    });
     s
 }
 
@@ -607,14 +649,20 @@ fn below_the_target_is_a_warning() {
 #[test]
 fn no_misses_is_good_news() {
     let s = with_sync(1000, 0, 0);
-    assert_eq!(find(&s, "Vblank sync").value, "100.00% on time (target 99.9%)");
+    assert_eq!(
+        find(&s, "Vblank sync").value,
+        "100.00% on time (target 99.9%)"
+    );
     assert_eq!(find(&s, "Missed vblank").tone, Tone::Good);
 }
 
 #[test]
 fn a_miss_never_rounds_up_to_a_hundred_percent() {
     let s = with_sync(1_000_000, 1, 0);
-    assert_eq!(find(&s, "Vblank sync").value, "99.99% on time (target 99.9%)");
+    assert_eq!(
+        find(&s, "Vblank sync").value,
+        "99.99% on time (target 99.9%)"
+    );
 }
 
 #[test]
@@ -641,7 +689,12 @@ fn before_the_first_flip_the_overlay_says_so() {
 fn json_carries_the_sync() {
     let mut s = snapshot();
     assert!(to_json(&s).contains("\"sync\":null"));
-    s.sync = Some(SyncSummary { flips: 5000, missed: 2, recent_flips: 300, recent_missed: 0 });
+    s.sync = Some(SyncSummary {
+        flips: 5000,
+        missed: 2,
+        recent_flips: 300,
+        recent_missed: 0,
+    });
     let json = to_json(&s);
     for key in [
         "\"sync\":{\"flips\":5000,\"missed\":2",
@@ -709,7 +762,11 @@ fn the_worst_drift_keeps_its_sign_and_the_mean_is_a_bias() {
     for (i, d) in [0.2, -0.4, 5.0, -9.0].into_iter().enumerate() {
         l.push(ms(1000 + i as u64 * 16), shown(10_000, d));
     }
-    let d = l.summary(ms(1100), None).expect("flips").drift.expect("drift");
+    let d = l
+        .summary(ms(1100), None)
+        .expect("flips")
+        .drift
+        .expect("drift");
     assert_eq!(d.flips, 4);
     assert_eq!(d.worst_ms, -9.0);
     assert!((d.avg_ms - (-1.05)).abs() < 1e-9, "avg was {}", d.avg_ms);
@@ -718,7 +775,13 @@ fn the_worst_drift_keeps_its_sign_and_the_mean_is_a_bias() {
 #[test]
 fn a_flip_without_new_content_still_counts_for_the_drift() {
     let mut l = Latencies::default();
-    l.push(ms(1000), Presented { latency: None, drift_ms: Some(0.5) });
+    l.push(
+        ms(1000),
+        Presented {
+            latency: None,
+            drift_ms: Some(0.5),
+        },
+    );
     let sum = l.summary(ms(1100), None).expect("flips");
     assert!(sum.latency.is_none());
     assert_eq!(sum.drift.expect("drift").flips, 1);
@@ -727,7 +790,13 @@ fn a_flip_without_new_content_still_counts_for_the_drift() {
 #[test]
 fn a_flip_with_nothing_to_report_is_no_figure() {
     let mut l = Latencies::default();
-    l.push(ms(1000), Presented { latency: None, drift_ms: None });
+    l.push(
+        ms(1000),
+        Presented {
+            latency: None,
+            drift_ms: None,
+        },
+    );
     assert_eq!(l.summary(ms(1100), None), None);
 }
 
@@ -738,7 +807,11 @@ fn old_flips_leave_the_latency_figures() {
     for i in 0..5u64 {
         l.push(ms(10_000 + i * 16), shown(10_000, 0.0));
     }
-    let f = l.summary(ms(10_100), None).expect("flips").latency.expect("latency");
+    let f = l
+        .summary(ms(10_100), None)
+        .expect("flips")
+        .latency
+        .expect("latency");
     assert_eq!(f.frames, 5);
     assert!((f.worst_ms - 10.0).abs() < 1e-9);
     // and nothing at all once they are all old
@@ -750,7 +823,11 @@ fn latencies_start_over_when_the_clock_goes_back() {
     let mut l = Latencies::default();
     l.push(ms(50_000), shown(10_000, 0.0));
     l.push(ms(1_000), shown(20_000, 0.0));
-    let f = l.summary(ms(1_100), None).expect("flips").latency.expect("latency");
+    let f = l
+        .summary(ms(1_100), None)
+        .expect("flips")
+        .latency
+        .expect("latency");
     assert_eq!(f.frames, 1);
     assert!((f.avg_ms - 20.0).abs() < 1e-9);
 }
@@ -787,7 +864,11 @@ fn with_latency(drift: f64, latency_ms: f64) -> Snapshot {
 fn latency_rows_show_the_delay_and_the_drift() {
     let s = with_latency(0.25, 14.0);
     let latency = find(&s, "Latency");
-    assert!(latency.value.contains("commit to screen 14.0 ms avg"), "{}", latency.value);
+    assert!(
+        latency.value.contains("commit to screen 14.0 ms avg"),
+        "{}",
+        latency.value
+    );
     assert_eq!(latency.tone, Tone::Neutral);
     let drift = find(&s, "Drift");
     assert!(drift.value.starts_with("+0.25 ms avg"), "{}", drift.value);
@@ -805,7 +886,10 @@ fn a_drift_of_half_a_refresh_is_a_warning() {
 #[test]
 fn content_that_waited_two_refreshes_is_a_warning() {
     assert_eq!(find(&with_latency(0.0, 40.0), "Latency").tone, Tone::Warn);
-    assert_eq!(find(&with_latency(0.0, 30.0), "Latency").tone, Tone::Neutral);
+    assert_eq!(
+        find(&with_latency(0.0, 30.0), "Latency").tone,
+        Tone::Neutral
+    );
 }
 
 #[test]
@@ -847,8 +931,14 @@ fn the_json_has_the_latency_and_stays_balanced() {
 fn modifiers_have_names() {
     assert_eq!(modifier_name(0), "LINEAR");
     assert_eq!(modifier_name(MODIFIER_INVALID), "INVALID (implicit)");
-    assert_eq!(modifier_name(0x0100_0000_0000_0001), "Intel 0x0100000000000001");
-    assert_eq!(modifier_name(0x0200_0000_0000_0001), "AMD 0x0200000000000001");
+    assert_eq!(
+        modifier_name(0x0100_0000_0000_0001),
+        "Intel 0x0100000000000001"
+    );
+    assert_eq!(
+        modifier_name(0x0200_0000_0000_0001),
+        "AMD 0x0200000000000001"
+    );
     assert!(modifier_name(0x7f00_0000_0000_0001).starts_with("unknown vendor"));
 }
 
@@ -899,17 +989,31 @@ fn json_carries_the_modifier() {
 #[test]
 fn the_protocols_in_use_have_names() {
     assert!(ClientSync::default().names().is_empty());
-    let all = ClientSync { fifo: true, commit_timing: true, explicit_sync: true };
-    assert_eq!(all.names(), ["explicit sync (syncobj)", "fifo", "commit timing"]);
+    let all = ClientSync {
+        fifo: true,
+        commit_timing: true,
+        explicit_sync: true,
+    };
+    assert_eq!(
+        all.names(),
+        ["explicit sync (syncobj)", "fifo", "commit timing"]
+    );
 }
 
 #[test]
 fn the_overlay_lists_what_the_client_uses() {
     let mut s = snapshot();
-    s.client_sync = ClientSync { fifo: true, commit_timing: false, explicit_sync: true };
+    s.client_sync = ClientSync {
+        fifo: true,
+        commit_timing: false,
+        explicit_sync: true,
+    };
     assert_eq!(find(&s, "Sync").value, "explicit sync (syncobj), fifo");
     s.client_sync.commit_timing = true;
-    assert_eq!(find(&s, "Sync").value, "explicit sync (syncobj), fifo, commit timing");
+    assert_eq!(
+        find(&s, "Sync").value,
+        "explicit sync (syncobj), fifo, commit timing"
+    );
 }
 
 #[test]
@@ -925,9 +1029,138 @@ fn a_dmabuf_client_with_none_is_on_implicit_sync() {
 #[test]
 fn json_carries_the_sync_protocols() {
     let mut s = snapshot();
-    assert!(to_json(&s).contains("\"sync_protocols\":{\"fifo\":false,\"commit_timing\":false,\"explicit_sync\":false}"));
-    s.client_sync = ClientSync { fifo: true, commit_timing: false, explicit_sync: true };
+    assert!(to_json(&s).contains(
+        "\"sync_protocols\":{\"fifo\":false,\"commit_timing\":false,\"explicit_sync\":false}"
+    ));
+    s.client_sync = ClientSync {
+        fifo: true,
+        commit_timing: false,
+        explicit_sync: true,
+    };
     let json = to_json(&s);
-    assert!(json.contains("\"sync_protocols\":{\"fifo\":true,\"commit_timing\":false,\"explicit_sync\":true}"), "{json}");
+    assert!(
+        json.contains(
+            "\"sync_protocols\":{\"fifo\":true,\"commit_timing\":false,\"explicit_sync\":true}"
+        ),
+        "{json}"
+    );
     assert_eq!(json.matches('{').count(), json.matches('}').count());
+}
+
+// ---- tearing, seen and not only asked for -------------------------------------------------------
+
+const R144: Duration = Duration::from_micros(6944);
+
+#[test]
+fn flips_a_whole_number_of_refreshes_apart_are_on_the_grid() {
+    let prev = ms(1000);
+    assert_eq!(flip_off_grid(prev, prev + R144, R144), Some(false));
+    // three refreshes, a few tens of microseconds of stamp noise
+    let noisy = prev + R144 * 3 + Duration::from_micros(40);
+    assert_eq!(flip_off_grid(prev, noisy, R144), Some(false));
+}
+
+#[test]
+fn a_flip_between_two_vblanks_is_off_the_grid() {
+    let prev = ms(1000);
+    assert_eq!(
+        flip_off_grid(prev, prev + R144 + R144 / 2, R144),
+        Some(true)
+    );
+    // sooner than a display can follow in sync
+    assert_eq!(flip_off_grid(prev, prev + R144 / 3, R144), Some(true));
+}
+
+#[test]
+fn flips_that_cannot_be_told_are_not_counted() {
+    let prev = ms(1000);
+    // an idle spell: the grid has drifted
+    assert_eq!(flip_off_grid(prev, prev + ms(500), R144), None);
+    // the clock went back
+    assert_eq!(flip_off_grid(prev + ms(1), prev, R144), None);
+    assert_eq!(flip_off_grid(prev, prev + R144, Duration::ZERO), None);
+}
+
+#[test]
+fn the_tearing_summary_counts_the_last_span() {
+    let mut t = Tearings::default();
+    assert_eq!(t.summary(ms(10_000)), None);
+    t.push(ms(1_000), true); // older than the span
+    t.push(ms(8_000), true);
+    t.push(ms(9_000), false);
+    assert_eq!(
+        t.summary(ms(10_000)),
+        Some(TearingSummary {
+            flips: 2,
+            off_grid: 1
+        })
+    );
+    t.clear();
+    assert_eq!(t.summary(ms(10_000)), None);
+}
+
+#[test]
+fn a_few_off_grid_flips_in_a_vsync_run_are_not_tearing() {
+    assert!(!TearingSummary {
+        flips: 300,
+        off_grid: 0
+    }
+    .seen());
+    assert!(!TearingSummary {
+        flips: 300,
+        off_grid: 14
+    }
+    .seen());
+    assert!(TearingSummary {
+        flips: 300,
+        off_grid: 15
+    }
+    .seen());
+    // too few flips to judge by
+    assert!(!TearingSummary {
+        flips: 4,
+        off_grid: 4
+    }
+    .seen());
+}
+
+fn tearing_with(flips: usize, off_grid: usize) -> Snapshot {
+    let mut s = snapshot();
+    s.vrr = Vrr::Off;
+    s.wants_tearing = true;
+    s.allow_tearing = true;
+    s.async_flip = true;
+    s.tearing = Some(TearingSummary { flips, off_grid });
+    s
+}
+
+#[test]
+fn tearing_that_was_seen_says_so() {
+    let row = find(&tearing_with(300, 220), "Tearing result");
+    assert_eq!(row.value, "seen: 220 of 300 flips off the vblank grid");
+    assert_eq!(row.tone, Tone::Good);
+}
+
+#[test]
+fn tearing_asked_for_and_not_seen_warns() {
+    let row = find(&tearing_with(300, 0), "Tearing result");
+    assert_eq!(
+        row.value,
+        "requested, not seen: 0 of 300 flips off the vblank grid"
+    );
+    assert_eq!(row.tone, Tone::Warn);
+}
+
+#[test]
+fn a_few_flips_leave_the_tearing_result_at_the_request() {
+    let row = find(&tearing_with(3, 0), "Tearing result");
+    assert_eq!(row.value, "async flip requested");
+    assert_eq!(row.tone, Tone::Good);
+}
+
+#[test]
+fn the_json_carries_the_observed_tearing() {
+    assert!(to_json(&snapshot()).contains("\"tearing_observed\":null"));
+    let json = to_json(&tearing_with(300, 220));
+    assert!(json.contains("\"tearing_observed\":{\"flips\":300,\"off_grid\":220,\"seen\":true}"));
 }

@@ -365,6 +365,7 @@ fn stats_snapshot(
         cost: None,
         sync: None,
         latency: None,
+        tearing: None,
         fullscreen: win.fullscreen,
         wants_tearing: win.wants_tearing,
         says_game: win.says_game,
@@ -3410,11 +3411,24 @@ impl JffState {
             Some(DrmEventTime::Monotonic(time)) if !time.is_zero() => Some(time),
             _ => None,
         };
+        // Whether this flip came off the vblank grid, which a tearing flip does. Told from the
+        // kernel's stamps of this flip and the one before (`nerd::flip_off_grid`), so not with
+        // VRR, whose flips come when the frames do, and not without a stamp.
+        let off_grid = match (hw_time, lit.last_vblank) {
+            (Some(now), Some(previous)) if !lit.vrr_on => {
+                crate::protocol::presentation::refresh_interval(&lit.output)
+                    .and_then(|refresh| nerd::flip_off_grid(previous, now, refresh))
+            }
+            _ => None,
+        };
         lit.last_vblank =
             Some(hw_time.unwrap_or_else(crate::protocol::presentation::monotonic_now));
         if self.stats.active() {
-            self.stats
-                .note_flip(&lit.output.name(), lit.last_vblank.unwrap_or_default());
+            self.stats.note_flip(
+                &lit.output.name(),
+                lit.last_vblank.unwrap_or_default(),
+                off_grid,
+            );
         }
         match lit.compositor.frame_submitted() {
             Ok(mut feedback) => {
