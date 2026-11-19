@@ -139,14 +139,15 @@ type GbmDrmCompositor = DrmCompositor<
 struct SurfaceDmabufFeedback {
     /// What the renderer can import. For surfaces that get composited.
     render: DmabufFeedback,
-    /// A scanout tranche (what the primary plane takes directly) followed by the render formats.
+    /// A scanout tranche (what the primary plane takes directly), a second one for what only an
+    /// overlay plane takes, then the render formats.
     /// For surfaces being scanned out, so the client allocates buffers that need no copy.
     scanout: DmabufFeedback,
 }
 
-/// Only the primary plane counts, since `render_crtc` never puts a client buffer on an overlay.
-/// Advertising overlay-only formats would steer clients into buffers that can't be scanned out.
-/// None without a render node.
+/// The primary plane's formats come first, so a fullscreen client allocates what that plane
+/// takes without a copy. The formats only an overlay plane takes follow in a tranche of their
+/// own, for windows that are not fullscreen. None without a render node.
 fn build_dmabuf_feedback(
     compositor: &GbmDrmCompositor,
     renderer: &GlesRenderer,
@@ -168,28 +169,50 @@ fn build_dmabuf_feedback(
         .intersection(&texture_formats)
         .copied()
         .collect();
+    // What an overlay plane takes and the primary plane does not. Planes often share formats,
+    // so the set drops the repeats.
+    let overlay_set: FormatSet = compositor
+        .surface()
+        .planes()
+        .overlay
+        .iter()
+        .flat_map(|plane| plane.formats.iter())
+        .filter(|format| texture_formats.contains(format) && !plane_formats.contains(format))
+        .copied()
+        .collect();
+    let overlay_formats: Vec<_> = overlay_set.iter().copied().collect();
 
     tracing::info!(
-        "dmabuf feedback: {} primary-plane formats, {} renderer formats, {} usable for scanout",
+        "dmabuf feedback: {} primary-plane formats, {} renderer formats, {} usable for scanout, {} only on overlay planes",
         plane_formats.iter().count(),
         texture_formats.iter().count(),
         scanout_formats.len(),
+        overlay_formats.len(),
     );
     let render = DmabufFeedbackBuilder::new(main_device, texture_formats.iter().copied())
         .build()
         .ok()?;
-    let scanout = if scanout_formats.is_empty() {
+    let scanout = if scanout_formats.is_empty() && overlay_formats.is_empty() {
         render.clone()
     } else {
-        DmabufFeedbackBuilder::new(main_device, texture_formats.iter().copied())
-            .add_preference_tranche(
+        let mut builder = DmabufFeedbackBuilder::new(main_device, texture_formats.iter().copied());
+        if !scanout_formats.is_empty() {
+            builder = builder.add_preference_tranche(
                 scanout_device,
                 TrancheFlags::Scanout,
                 scanout_formats,
                 0..=u32::MAX,
-            )
-            .build()
-            .ok()?
+            );
+        }
+        if !overlay_formats.is_empty() {
+            builder = builder.add_preference_tranche(
+                scanout_device,
+                TrancheFlags::Scanout,
+                overlay_formats,
+                0..=u32::MAX,
+            );
+        }
+        builder.build().ok()?
     };
     Some(SurfaceDmabufFeedback { render, scanout })
 }
