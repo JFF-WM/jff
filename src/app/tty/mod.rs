@@ -2905,14 +2905,17 @@ impl JffState {
             // would not be taken as PQ.
             FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT
         } else if hdr_space.is_none() {
-            // A composited frame on an SDR monitor. The cursor still goes to its own plane, so
-            // moving the pointer neither redraws the desktop nor puts the cursor in the frame.
-            // The cursor elements are plain surface or memory elements drawn outside the
-            // colour-conversion scope, so the plane shows what the renderer would have, and
-            // the CRTC gamma (night light) applies to every plane. Screencopy and screenshots
-            // build their own frame and are not affected. If the plane cannot take the
-            // element, the compositor draws it into the frame as before.
-            FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
+            // A composited frame on an SDR monitor. Elements may go to the primary, overlay
+            // and cursor planes. The cursor on its own plane means moving the pointer neither
+            // redraws the desktop nor puts the cursor in the frame. The cursor elements are
+            // plain surface or memory elements drawn outside the colour-conversion scope, so
+            // the plane shows what the renderer would have, and the CRTC gamma (night light)
+            // applies to every plane. Screencopy and screenshots build their own frame and are
+            // not affected. If a plane cannot take an element, the compositor draws it into the
+            // frame as before.
+            FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT
+                | FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT
+                | FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
         } else {
             // An HDR monitor: the frame is composited into its own texture and encoded by the
             // final pass, which a cursor on a plane would skip.
