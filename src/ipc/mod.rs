@@ -397,6 +397,14 @@ pub enum OnTop {
     Toggle,
 }
 
+/// What `sticky`, `unsticky` and `toggle-sticky` ask for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stick {
+    On,
+    Off,
+    Toggle,
+}
+
 /// The buttons `click` can press.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClickButton {
@@ -431,6 +439,8 @@ pub enum Request {
     Fullscreen(Option<u64>, bool),
     /// `always-on-top`, `not-always-on-top` and `toggle-always-on-top`: keep a window above the others, or not.
     AlwaysOnTop(Option<u64>, OnTop),
+    /// `sticky`, `unsticky` and `toggle-sticky`: show a window on every workspace of its monitor, or not.
+    Sticky(Option<u64>, Stick),
     Focus(u64),
     Workspaces,
     /// `containers`: the tiling containers on the shown workspace.
@@ -490,7 +500,7 @@ pub enum Request {
 
 pub const COMMANDS: &str =
     "windows, status, outputs, focused, window-info, close, maximize, unmaximize, toggle-maximize, \
-     fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
+     fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, sticky, unsticky, toggle-sticky, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
      screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, hotkeys, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
@@ -761,6 +771,9 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         "always-on-top" => Ok(Request::AlwaysOnTop(id, OnTop::On)),
         "not-always-on-top" => Ok(Request::AlwaysOnTop(id, OnTop::Off)),
         "toggle-always-on-top" => Ok(Request::AlwaysOnTop(id, OnTop::Toggle)),
+        "sticky" => Ok(Request::Sticky(id, Stick::On)),
+        "unsticky" => Ok(Request::Sticky(id, Stick::Off)),
+        "toggle-sticky" => Ok(Request::Sticky(id, Stick::Toggle)),
         "focus" => id
             .map(Request::Focus)
             .ok_or_else(|| "focus needs a window id".to_string()),
@@ -967,6 +980,28 @@ impl JffState {
                 };
                 if want != now {
                     self.set_always_on_top(&window, want);
+                }
+                Ok(format!(
+                    "{{\"ok\":true,\"window\":{}}}\n",
+                    self.window_json(&window)
+                ))
+            }
+            Request::Sticky(id, how) => {
+                let window = self.target_window(id)?;
+                let now = self.desk.is_sticky(|w| *w == window);
+                let want = match how {
+                    Stick::On => true,
+                    Stick::Off => false,
+                    Stick::Toggle => !now,
+                };
+                if want != now {
+                    if self.desk.container_of(|w| *w == window).is_some() {
+                        return Err(
+                            "the window is in a container, which is on one workspace: take it out first"
+                                .to_string(),
+                        );
+                    }
+                    self.set_sticky(&window, want);
                 }
                 Ok(format!(
                     "{{\"ok\":true,\"window\":{}}}\n",
@@ -1300,6 +1335,7 @@ impl JffState {
             focused,
             urgent: self.is_urgent(window),
             always_on_top: self.desk.is_above(|w| w == window),
+            sticky: self.desk.is_sticky(|w| w == window),
             output,
             workspace,
             pid: self.window_pid(window),
@@ -1997,6 +2033,9 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("always-on-top [ID]", "keep a window above the others"),
             ("not-always-on-top [ID]", "stop keeping a window above"),
             ("toggle-always-on-top [ID]", "toggle always on top"),
+            ("sticky [ID]", "show a window on every workspace"),
+            ("unsticky [ID]", "keep a window on its workspace only"),
+            ("toggle-sticky [ID]", "toggle sticky"),
             ("tag [NAME] [ID]", "tag a window, or show its tag"),
             ("untag [ID]", "remove the tag of a window"),
         ],

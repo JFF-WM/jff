@@ -422,6 +422,10 @@ cursor {
 //                          one (a picture-in-picture player). Set when the window opens, the
 //                          `always-on-top` command of `jff msg` changes it later. A rule with only an
 //                          `always-on-top` does not use up the one rule a window gets
+//   sticky                 the window is shown on every workspace of its monitor. Set when the
+//                          window opens, the `sticky` command of `jff msg` changes it later. A
+//                          window in a tiling container is on one workspace, so it is not sticky.
+//                          A rule with only a `sticky` does not use up the one rule a window gets
 //
 // Change DP-1 and HDMI-A-2 below to your monitor names.
 // ---------------------------------------------------------------------------------------------
@@ -537,7 +541,7 @@ window-rule { match app-id="kitty"; opacity 0.9; }
 // window-rule { match app-id="steam_app_1091500"; sdr; sdr-white 160; }
 
 // Keep a window above the others, e.g. a picture-in-picture player.
-// window-rule { match title="Picture-in-Picture"; always-on-top; }
+// window-rule { match title="Picture-in-Picture"; always-on-top; sticky; }
 
 // ---------------------------------------------------------------------------------------------
 // Container rules (need `tiling-containers`). Any number of blocks.

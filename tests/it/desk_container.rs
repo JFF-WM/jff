@@ -2078,3 +2078,16 @@ fn turning_always_on_top_off_for_a_member_does_it_for_the_container() {
     d.raise_where(|w| *w == "c");
     assert_eq!(top_down(&d)[0], "c");
 }
+
+#[test]
+fn a_window_in_a_container_cannot_be_sticky_and_joining_one_ends_it() {
+    let (mut d, _) = container_of(&["a", "b", "c"], &["a", "b"], Axis::Horizontal);
+    assert!(!d.set_sticky_where(|w| *w == "a", true));
+    assert!(d.set_sticky_where(|w| *w == "c", true));
+    let c = d
+        .container_of(|w| *w == "a")
+        .expect("a is in the container");
+    d.split_container(c, |w| *w == "b", Axis::Horizontal, |w| *w == "c")
+        .expect("c joins");
+    assert!(!d.is_sticky(|w| *w == "c"));
+}

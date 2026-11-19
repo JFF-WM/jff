@@ -101,6 +101,8 @@ pub struct Entry<W> {
     pub opacity: f32,
     /// Always on top, see [`Desk::set_above_where`] (read it with [`Desk::is_above`], a container goes as a whole).
     pub above: bool,
+    /// Shown on every workspace of its monitor (sticky), see [`Desk::set_sticky_where`]. Its `workspace` is always the one its monitor shows.
+    pub sticky: bool,
 }
 
 pub struct Desk<W> {
@@ -179,6 +181,7 @@ impl<W> Desk<W> {
             scratch: false,
             opacity: 1.0,
             above: false,
+            sticky: false,
         });
         self.settle();
         pos
@@ -194,6 +197,7 @@ impl<W> Desk<W> {
     /// don't have their own). Doesn't touch the windows.
     pub fn set_current(&mut self, workspace: usize) {
         self.current = workspace;
+        self.follow_shown();
     }
 
     /// Whether every monitor has its own workspace.
@@ -213,6 +217,7 @@ impl<W> Desk<W> {
         }
         self.per_output = on;
         self.shown.clear();
+        self.follow_shown();
     }
 
     /// The workspace shown on the monitor `output` (0-based).
@@ -231,6 +236,24 @@ impl<W> Desk<W> {
             self.shown.insert(output.to_owned(), workspace);
         } else {
             self.current = workspace;
+        }
+        self.follow_shown();
+    }
+
+    /// Put every sticky window on the workspace its monitor shows, which is what makes it visible on all of them.
+    fn follow_shown(&mut self) {
+        if !self.entries.iter().any(|e| e.sticky) {
+            return;
+        }
+        let shown: Vec<usize> = self
+            .entries
+            .iter()
+            .map(|e| self.current_on(&e.output))
+            .collect();
+        for (entry, workspace) in self.entries.iter_mut().zip(shown) {
+            if entry.sticky {
+                entry.workspace = workspace;
+            }
         }
     }
 
@@ -378,6 +401,7 @@ impl<W> Desk<W> {
             }
             self.sync_members(ci);
         }
+        self.follow_shown();
     }
 
     /// With per-output workspaces: the monitors `a` and `b` trade what they show. The windows
@@ -429,6 +453,7 @@ impl<W> Desk<W> {
                 self.sync_members(ci);
             }
         }
+        self.follow_shown();
         true
     }
 
@@ -504,6 +529,8 @@ impl<W> Desk<W> {
         }
         let mut entry = self.entries.remove(i);
         entry.workspace = workspace;
+        // Sent to a workspace, it is no longer on all of them.
+        entry.sticky = false;
         self.entries.push(entry);
         self.settle();
         true
@@ -524,6 +551,7 @@ impl<W> Desk<W> {
         for shown in self.shown.values_mut() {
             *shown = (*shown).min(last);
         }
+        self.follow_shown();
     }
 
     /// Windows of the current workspace, topmost first - the order renderers want. Windows on
@@ -678,6 +706,7 @@ impl<W> Desk<W> {
         if per_output {
             e.workspace = shown;
         }
+        self.follow_shown();
         true
     }
 
@@ -773,6 +802,27 @@ impl<W> Desk<W> {
                 self.settle();
             }
         }
+        true
+    }
+
+    /// Whether the window is sticky: shown on every workspace of its monitor.
+    pub fn is_sticky(&self, pred: impl Fn(&W) -> bool) -> bool {
+        self.find_by(pred).is_some_and(|e| e.sticky)
+    }
+
+    /// Make the first window matching `pred` sticky (`on`) or an ordinary window of the workspace it is on, false when there is no such window, it is a member of a container, or nothing changed.
+    pub fn set_sticky_where(&mut self, pred: impl Fn(&W) -> bool, on: bool) -> bool {
+        let Some(i) = self.entries.iter().position(|e| pred(&e.window)) else {
+            return false;
+        };
+        let Some(e) = self.entries.get_mut(i) else {
+            return false;
+        };
+        if e.container.is_some() || e.sticky == on {
+            return false;
+        }
+        e.sticky = on;
+        self.follow_shown();
         true
     }
 
@@ -1543,6 +1593,8 @@ impl<W> Desk<W> {
             if entry.container == Some(id) {
                 entry.workspace = workspace;
                 entry.output = output.clone();
+                // A container is on one workspace, so a member is not on all of them.
+                entry.sticky = false;
             }
         }
     }

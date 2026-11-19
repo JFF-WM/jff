@@ -9,8 +9,8 @@ use std::os::unix::net::UnixStream;
 use jff_wm::desk::Goto;
 use jff_wm::ipc::events::{Group, GroupSet};
 use jff_wm::ipc::{
-    parse_request, split_style, ClickButton, Maximize, OnTop, Outbox, Request, Subscriber, TagOp,
-    COMMANDS, MAX_PENDING,
+    parse_request, split_style, ClickButton, Maximize, OnTop, Outbox, Request, Stick, Subscriber,
+    TagOp, COMMANDS, MAX_PENDING,
 };
 use jff_wm::primitives::json::{json_opt, json_str, pretty};
 use jff_wm::primitives::layout::MonitorTarget;
@@ -932,6 +932,31 @@ fn always_on_top_requests_are_parsed() {
     assert!(parse_request("always-on-top x").is_err());
     assert!(parse_request("always-on-top 1 2").is_err());
     for command in ["always-on-top", "not-always-on-top", "toggle-always-on-top"] {
+        assert!(COMMANDS.contains(command));
+    }
+}
+
+#[test]
+fn sticky_requests_are_parsed() {
+    assert_eq!(
+        parse_request("sticky"),
+        Ok(Request::Sticky(None, Stick::On))
+    );
+    assert_eq!(
+        parse_request("sticky 4"),
+        Ok(Request::Sticky(Some(4), Stick::On))
+    );
+    assert_eq!(
+        parse_request("unsticky 4"),
+        Ok(Request::Sticky(Some(4), Stick::Off))
+    );
+    assert_eq!(
+        parse_request("toggle-sticky"),
+        Ok(Request::Sticky(None, Stick::Toggle))
+    );
+    assert!(parse_request("sticky x").is_err());
+    assert!(parse_request("sticky 1 2").is_err());
+    for command in ["sticky", "unsticky", "toggle-sticky"] {
         assert!(COMMANDS.contains(command));
     }
 }

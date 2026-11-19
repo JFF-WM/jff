@@ -103,6 +103,8 @@ pub struct WindowInfo {
     pub urgent: bool,
     /// The window stays above the ones that are not (`always-on-top`).
     pub always_on_top: bool,
+    /// The window is shown on every workspace of its monitor (`sticky`), `workspace` then follows the shown one.
+    pub sticky: bool,
     pub output: Option<String>,
     /// The workspace the window lives on, counting from 1.
     pub workspace: usize,
@@ -210,7 +212,7 @@ impl WindowInfo {
     fn members(&self) -> String {
         format!(
             "\"id\":{},\"app_id\":{},\"title\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\
-             \"maximized\":{},\"minimized\":{},\"fullscreen\":{},\"focused\":{},\"urgent\":{},\"always_on_top\":{},\"output\":{},\"workspace\":{},\"pid\":{},\"container\":{},\"tag\":{},\"icon\":{}",
+             \"maximized\":{},\"minimized\":{},\"fullscreen\":{},\"focused\":{},\"urgent\":{},\"always_on_top\":{},\"sticky\":{},\"output\":{},\"workspace\":{},\"pid\":{},\"container\":{},\"tag\":{},\"icon\":{}",
             self.id,
             json_opt(self.app_id.as_deref()),
             json_opt(self.title.as_deref()),
@@ -224,6 +226,7 @@ impl WindowInfo {
             self.focused,
             self.urgent,
             self.always_on_top,
+            self.sticky,
             json_opt(self.output.as_deref()),
             self.workspace,
             self.pid.map_or_else(|| "null".to_string(), |pid| pid.to_string()),
@@ -700,6 +703,11 @@ pub enum Event {
         id: u64,
         on: bool,
     },
+    /// The window became sticky (`on`), or an ordinary window of one workspace again.
+    Sticky {
+        id: u64,
+        on: bool,
+    },
     WindowWorkspace {
         id: u64,
         workspace: usize,
@@ -760,6 +768,7 @@ impl Event {
             | Event::Fullscreen { .. }
             | Event::Urgent { .. }
             | Event::AlwaysOnTop { .. }
+            | Event::Sticky { .. }
             | Event::WindowWorkspace { .. }
             | Event::WindowContainer { .. } => Group::Windows,
             Event::Focus { .. } => Group::Focus,
@@ -831,6 +840,9 @@ impl Event {
             Event::AlwaysOnTop { id, on } => {
                 format!("{{\"event\":\"always-on-top\",\"id\":{id},\"on\":{on}}}")
             }
+            Event::Sticky { id, on } => {
+                format!("{{\"event\":\"sticky\",\"id\":{id},\"on\":{on}}}")
+            }
             Event::WindowWorkspace { id, workspace } => {
                 format!("{{\"event\":\"window-workspace\",\"id\":{id},\"workspace\":{workspace}}}")
             }
@@ -874,7 +886,7 @@ impl Event {
 /// The events that turn `old` into `new`, in the order a client should see them. Monitors are
 /// added or changed first, then panels open, then windows open (ascending id), then menus open,
 /// then changes on windows already there (ascending id, and per window: title, app id,
-/// drag start, geometry, maximized, minimized, fullscreen, urgent, always on top, workspace, container, drag end), then the shown workspace, then focus, then
+/// drag start, geometry, maximized, minimized, fullscreen, urgent, always on top, sticky, workspace, container, drag end), then the shown workspace, then focus, then
 /// menus close, windows close (ascending id, after the focus event that moved away from them),
 /// panels close, then monitors removed, overview, screenshot, lock. A menu always opens after
 /// and closes before what it belongs to.
@@ -1004,6 +1016,12 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
             events.push(Event::AlwaysOnTop {
                 id,
                 on: after.always_on_top,
+            });
+        }
+        if before.sticky != after.sticky {
+            events.push(Event::Sticky {
+                id,
+                on: after.sticky,
             });
         }
         if before.workspace != after.workspace {

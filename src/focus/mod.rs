@@ -125,6 +125,15 @@ impl JffState {
         changed
     }
 
+    /// Show a window on every workspace of its monitor (`on`) or on the one it is on only, true when that changed anything.
+    pub fn set_sticky(&mut self, window: &Window, on: bool) -> bool {
+        let changed = self.desk.set_sticky_where(|w| w == window, on);
+        if changed {
+            tracing::info!("sticky {on} for a window");
+        }
+        changed
+    }
+
     /// Hand the keyboard to the topmost window of the shown workspace, or to nobody when there
     /// is none.
     pub fn refocus_topmost(&mut self) {

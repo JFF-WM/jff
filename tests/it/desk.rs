@@ -586,3 +586,69 @@ fn an_always_on_top_window_stays_on_top_when_another_moves_workspace() {
     let all: Vec<_> = d.all_top_down().map(|e| e.window).collect();
     assert_eq!(all, ["a", "c", "b"]);
 }
+
+#[test]
+fn a_sticky_window_is_shown_on_every_workspace() {
+    let mut d = Desk::default();
+    d.add("a");
+    d.add("b");
+    assert!(d.set_sticky_where(|w| *w == "a", true));
+    assert!(d.is_sticky(|w| *w == "a"));
+    assert!(!d.is_sticky(|w| *w == "b"));
+    d.set_current(2);
+    assert_eq!(order(&d), ["a"]);
+    assert_eq!(d.workspace_of(|w| *w == "a"), Some(2));
+    assert_eq!(d.workspace_of(|w| *w == "b"), Some(0));
+    d.set_current(0);
+    assert_eq!(order(&d), ["b", "a"]);
+}
+
+#[test]
+fn a_window_that_stops_being_sticky_stays_on_the_workspace_it_is_on() {
+    let mut d = Desk::default();
+    d.add("a");
+    d.set_sticky_where(|w| *w == "a", true);
+    d.set_current(3);
+    assert!(d.set_sticky_where(|w| *w == "a", false));
+    d.set_current(0);
+    assert_eq!(order(&d), Vec::<&str>::new());
+    d.set_current(3);
+    assert_eq!(order(&d), ["a"]);
+}
+
+#[test]
+fn setting_sticky_says_whether_anything_changed() {
+    let mut d = Desk::default();
+    d.add("a");
+    assert!(!d.set_sticky_where(|w| *w == "a", false));
+    assert!(d.set_sticky_where(|w| *w == "a", true));
+    assert!(!d.set_sticky_where(|w| *w == "a", true));
+    assert!(!d.set_sticky_where(|w| *w == "zzz", true));
+}
+
+#[test]
+fn sending_a_sticky_window_to_a_workspace_makes_it_an_ordinary_one() {
+    let mut d = Desk::default();
+    d.add("a");
+    d.set_sticky_where(|w| *w == "a", true);
+    assert!(d.move_to_workspace(|w| *w == "a", 2));
+    assert!(!d.is_sticky(|w| *w == "a"));
+    assert_eq!(order(&d), Vec::<&str>::new());
+}
+
+#[test]
+fn a_sticky_window_follows_only_its_own_monitor_with_per_output_workspaces() {
+    let mut d = per_output_desk();
+    d.add_on("a", "left");
+    d.add_on("b", "right");
+    d.set_sticky_where(|w| *w == "a", true);
+    d.set_current_on("left", 2);
+    assert_eq!(d.workspace_of(|w| *w == "a"), Some(2));
+    d.set_current_on("right", 5);
+    assert_eq!(d.workspace_of(|w| *w == "a"), Some(2));
+    assert_eq!(order(&d), ["a"]);
+    // Moved to the other monitor, it shows what that one shows.
+    d.set_output_where(|w| *w == "a", "right");
+    assert_eq!(d.workspace_of(|w| *w == "a"), Some(5));
+    assert!(d.is_sticky(|w| *w == "a"));
+}

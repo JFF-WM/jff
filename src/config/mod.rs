@@ -7,7 +7,7 @@
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
 //! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
-//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `open-position X Y` (from the top left of the monitor, kept inside it, floating), `open-centered` (the middle of the monitor, floating, not together with `open-position`), `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), `content-type "game"|"video"|"photo"|"none"` (what the window shows, whatever its client says through wp_content_type_v1: with `game`, `video` or `photo`, a fullscreen window covering a monitor with `content-type-hint` makes jff tell the monitor a game, a video or a photo is on screen, which X11 and Proton windows cannot say for themselves, `none` ignores what the client says, set when the window opens like `opacity`, a rule with only a `content-type` does not use up the one rule a window gets either), `always-on-top` (the window stays above the ones that are not, even above a fullscreen one, set when the window opens like `opacity`, a rule with only an `always-on-top` does not use up the one rule a window gets either), the first rule that fits a window applies), and
+//! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `open-position X Y` (from the top left of the monitor, kept inside it, floating), `open-centered` (the middle of the monitor, floating, not together with `open-position`), `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), `content-type "game"|"video"|"photo"|"none"` (what the window shows, whatever its client says through wp_content_type_v1: with `game`, `video` or `photo`, a fullscreen window covering a monitor with `content-type-hint` makes jff tell the monitor a game, a video or a photo is on screen, which X11 and Proton windows cannot say for themselves, `none` ignores what the client says, set when the window opens like `opacity`, a rule with only a `content-type` does not use up the one rule a window gets either), `always-on-top` (the window stays above the ones that are not, even above a fullscreen one, set when the window opens like `opacity`, a rule with only an `always-on-top` does not use up the one rule a window gets either), `sticky` (the window is shown on every workspace of its monitor, set when the window opens, a window that joins a container is not sticky, a rule with only a `sticky` does not use up the one rule a window gets either), the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
 //!
@@ -1249,6 +1249,8 @@ pub struct WindowRule {
     pub content_type: Option<RuleContentType>,
     /// `always-on-top`: the window stays above the others. Its own step too, see [`Config::always_on_top_for`].
     pub always_on_top: bool,
+    /// `sticky`: the window is shown on every workspace of its monitor. Its own step too, see [`Config::sticky_for`].
+    pub sticky: bool,
 }
 
 impl WindowRule {
@@ -1278,6 +1280,7 @@ impl WindowRule {
             || self.sets_sdr()
             || self.content_type.is_some()
             || self.always_on_top
+            || self.sticky
     }
 
     /// Whether the rule says how the window's colors are read: `sdr` or `sdr-white`.
@@ -1293,7 +1296,7 @@ impl WindowRule {
         }
     }
 
-    /// Whether `tag`, `opacity`, `sdr`, `sdr-white`, `content-type` and `always-on-top` are all the rule does.
+    /// Whether `tag`, `opacity`, `sdr`, `sdr-white`, `content-type`, `always-on-top` and `sticky` are all the rule does.
     /// Such a rule only names or dresses windows, so it does not use up the one rule a window
     /// gets for its placement.
     pub fn only_tags(&self) -> bool {
@@ -1301,7 +1304,8 @@ impl WindowRule {
             || self.opacity.is_some()
             || self.sets_sdr()
             || self.content_type.is_some()
-            || self.always_on_top)
+            || self.always_on_top
+            || self.sticky)
             && self.output.is_none()
             && self.workspace.is_none()
             && self.container.is_none()
@@ -2193,6 +2197,13 @@ impl Config {
             .any(|rule| rule.always_on_top && rule.matches(window))
     }
 
+    /// Whether the user's rules show a window on every workspace: some rule with `sticky` whose `match` lines all hold, whichever rule the window gets for its placement.
+    pub fn sticky_for(&self, window: &WindowFacts<'_>) -> bool {
+        self.window_rules
+            .iter()
+            .any(|rule| rule.sticky && rule.matches(window))
+    }
+
     /// Whether windows can be grouped in tiling containers (`tiling-containers`, off by default).
     pub fn tiling_containers(&self) -> bool {
         self.tiling_containers
@@ -2958,6 +2969,7 @@ fn parse_window_rule(node: &KdlNode) -> anyhow::Result<WindowRule> {
             "sdr-white" => rule.sdr_white = Some(nits_arg(child, &SDR_WHITE_RANGE, 300)?),
             "sdr" => rule.sdr = flag_value(child)?,
             "always-on-top" => rule.always_on_top = flag_value(child)?,
+            "sticky" => rule.sticky = flag_value(child)?,
             "content-type" => {
                 rule.content_type = Some(match string_arg(child)?.as_str() {
                     "game" => RuleContentType::Game,

@@ -118,6 +118,35 @@ fn always_on_top_may_come_with_a_placement() {
     assert!(rule.places_window());
 }
 
+// ---- sticky ---------------------------------------------------------------------------------
+
+#[test]
+fn sticky_is_a_flag_that_does_not_use_up_the_rule_a_window_gets() {
+    let rule = first_rule("window-rule { match app-id=\"a\"; sticky; }");
+    assert!(rule.sticky);
+    assert!(rule.has_actions());
+    assert!(rule.only_tags());
+    let off = first_rule("window-rule { match app-id=\"a\"; sticky #false; }");
+    assert!(!off.sticky);
+    assert!(Config::parse("window-rule { match app-id=\"a\"; sticky 3; }").is_err());
+    let config = Config::parse(
+        "window-rule { match app-id=\"a\"; sticky; }\n\
+         window-rule { match app-id=\"a\"; open-centered; }",
+    )
+    .unwrap();
+    let a = WindowFacts {
+        app_id: "a",
+        ..WindowFacts::default()
+    };
+    assert!(config.sticky_for(&a));
+    assert!(config.window_rule_for(&a).is_some_and(|rule| rule.centered));
+    let b = WindowFacts {
+        app_id: "b",
+        ..WindowFacts::default()
+    };
+    assert!(!config.sticky_for(&b));
+}
+
 // ---- content-type ---------------------------------------------------------------------------
 
 #[test]

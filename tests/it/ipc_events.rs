@@ -21,6 +21,7 @@ fn window(id: u64) -> WindowInfo {
         focused: false,
         urgent: false,
         always_on_top: false,
+        sticky: false,
         output: Some("DP-1".to_string()),
         workspace: 1,
         pid: Some(4242),
@@ -816,7 +817,7 @@ fn a_window_is_written_like_the_documented_example() {
     assert_eq!(
         v.to_json(),
         "{\"id\":1,\"app_id\":\"foot\",\"title\":\"~\",\"x\":40,\"y\":40,\"width\":800,\
-             \"height\":600,\"maximized\":false,\"minimized\":false,\"fullscreen\":false,\"focused\":true,\"urgent\":false,\"always_on_top\":false,\
+             \"height\":600,\"maximized\":false,\"minimized\":false,\"fullscreen\":false,\"focused\":true,\"urgent\":false,\"always_on_top\":false,\"sticky\":false,\
              \"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\"container\":null,\"tag\":null,\"icon\":null}"
     );
     v.app_id = None;
@@ -938,7 +939,7 @@ fn events_are_written_as_one_json_line_each() {
             Event::WindowOpened(window(5)),
             "{\"event\":\"window-opened\",\"id\":5,\"app_id\":\"foot\",\"title\":\"~\",\
                  \"x\":40,\"y\":40,\"width\":800,\"height\":600,\"maximized\":false,\
-                 \"minimized\":false,\"fullscreen\":false,\"focused\":false,\"urgent\":false,\"always_on_top\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\
+                 \"minimized\":false,\"fullscreen\":false,\"focused\":false,\"urgent\":false,\"always_on_top\":false,\"sticky\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\
                  \"container\":null,\"tag\":null,\"icon\":null}",
         ),
         (
@@ -1363,4 +1364,24 @@ fn always_on_top_is_an_event_and_a_member_of_the_window() {
         .to_json()
         .contains("\"always_on_top\":true"));
     assert!(old.windows[0].to_json().contains("\"always_on_top\":false"));
+}
+
+#[test]
+fn sticky_is_an_event_and_a_member_of_the_window() {
+    let old = Snapshot {
+        windows: vec![window(3)],
+        ..Snapshot::default()
+    };
+    let mut stuck = old.clone();
+    stuck.windows[0].sticky = true;
+    assert_eq!(diff(&old, &stuck), vec![Event::Sticky { id: 3, on: true }]);
+    assert_eq!(diff(&stuck, &old), vec![Event::Sticky { id: 3, on: false }]);
+    let event = Event::Sticky { id: 3, on: true };
+    assert_eq!(
+        event.to_json(),
+        "{\"event\":\"sticky\",\"id\":3,\"on\":true}"
+    );
+    assert_eq!(event.group(), Group::Windows);
+    assert!(stuck.windows[0].to_json().contains("\"sticky\":true"));
+    assert!(old.windows[0].to_json().contains("\"sticky\":false"));
 }
