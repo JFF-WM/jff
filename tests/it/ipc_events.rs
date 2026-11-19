@@ -20,6 +20,7 @@ fn window(id: u64) -> WindowInfo {
         fullscreen: false,
         focused: false,
         urgent: false,
+        always_on_top: false,
         output: Some("DP-1".to_string()),
         workspace: 1,
         pid: Some(4242),
@@ -815,7 +816,7 @@ fn a_window_is_written_like_the_documented_example() {
     assert_eq!(
         v.to_json(),
         "{\"id\":1,\"app_id\":\"foot\",\"title\":\"~\",\"x\":40,\"y\":40,\"width\":800,\
-             \"height\":600,\"maximized\":false,\"minimized\":false,\"fullscreen\":false,\"focused\":true,\"urgent\":false,\
+             \"height\":600,\"maximized\":false,\"minimized\":false,\"fullscreen\":false,\"focused\":true,\"urgent\":false,\"always_on_top\":false,\
              \"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\"container\":null,\"tag\":null,\"icon\":null}"
     );
     v.app_id = None;
@@ -937,7 +938,7 @@ fn events_are_written_as_one_json_line_each() {
             Event::WindowOpened(window(5)),
             "{\"event\":\"window-opened\",\"id\":5,\"app_id\":\"foot\",\"title\":\"~\",\
                  \"x\":40,\"y\":40,\"width\":800,\"height\":600,\"maximized\":false,\
-                 \"minimized\":false,\"fullscreen\":false,\"focused\":false,\"urgent\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\
+                 \"minimized\":false,\"fullscreen\":false,\"focused\":false,\"urgent\":false,\"always_on_top\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\
                  \"container\":null,\"tag\":null,\"icon\":null}",
         ),
         (
@@ -1334,4 +1335,32 @@ fn hdr_is_in_the_outputs_snapshot() {
     snap.outputs[0].hdr = hdr_on();
     let json = snap.to_json(GroupSet::from_groups(&[Group::Outputs]));
     assert!(json.contains("\"hdr\":{\"requested\":true,\"active\":true,\"reason\":null"));
+}
+
+#[test]
+fn always_on_top_is_an_event_and_a_member_of_the_window() {
+    let old = Snapshot {
+        windows: vec![window(3)],
+        ..Snapshot::default()
+    };
+    let mut pinned = old.clone();
+    pinned.windows[0].always_on_top = true;
+    assert_eq!(
+        diff(&old, &pinned),
+        vec![Event::AlwaysOnTop { id: 3, on: true }]
+    );
+    assert_eq!(
+        diff(&pinned, &old),
+        vec![Event::AlwaysOnTop { id: 3, on: false }]
+    );
+    let event = Event::AlwaysOnTop { id: 3, on: true };
+    assert_eq!(
+        event.to_json(),
+        "{\"event\":\"always-on-top\",\"id\":3,\"on\":true}"
+    );
+    assert_eq!(event.group(), Group::Windows);
+    assert!(pinned.windows[0]
+        .to_json()
+        .contains("\"always_on_top\":true"));
+    assert!(old.windows[0].to_json().contains("\"always_on_top\":false"));
 }

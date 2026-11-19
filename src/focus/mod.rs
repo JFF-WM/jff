@@ -116,6 +116,15 @@ impl JffState {
         self.update_keyboard_focus();
     }
 
+    /// Keep a window above the others (`on`) or let it stack like any other again, true when that changed anything.
+    pub fn set_always_on_top(&mut self, window: &Window, on: bool) -> bool {
+        let changed = self.desk.set_above_where(|w| w == window, on);
+        if changed {
+            tracing::info!("always on top {on} for a window");
+        }
+        changed
+    }
+
     /// Hand the keyboard to the topmost window of the shown workspace, or to nobody when there
     /// is none.
     pub fn refocus_topmost(&mut self) {

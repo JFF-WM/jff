@@ -513,3 +513,76 @@ fn windows_are_opaque_until_given_an_opacity() {
     d.set_opacity_where(|w| *w == "a", 3.0);
     assert_eq!(d.find_by(|w| *w == "a").map(|e| e.opacity), Some(1.0));
 }
+
+#[test]
+fn an_always_on_top_window_stays_above_new_and_raised_windows() {
+    let mut d = Desk::default();
+    d.add("a");
+    d.add("b");
+    d.add("c");
+    assert!(d.set_above_where(|w| *w == "a", true));
+    assert_eq!(order(&d), ["a", "c", "b"]);
+    d.add("d");
+    assert_eq!(order(&d), ["a", "d", "c", "b"]);
+    d.raise_where(|w| *w == "b");
+    assert_eq!(order(&d), ["a", "b", "d", "c"]);
+    assert!(d.is_above(|w| *w == "a"));
+    assert!(!d.is_above(|w| *w == "b"));
+}
+
+#[test]
+fn turning_always_on_top_off_keeps_the_window_where_it_is() {
+    let mut d = Desk::default();
+    d.add("a");
+    d.add("b");
+    d.add("c");
+    d.set_above_where(|w| *w == "a", true);
+    d.add("d");
+    assert!(d.set_above_where(|w| *w == "a", false));
+    assert_eq!(order(&d), ["a", "d", "c", "b"]);
+    assert!(!d.is_above(|w| *w == "a"));
+}
+
+#[test]
+fn raising_among_always_on_top_windows_only_reorders_them() {
+    let mut d = Desk::default();
+    for w in ["a", "b", "c", "d"] {
+        d.add(w);
+    }
+    d.set_above_where(|w| *w == "b", true);
+    d.set_above_where(|w| *w == "a", true);
+    // The one made so last is the highest of them.
+    assert_eq!(order(&d), ["a", "b", "d", "c"]);
+    d.raise_where(|w| *w == "b");
+    assert_eq!(order(&d), ["b", "a", "d", "c"]);
+    d.raise_where(|w| *w == "c");
+    assert_eq!(order(&d), ["b", "a", "c", "d"]);
+}
+
+#[test]
+fn setting_always_on_top_says_whether_anything_changed() {
+    let mut d = Desk::default();
+    d.add("a");
+    assert!(!d.set_above_where(|w| *w == "a", false));
+    assert!(d.set_above_where(|w| *w == "a", true));
+    assert!(!d.set_above_where(|w| *w == "a", true));
+    assert!(!d.set_above_where(|w| *w == "zzz", true));
+    assert!(!d.is_above(|w| *w == "zzz"));
+}
+
+#[test]
+fn an_always_on_top_window_stays_on_top_when_another_moves_workspace() {
+    let mut d = Desk::default();
+    d.add("a");
+    d.add("b");
+    d.add("c");
+    d.set_above_where(|w| *w == "a", true);
+    assert!(d.move_to_workspace(|w| *w == "c", 1));
+    let all: Vec<_> = d.all_top_down().map(|e| e.window).collect();
+    assert_eq!(all, ["a", "c", "b"]);
+    // It keeps its flag when it moves itself.
+    assert!(d.move_to_workspace(|w| *w == "a", 2));
+    assert!(d.is_above(|w| *w == "a"));
+    let all: Vec<_> = d.all_top_down().map(|e| e.window).collect();
+    assert_eq!(all, ["a", "c", "b"]);
+}

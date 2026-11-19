@@ -2049,3 +2049,32 @@ fn a_container_goes_along_when_monitors_trade() {
     assert_eq!(d.home_of(|w| *w == "x"), Some(("DP-1".to_owned(), 0)));
     assert_eq!(leaves(&d, c), ["a", "b"]);
 }
+
+#[test]
+fn a_container_goes_above_as_a_whole() {
+    let (mut d, _) = container_of(&["a", "b", "c", "x"], &["a", "b"], Axis::Horizontal);
+    assert!(d.set_above_where(|w| *w == "a", true));
+    assert!(d.is_above(|w| *w == "a"));
+    assert!(d.is_above(|w| *w == "b"));
+    assert!(!d.is_above(|w| *w == "c"));
+    // Both members are on top of the stack, next to each other, and stay there when others rise.
+    d.raise_where(|w| *w == "c");
+    d.raise_where(|w| *w == "x");
+    let top = top_down(&d);
+    assert_eq!(top.len(), 4);
+    let mut members = [top[0], top[1]];
+    members.sort_unstable();
+    assert_eq!(members, ["a", "b"]);
+    assert_eq!(&top[2..], ["x", "c"]);
+}
+
+#[test]
+fn turning_always_on_top_off_for_a_member_does_it_for_the_container() {
+    let (mut d, _) = container_of(&["a", "b", "c"], &["a", "b"], Axis::Horizontal);
+    d.set_above_where(|w| *w == "a", true);
+    assert!(d.set_above_where(|w| *w == "b", false));
+    assert!(!d.is_above(|w| *w == "a"));
+    assert!(!d.is_above(|w| *w == "b"));
+    d.raise_where(|w| *w == "c");
+    assert_eq!(top_down(&d)[0], "c");
+}

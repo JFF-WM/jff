@@ -72,6 +72,52 @@ fn centered_may_come_with_a_size_a_monitor_and_an_opacity() {
     assert_eq!(rule.opacity, Some(900));
 }
 
+// ---- always-on-top --------------------------------------------------------------------------
+
+#[test]
+fn always_on_top_is_a_flag() {
+    let rule = first_rule("window-rule { match app-id=\"a\"; always-on-top; }");
+    assert!(rule.always_on_top);
+    let off = first_rule("window-rule { match app-id=\"a\"; always-on-top #false; }");
+    assert!(!off.always_on_top);
+    let unset = first_rule("window-rule { match app-id=\"a\"; opacity 0.9; }");
+    assert!(!unset.always_on_top);
+    assert!(Config::parse("window-rule { match app-id=\"a\"; always-on-top 3; }").is_err());
+}
+
+#[test]
+fn a_rule_with_only_always_on_top_does_not_use_up_the_rule_a_window_gets() {
+    let rule = first_rule("window-rule { match app-id=\"a\"; always-on-top; }");
+    assert!(rule.has_actions());
+    assert!(rule.only_tags());
+    assert!(!rule.places_window());
+    let config = Config::parse(
+        "window-rule { match app-id=\"a\"; always-on-top; }\n\
+         window-rule { match app-id=\"a\"; open-centered; }",
+    )
+    .unwrap();
+    let a = WindowFacts {
+        app_id: "a",
+        ..WindowFacts::default()
+    };
+    assert!(config.always_on_top_for(&a));
+    assert!(config.window_rule_for(&a).is_some_and(|rule| rule.centered));
+    let b = WindowFacts {
+        app_id: "b",
+        ..WindowFacts::default()
+    };
+    assert!(!config.always_on_top_for(&b));
+}
+
+#[test]
+fn always_on_top_may_come_with_a_placement() {
+    let rule =
+        first_rule("window-rule { match app-id=\"a\"; open-position 10 20; always-on-top; }");
+    assert!(rule.always_on_top);
+    assert_eq!(rule.position, Some((10, 20)));
+    assert!(rule.places_window());
+}
+
 // ---- content-type ---------------------------------------------------------------------------
 
 #[test]

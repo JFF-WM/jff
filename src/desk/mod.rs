@@ -99,6 +99,8 @@ pub struct Entry<W> {
     pub scratch: bool,
     /// How opaque the window is drawn, 0 to 1 (a `window-rule` sets it).
     pub opacity: f32,
+    /// Always on top, see [`Desk::set_above_where`] (read it with [`Desk::is_above`], a container goes as a whole).
+    pub above: bool,
 }
 
 pub struct Desk<W> {
@@ -176,7 +178,9 @@ impl<W> Desk<W> {
             hidden: None,
             scratch: false,
             opacity: 1.0,
+            above: false,
         });
+        self.settle();
         pos
     }
 
@@ -266,6 +270,7 @@ impl<W> Desk<W> {
         let mut entry = self.entries.remove(i);
         entry.hidden = None;
         self.entries.push(entry);
+        self.settle();
         true
     }
 
@@ -500,6 +505,7 @@ impl<W> Desk<W> {
         let mut entry = self.entries.remove(i);
         entry.workspace = workspace;
         self.entries.push(entry);
+        self.settle();
         true
     }
 
@@ -726,7 +732,73 @@ impl<W> Desk<W> {
             }
             let entry = self.entries.remove(i);
             self.entries.push(entry);
+            self.settle();
         }
+    }
+
+    /// Whether the window is always on top, which a member of a container is when any member of it is.
+    pub fn is_above(&self, pred: impl Fn(&W) -> bool) -> bool {
+        self.find_by(pred).is_some_and(|e| self.above_of(e))
+    }
+
+    /// Make the first window matching `pred` always on top (`on`) or an ordinary one again, its whole container with it, false when there is no such window or nothing changed.
+    pub fn set_above_where(&mut self, pred: impl Fn(&W) -> bool, on: bool) -> bool {
+        let Some(i) = self.entries.iter().position(|e| pred(&e.window)) else {
+            return false;
+        };
+        if self.entries.get(i).is_some_and(|e| self.above_of(e) == on) {
+            return false;
+        }
+        match self.entries.get(i).and_then(|e| e.container) {
+            Some(container) => {
+                for entry in &mut self.entries {
+                    if entry.container == Some(container) {
+                        entry.above = on;
+                    }
+                }
+                if on {
+                    self.gather_members(container, true);
+                } else {
+                    self.settle();
+                }
+            }
+            None => {
+                if let Some(entry) = self.entries.get_mut(i) {
+                    entry.above = on;
+                }
+                if on {
+                    let entry = self.entries.remove(i);
+                    self.entries.push(entry);
+                }
+                self.settle();
+            }
+        }
+        true
+    }
+
+    /// Whether `entry` counts as always on top: it is, or a member of its container is.
+    fn above_of(&self, entry: &Entry<W>) -> bool {
+        entry.above
+            || entry.container.is_some_and(|id| {
+                self.entries
+                    .iter()
+                    .any(|e| e.container == Some(id) && e.above)
+            })
+    }
+
+    /// Keep the windows that are always on top above the rest, each group in its own order, after anything that puts a window on top of the stack.
+    fn settle(&mut self) {
+        if !self.entries.iter().any(|e| e.above) {
+            return;
+        }
+        let above: Vec<bool> = self.entries.iter().map(|e| self.above_of(e)).collect();
+        let mut keyed: Vec<(bool, Entry<W>)> = above
+            .into_iter()
+            .zip(std::mem::take(&mut self.entries))
+            .collect();
+        // The sort is stable, so the order inside both groups stays.
+        keyed.sort_by_key(|(above, _)| *above);
+        self.entries = keyed.into_iter().map(|(_, entry)| entry).collect();
     }
 
     pub fn len(&self) -> usize {
@@ -1241,6 +1313,7 @@ impl<W> Desk<W> {
         let window = entry.id;
         self.entries.push(entry);
         self.drop_leaf(container, window);
+        self.settle();
         true
     }
 
@@ -1510,6 +1583,7 @@ impl<W> Desk<W> {
         others.extend(members);
         others.extend(above);
         self.entries = others;
+        self.settle();
     }
 
     /// `window` is no longer in the tree of `container`: take it out, and drop the container

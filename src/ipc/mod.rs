@@ -389,6 +389,14 @@ pub enum Maximize {
     Toggle,
 }
 
+/// What `always-on-top`, `not-always-on-top` and `toggle-always-on-top` ask for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnTop {
+    On,
+    Off,
+    Toggle,
+}
+
 /// The buttons `click` can press.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClickButton {
@@ -421,6 +429,8 @@ pub enum Request {
     Close(Option<u64>),
     Maximize(Option<u64>, Maximize),
     Fullscreen(Option<u64>, bool),
+    /// `always-on-top`, `not-always-on-top` and `toggle-always-on-top`: keep a window above the others, or not.
+    AlwaysOnTop(Option<u64>, OnTop),
     Focus(u64),
     Workspaces,
     /// `containers`: the tiling containers on the shown workspace.
@@ -480,7 +490,7 @@ pub enum Request {
 
 pub const COMMANDS: &str =
     "windows, status, outputs, focused, window-info, close, maximize, unmaximize, toggle-maximize, \
-     fullscreen, unfullscreen, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
+     fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
      screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, hotkeys, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
@@ -748,6 +758,9 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         "toggle-maximize" => Ok(Request::Maximize(id, Maximize::Toggle)),
         "fullscreen" => Ok(Request::Fullscreen(id, true)),
         "unfullscreen" => Ok(Request::Fullscreen(id, false)),
+        "always-on-top" => Ok(Request::AlwaysOnTop(id, OnTop::On)),
+        "not-always-on-top" => Ok(Request::AlwaysOnTop(id, OnTop::Off)),
+        "toggle-always-on-top" => Ok(Request::AlwaysOnTop(id, OnTop::Toggle)),
         "focus" => id
             .map(Request::Focus)
             .ok_or_else(|| "focus needs a window id".to_string()),
@@ -938,6 +951,22 @@ impl JffState {
                 });
                 if want != now {
                     self.set_filled(&toplevel, xdg_toplevel::State::Fullscreen, want);
+                }
+                Ok(format!(
+                    "{{\"ok\":true,\"window\":{}}}\n",
+                    self.window_json(&window)
+                ))
+            }
+            Request::AlwaysOnTop(id, how) => {
+                let window = self.target_window(id)?;
+                let now = self.desk.is_above(|w| *w == window);
+                let want = match how {
+                    OnTop::On => true,
+                    OnTop::Off => false,
+                    OnTop::Toggle => !now,
+                };
+                if want != now {
+                    self.set_always_on_top(&window, want);
                 }
                 Ok(format!(
                     "{{\"ok\":true,\"window\":{}}}\n",
@@ -1270,6 +1299,7 @@ impl JffState {
             fullscreen,
             focused,
             urgent: self.is_urgent(window),
+            always_on_top: self.desk.is_above(|w| w == window),
             output,
             workspace,
             pid: self.window_pid(window),
@@ -1964,6 +1994,9 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("toggle-maximize [ID]", "toggle maximize"),
             ("fullscreen [ID]", "make a window fullscreen"),
             ("unfullscreen [ID]", "leave fullscreen"),
+            ("always-on-top [ID]", "keep a window above the others"),
+            ("not-always-on-top [ID]", "stop keeping a window above"),
+            ("toggle-always-on-top [ID]", "toggle always on top"),
             ("tag [NAME] [ID]", "tag a window, or show its tag"),
             ("untag [ID]", "remove the tag of a window"),
         ],

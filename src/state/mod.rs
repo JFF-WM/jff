@@ -1869,7 +1869,7 @@ impl JffState {
     }
 
     /// Draw the window of `root` the way the `window-rule`s say, if they do: the opacity, how
-    /// its colors are read (`sdr`, `sdr-white`), and what it shows (`content-type`). Done once,
+    /// its colors are read (`sdr`, `sdr-white`), what it shows (`content-type`), `always-on-top`. Done once,
     /// when the window first shows: a reload does not change windows that are open.
     fn apply_rule_look(&mut self, root: &WlSurface, dialog: bool, restored: bool) {
         if self.config.window_rules().is_empty() {
@@ -1902,6 +1902,10 @@ impl JffState {
             tracing::info!("window rule opacity {opacity} for app-id={app_id:?}");
             self.desk
                 .set_opacity_where(|w| is_window_for(w, root), opacity);
+        }
+        if self.config.always_on_top_for(&facts) {
+            tracing::info!("window rule always-on-top for app-id={app_id:?}");
+            self.desk.set_above_where(|w| is_window_for(w, root), true);
         }
         if let Some(sdr) = self.config.sdr_for(&facts) {
             tracing::info!("window rule sdr {sdr:?} for app-id={app_id:?}");

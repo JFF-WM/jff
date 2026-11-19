@@ -418,6 +418,10 @@ cursor {
 //                          do the same for the monitor's cinema and photo modes). "none" ignores
 //                          what the client says. Set when the window opens. A rule with only a
 //                          `content-type` does not use up the one rule a window gets
+//   always-on-top          the window stays above the ones that are not, even above a fullscreen
+//                          one (a picture-in-picture player). Set when the window opens, the
+//                          `always-on-top` command of `jff msg` changes it later. A rule with only an
+//                          `always-on-top` does not use up the one rule a window gets
 //
 // Change DP-1 and HDMI-A-2 below to your monitor names.
 // ---------------------------------------------------------------------------------------------
@@ -531,6 +535,9 @@ window-rule { match app-id="kitty"; opacity 0.9; }
 // rule a window gets for its placement.
 // window-rule { match app-id="mpv"; sdr-white 350; }
 // window-rule { match app-id="steam_app_1091500"; sdr; sdr-white 160; }
+
+// Keep a window above the others, e.g. a picture-in-picture player.
+// window-rule { match title="Picture-in-Picture"; always-on-top; }
 
 // ---------------------------------------------------------------------------------------------
 // Container rules (need `tiling-containers`). Any number of blocks.
