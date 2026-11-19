@@ -341,6 +341,18 @@ pub fn color_representation_in(states: &SurfaceData) -> ColorRepresentation {
     }
 }
 
+/// Set the first time any client asks for a color representation object. A surface can only
+/// have a [`ColorRepresentationState`] after that, so until then every tree walk that looks for
+/// declared matrices or alpha modes (`render/effects/yuv.rs`, `pixel_alpha.rs`) finds nothing
+/// and may be skipped. Never cleared: a client that went away leaves nothing to look for, but
+/// the walk it costs afterwards is the same one that runs today.
+static EVER_USED: AtomicBool = AtomicBool::new(false);
+
+/// Whether any client has bound a color representation object on any surface yet.
+pub fn ever_used() -> bool {
+    EVER_USED.load(Ordering::Relaxed)
+}
+
 /// Whether a surface has its extension object already, kept in its data map.
 #[derive(Default)]
 struct HasExtension(AtomicBool);
@@ -456,6 +468,7 @@ impl Dispatch<WpColorRepresentationManagerV1, ()> for JffState {
     ) {
         match request {
             wp_color_representation_manager_v1::Request::GetSurface { id, surface } => {
+                EVER_USED.store(true, Ordering::Relaxed);
                 let taken = with_states(&surface, |states| {
                     states
                         .data_map

@@ -8,7 +8,7 @@ use smithay::wayland::compositor::{with_surface_tree_downward, TraversalAction};
 
 use crate::primitives::yuv::{Correction, Encoding};
 use crate::protocol::color_representation::{
-    color_representation_in, Coefficients, Range, DRIVER_COEFFICIENTS,
+    color_representation_in, ever_used, AlphaMode, Coefficients, Range, DRIVER_COEFFICIENTS,
 };
 
 fn encoding((coefficients, range): (Coefficients, Range)) -> Option<Encoding> {
@@ -30,6 +30,9 @@ pub fn correction_for(declared: (Coefficients, Range)) -> Option<Correction> {
 /// use, with the correction each needs, by the id their render element has. Empty (and cheap)
 /// for a window that never used the protocol.
 pub fn corrections(root: &WlSurface) -> Vec<(Id, Correction)> {
+    if !ever_used() {
+        return Vec::new();
+    }
     let mut found = Vec::new();
     with_surface_tree_downward(
         root,
@@ -44,4 +47,31 @@ pub fn corrections(root: &WlSurface) -> Vec<(Id, Correction)> {
         |_, _, _| true,
     );
     found
+}
+
+/// What [`corrections`] and [`pixel_alpha::modes`](super::pixel_alpha::modes) find, from one
+/// walk of the tree of `root` instead of two. Each walk locks every surface's data and reads
+/// the same declared values, and a window needs both on every frame it is built.
+pub fn color_fixes(root: &WlSurface) -> (Vec<(Id, Correction)>, Vec<(Id, AlphaMode)>) {
+    if !ever_used() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut fixes = Vec::new();
+    let mut modes = Vec::new();
+    with_surface_tree_downward(
+        root,
+        (),
+        |_, _, _| TraversalAction::DoChildren(()),
+        |surface, states, _| {
+            let declared = color_representation_in(states);
+            if let Some(fix) = declared.coefficients.and_then(correction_for) {
+                fixes.push((Id::from_wayland_resource(surface), fix));
+            }
+            if declared.alpha_mode != AlphaMode::default() {
+                modes.push((Id::from_wayland_resource(surface), declared.alpha_mode));
+            }
+        },
+        |_, _, _| true,
+    );
+    (fixes, modes)
 }

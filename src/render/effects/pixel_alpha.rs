@@ -7,12 +7,15 @@ use smithay::backend::renderer::element::Id;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::compositor::{with_surface_tree_downward, TraversalAction};
 
-use crate::protocol::color_representation::{color_representation_in, AlphaMode};
+use crate::protocol::color_representation::{color_representation_in, ever_used, AlphaMode};
 
 /// The surfaces of the tree of `root` that declared an alpha mode the plain draw gets wrong,
 /// by the id their render element has. Empty (and cheap) for a window that never used the
 /// protocol.
 pub fn modes(root: &WlSurface) -> Vec<(Id, AlphaMode)> {
+    if !ever_used() {
+        return Vec::new();
+    }
     let mut found = Vec::new();
     with_surface_tree_downward(
         root,

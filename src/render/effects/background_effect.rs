@@ -409,8 +409,10 @@ pub fn window_elements(
 
     // Surfaces that declared a YUV matrix or range the driver doesn't use (a video in a
     // subsurface, say) are drawn through the shader too, even on a square or fullscreen window.
-    let fixes = toplevel
-        .map(|toplevel| yuv::corrections(toplevel.wl_surface()))
+    // Surfaces with straight or optical alpha are converted to premultiplied by the shader.
+    // Both come from one walk of the tree.
+    let (fixes, alpha_modes) = toplevel
+        .map(|toplevel| yuv::color_fixes(toplevel.wl_surface()))
         .unwrap_or_default();
     // Surfaces a client tagged with colors other than the monitor's are converted to them. A
     // fullscreen window may be left alone, to keep it eligible for direct scanout.
@@ -423,10 +425,6 @@ pub fn window_elements(
         }
         _ => Vec::new(),
     };
-    // Surfaces with straight or optical alpha are converted to premultiplied by the shader.
-    let alpha_modes = toplevel
-        .map(|toplevel| super::pixel_alpha::modes(toplevel.wl_surface()))
-        .unwrap_or_default();
     let fixing = !fixes.is_empty() || !conversions.is_empty() || !alpha_modes.is_empty();
 
     // Without blur, rounding and color fixes (or for an X11 window) there's nothing to
