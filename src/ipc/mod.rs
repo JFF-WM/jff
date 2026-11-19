@@ -54,6 +54,9 @@
 //! screenshot-area            freeze the monitor under the pointer and pick a rectangle to save
 //! screenshot-fullscreen      save a picture of the monitor under the pointer
 //! screenshot-window          save a picture of the window the user works in
+//! window-thumbnail ID [MAXW MAXH]  PNG of a window that fits MAXW x MAXH (default 320 x 200)
+//!                            at $XDG_RUNTIME_DIR/jff-wm/thumbs/thumb-ID.png, for panel previews,
+//!                            reply {"ok":true,"path":...,"width":...,"height":...}
 //! spawn-sh LINE              run LINE through `sh -c` (for panels and scripts)
 //! spawn PROG [ARG...]        run PROG (whitespace-split, no quoting)
 //! watch [GROUP...]           keep the connection open and stream events (see below)
@@ -474,6 +477,8 @@ pub enum Request {
     ScreenshotFullscreen,
     /// `screenshot-window`: the window the user works in.
     ScreenshotWindow,
+    /// `window-thumbnail ID [MAXW MAXH]`: a small picture of a window, in a file.
+    WindowThumbnail(u64, Option<(u32, u32)>),
     /// `move-cursor X Y`: put the pointer there (clamped to the monitors).
     MoveCursor(i32, i32),
     /// `toggle-overview`: open the overview, or close it when it is open.
@@ -501,7 +506,7 @@ pub enum Request {
 pub const COMMANDS: &str =
     "windows, status, outputs, focused, window-info, close, maximize, unmaximize, toggle-maximize, \
      fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, sticky, unsticky, toggle-sticky, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
-     screenshot-area, screenshot-fullscreen, screenshot-window, move-cursor, click, toggle-overview, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, hotkeys, watch";
+     screenshot-area, screenshot-fullscreen, screenshot-window, window-thumbnail, move-cursor, click, toggle-overview, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, hotkeys, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
     word.parse::<usize>()
@@ -640,6 +645,25 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         ("outputs", _) => return Err("outputs takes no arguments".to_string()),
         ("hotkeys", []) => return Ok(Request::Hotkeys),
         ("hotkeys", _) => return Err("hotkeys takes no arguments".to_string()),
+        ("window-thumbnail", [id]) => {
+            let id = id
+                .parse::<u64>()
+                .map_err(|_| format!("{id:?} is not a window id"))?;
+            return Ok(Request::WindowThumbnail(id, None));
+        }
+        ("window-thumbnail", [id, w, h]) => {
+            let id = id
+                .parse::<u64>()
+                .map_err(|_| format!("{id:?} is not a window id"))?;
+            let side = |word: &str| match word.parse::<u32>() {
+                Ok(n) if (1..=4096).contains(&n) => Ok(n),
+                _ => Err(format!("{word:?} is not a size from 1 to 4096 pixels")),
+            };
+            return Ok(Request::WindowThumbnail(id, Some((side(w)?, side(h)?))));
+        }
+        ("window-thumbnail", _) => {
+            return Err("window-thumbnail needs ID and optionally MAXW MAXH".to_string());
+        }
         ("screenshot-area", []) => return Ok(Request::ScreenshotArea),
         ("screenshot-fullscreen", []) => return Ok(Request::ScreenshotFullscreen),
         ("screenshot-window", []) => return Ok(Request::ScreenshotWindow),
@@ -1091,6 +1115,25 @@ impl JffState {
             Request::ScreenshotWindow => self
                 .screenshot_window()
                 .map(|()| "{\"ok\":true}\n".to_string()),
+            Request::WindowThumbnail(id, max) => {
+                let window = self.target_window(Some(id))?;
+                let (max_w, max_h) = max.unwrap_or((320, 200));
+                let picture = self.capture_window_thumbnail(&window, max_w, max_h)?;
+                let dir = crate::feature::screenshot::save::thumbnail_dir()
+                    .ok_or("there is no $XDG_RUNTIME_DIR to put the picture in")?;
+                let (width, height) = (picture.width, picture.height);
+                let path = crate::feature::screenshot::save::write_thumbnail(
+                    &dir,
+                    id,
+                    picture.rgba,
+                    width,
+                    height,
+                )?;
+                Ok(format!(
+                    "{{\"ok\":true,\"path\":{},\"width\":{width},\"height\":{height}}}\n",
+                    json_str(&path.to_string_lossy())
+                ))
+            }
             Request::ToggleOverview => {
                 // Same as the key binding. It can decline (a move or resize is going on), so the
                 // reply says what state it ended in.
@@ -2071,6 +2114,10 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("screenshot-area", "pick an area and capture it"),
             ("screenshot-fullscreen", "capture the screen"),
             ("screenshot-window", "capture the focused window"),
+            (
+                "window-thumbnail ID [MAXW MAXH]",
+                "small PNG of a window, for previews",
+            ),
         ],
     ),
     (

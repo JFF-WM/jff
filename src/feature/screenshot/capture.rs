@@ -1096,6 +1096,29 @@ impl JffState {
         self.capture_window_in(window, color)
     }
 
+    /// A picture of `window` that fits in `max_w` by `max_h` pixels (never enlarged), drawn at
+    /// that size. Pixels are premultiplied, like `capture_window`.
+    pub(crate) fn capture_window_thumbnail(
+        &mut self,
+        window: &Window,
+        max_w: u32,
+        max_h: u32,
+    ) -> Result<Captured, String> {
+        let (_, full) = self.window_capture_size(window)?;
+        let shrink = (f64::from(max_w) / f64::from(full.w))
+            .min(f64::from(max_h) / f64::from(full.h))
+            .min(1.0);
+        let color = crate::protocol::color_management::capture_color(&self.config);
+        let (elements, scale_factor, size) = self.window_surface_elements(window, color, shrink)?;
+        render_to_rgba(
+            self.backend.renderer(),
+            (size.w, size.h),
+            scale_factor,
+            &elements,
+            [0.0; 4],
+        )
+    }
+
     /// [`JffState::capture_window`] with the colors of the picture chosen: surfaces are converted
     /// to `color` (`None`: left as their clients drew them). The picture of a window that is
     /// closing is made in the colors of its monitor, so the fade can be drawn as it is.
@@ -1104,7 +1127,7 @@ impl JffState {
         window: &Window,
         color: Option<OutputColor>,
     ) -> Result<Captured, String> {
-        let (elements, scale_factor, size) = self.window_surface_elements(window, color)?;
+        let (elements, scale_factor, size) = self.window_surface_elements(window, color, 1.0)?;
         render_to_rgba(
             self.backend.renderer(),
             (size.w, size.h),
@@ -1116,14 +1139,28 @@ impl JffState {
 
     /// The surfaces of `window` and its menus, drawn with its geometry corner at (0, 0) and
     /// converted to `color`, with the scale and pixel size of the picture they make.
+    ///
+    /// `shrink` (1.0 for full size) draws the window smaller: the scale and the picture size are
+    /// both multiplied by it, so the picture is made at its final size, not scaled afterwards.
     fn window_surface_elements(
         &mut self,
         window: &Window,
         color: Option<OutputColor>,
+        shrink: f64,
     ) -> Result<(Vec<JffElement>, f64, Size<i32, Physical>), String> {
         self.refuse_when_locked()?;
         let geo = window.geometry();
         let (scale_factor, size) = self.window_capture_size(window)?;
+        let (scale_factor, size) = if shrink < 1.0 {
+            let small: Size<i32, Physical> = (
+                ((f64::from(size.w) * shrink).round() as i32).max(1),
+                ((f64::from(size.h) * shrink).round() as i32).max(1),
+            )
+                .into();
+            (scale_factor * shrink, small)
+        } else {
+            (scale_factor, size)
+        };
         let scale = Scale::from(scale_factor);
         // Draw the window with its geometry corner at (0, 0).
         let loc: Point<i32, Physical> =
@@ -1312,7 +1349,8 @@ impl JffState {
             // Nothing behind the window to show: its own surfaces on a transparent background.
             let color = crate::protocol::color_management::capture_color(&self.config);
             let color = Some(crate::protocol::color_management::hdr_color(color, space));
-            let (elements, scale_factor, size) = self.window_surface_elements(window, color)?;
+            let (elements, scale_factor, size) =
+                self.window_surface_elements(window, color, 1.0)?;
             let renderer = self.backend.renderer();
             let linear = hdr_frame::linearize(&mut *renderer, elements, space);
             let half_rgba = render_to_working(

@@ -83,6 +83,40 @@ pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Strin
     Ok(out)
 }
 
+/// Where window thumbnails go: `$XDG_RUNTIME_DIR/jff-wm/thumbs`. `None` without a runtime dir.
+pub fn thumbnail_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join("jff-wm").join("thumbs"))
+}
+
+/// Write the thumbnail of window `id` (premultiplied RGBA) as `thumb-<id>.png` in `dir`, made
+/// when missing for the user alone. The file is replaced in one step, so a reader never sees a
+/// half-written picture. Returns the file.
+pub fn write_thumbnail(
+    dir: &Path,
+    id: u64,
+    mut rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+) -> Result<PathBuf, String> {
+    use std::os::unix::fs::DirBuilderExt;
+    unpremultiply(&mut rgba);
+    let bytes = encode_png(&rgba, width, height)?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|err| format!("cannot make {}: {err}", dir.display()))?;
+    let path = dir.join(format!("thumb-{id}.png"));
+    let tmp = dir.join(format!("thumb-{id}.png.tmp"));
+    std::fs::write(&tmp, &bytes).map_err(|err| format!("cannot write {}: {err}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
+    Ok(path)
+}
+
 /// Write `bytes` to a new file in `dir` (created when missing), named after `stamp`. Taken names
 /// get a number, an existing screenshot is never overwritten.
 pub fn write_unique(dir: &Path, stamp: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {

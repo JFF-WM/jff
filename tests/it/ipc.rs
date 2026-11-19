@@ -19,6 +19,18 @@ use jff_wm::primitives::layout::MonitorTarget;
 fn requests_are_parsed() {
     assert_eq!(parse_request("windows"), Ok(Request::Windows));
     assert_eq!(parse_request("status"), Ok(Request::Status));
+    assert_eq!(
+        parse_request("window-thumbnail 5"),
+        Ok(Request::WindowThumbnail(5, None))
+    );
+    assert_eq!(
+        parse_request("window-thumbnail 5 640 400"),
+        Ok(Request::WindowThumbnail(5, Some((640, 400))))
+    );
+    assert!(parse_request("window-thumbnail").is_err());
+    assert!(parse_request("window-thumbnail 5 640").is_err());
+    assert!(parse_request("window-thumbnail 5 0 400").is_err());
+    assert!(parse_request("window-thumbnail x").is_err());
     assert_eq!(parse_request("outputs"), Ok(Request::Outputs));
     assert_eq!(parse_request("  focused \n"), Ok(Request::Focused));
     assert_eq!(parse_request("window-info"), Ok(Request::Info(None)));
