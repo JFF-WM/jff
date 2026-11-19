@@ -35,7 +35,7 @@ use smithay::wayland::shell::wlr_layer::{
     KeyboardInteractivity, Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData,
     WlrLayerShellHandler, WlrLayerShellState,
 };
-use smithay::wayland::shell::xdg::PopupSurface;
+use smithay::wayland::shell::xdg::{PopupSurface, ToplevelCachedState};
 
 use crate::config;
 use crate::desk::Desk;
@@ -55,11 +55,32 @@ pub const ABOVE_WINDOWS: [Layer; 2] = [Layer::Overlay, Layer::Top];
 /// notifications that really must show). The top layer is covered.
 pub const OVERLAY_ONLY: [Layer; 1] = [Layer::Overlay];
 
+/// Whether the client acknowledged the Fullscreen state and committed it. This is the state
+/// of the newest configure the client acked, not the pending one: a window that was only asked
+/// to go fullscreen (`with_pending_state`) has not shown it yet.
+fn fullscreen_committed(wl_surface: &WlSurface) -> bool {
+    with_states(wl_surface, |states| {
+        let mut cached = states.cached_state.get::<ToplevelCachedState>();
+        cached
+            .current()
+            .last_acked
+            .as_ref()
+            .is_some_and(|configure| {
+                configure
+                    .state
+                    .states
+                    .contains(xdg_toplevel::State::Fullscreen)
+            })
+    })
+}
+
 /// Whether the topmost window on the monitor at `rect` is fullscreen *and* its committed
 /// geometry is exactly the monitor. Only then does it hide everything behind it, so the render
 /// path can leave those elements out and let `DrmCompositor` put the window's buffer straight on
-/// the primary plane (direct scanout). A window that was asked to go fullscreen but still has
-/// its old size doesn't count: the windows behind it are still visible. Neither does a window
+/// the primary plane (direct scanout). Fullscreen is read from the acked and committed state,
+/// not the pending one, so a window that was asked to go fullscreen but has not acked yet does
+/// not count, whatever its size. A window that was asked and still has its old size doesn't
+/// count either: the windows behind it are still visible. Neither does a window
 /// its client faded (wp_alpha_modifier_v1) or a `window-rule` gave an `opacity`: what is behind
 /// shows through, so the compositor has to blend it.
 pub fn fullscreen_covers(desk: &Desk<Window>, rect: Rect) -> bool {
@@ -75,10 +96,10 @@ pub fn fullscreen_covers(desk: &Desk<Window>, rect: Rect) -> bool {
     }
     alpha::is_opaque(window_multiplier(&entry.window))
         && entry.opacity >= 1.0
-        && entry.window.toplevel().is_some_and(|toplevel| {
-            toplevel
-                .with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen))
-        })
+        && entry
+            .window
+            .toplevel()
+            .is_some_and(|toplevel| fullscreen_committed(toplevel.wl_surface()))
 }
 
 /// The surface of the fullscreen window covering the monitor at `rect` (see `fullscreen_covers`), `None` without one and for windows that are not xdg toplevels.
