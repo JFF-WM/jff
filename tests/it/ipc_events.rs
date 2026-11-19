@@ -16,6 +16,7 @@ fn window(id: u64) -> WindowInfo {
         width: 800,
         height: 600,
         maximized: false,
+        minimized: false,
         fullscreen: false,
         focused: false,
         urgent: false,
@@ -403,6 +404,19 @@ fn geometry_is_one_event_however_much_changed() {
 }
 
 #[test]
+fn minimize_and_restore() {
+    let old = snapshot(vec![window(3)]);
+    let mut new = old.clone();
+    new.windows[0].minimized = true;
+    assert_eq!(diff(&old, &new), vec![Event::Minimized { id: 3, on: true }]);
+    assert_eq!(
+        diff(&new, &old),
+        vec![Event::Minimized { id: 3, on: false }]
+    );
+    assert!(new.windows[0].to_json().contains("\"minimized\":true"));
+}
+
+#[test]
 fn maximize_and_fullscreen() {
     let old = snapshot(vec![window(3)]);
     let mut new = old.clone();
@@ -754,6 +768,7 @@ fn every_event_belongs_to_its_group() {
         ),
         (Event::Drag { id: 1, on: true }, Group::Windows),
         (Event::Maximized { id: 1, on: true }, Group::Windows),
+        (Event::Minimized { id: 1, on: true }, Group::Windows),
         (Event::Fullscreen { id: 1, on: true }, Group::Windows),
         (Event::Urgent { id: 1, on: true }, Group::Windows),
         (
@@ -800,7 +815,7 @@ fn a_window_is_written_like_the_documented_example() {
     assert_eq!(
         v.to_json(),
         "{\"id\":1,\"app_id\":\"foot\",\"title\":\"~\",\"x\":40,\"y\":40,\"width\":800,\
-             \"height\":600,\"maximized\":false,\"fullscreen\":false,\"focused\":true,\"urgent\":false,\
+             \"height\":600,\"maximized\":false,\"minimized\":false,\"fullscreen\":false,\"focused\":true,\"urgent\":false,\
              \"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\"container\":null,\"tag\":null,\"icon\":null}"
     );
     v.app_id = None;
@@ -922,7 +937,7 @@ fn events_are_written_as_one_json_line_each() {
             Event::WindowOpened(window(5)),
             "{\"event\":\"window-opened\",\"id\":5,\"app_id\":\"foot\",\"title\":\"~\",\
                  \"x\":40,\"y\":40,\"width\":800,\"height\":600,\"maximized\":false,\
-                 \"fullscreen\":false,\"focused\":false,\"urgent\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\
+                 \"minimized\":false,\"fullscreen\":false,\"focused\":false,\"urgent\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\
                  \"container\":null,\"tag\":null,\"icon\":null}",
         ),
         (
@@ -985,6 +1000,10 @@ fn events_are_written_as_one_json_line_each() {
         (
             Event::Maximized { id: 5, on: true },
             "{\"event\":\"maximized\",\"id\":5,\"on\":true}",
+        ),
+        (
+            Event::Minimized { id: 5, on: true },
+            "{\"event\":\"minimized\",\"id\":5,\"on\":true}",
         ),
         (
             Event::Fullscreen { id: 5, on: false },

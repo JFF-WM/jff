@@ -569,6 +569,12 @@ impl<W> Desk<W> {
         self.mode_of(pred) == WindowMode::Floating
     }
 
+    /// Whether the window is minimized: out of sight on purpose, and not in the scratchpad.
+    pub fn is_minimized(&self, pred: impl Fn(&W) -> bool) -> bool {
+        self.find_by(pred)
+            .is_some_and(|e| e.hidden.is_some() && !e.scratch)
+    }
+
     /// Whether the window is maximized: in that mode, or the maximized member of a container
     /// (see [`Desk::zoom_in_container`]).
     pub fn is_maximized(&self, pred: impl Fn(&W) -> bool) -> bool {

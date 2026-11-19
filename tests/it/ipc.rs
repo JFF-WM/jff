@@ -32,6 +32,11 @@ fn requests_are_parsed() {
         parse_request("unmaximize 2"),
         Ok(Request::Maximize(Some(2), Maximize::Off))
     );
+    assert_eq!(parse_request("minimize"), Ok(Request::Minimize(None, true)));
+    assert_eq!(
+        parse_request("unminimize 4"),
+        Ok(Request::Minimize(Some(4), false))
+    );
     assert_eq!(
         parse_request("fullscreen"),
         Ok(Request::Fullscreen(None, true))

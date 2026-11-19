@@ -1227,6 +1227,7 @@ impl JffState {
         let pos = self.desk.pos_of(|w| w == window).unwrap_or_default();
         let size = window.geometry().size;
         let maximized = self.desk.is_maximized(|w| w == window);
+        let minimized = self.desk.is_minimized(|w| w == window);
         let focused = focused.is_some_and(|w| w == window);
         let workspace = self.desk.workspace_of(|w| w == window).unwrap_or(0) + 1;
 
@@ -1265,6 +1266,7 @@ impl JffState {
             width: size.w,
             height: size.h,
             maximized,
+            minimized,
             fullscreen,
             focused,
             urgent: self.is_urgent(window),

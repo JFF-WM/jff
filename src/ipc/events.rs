@@ -92,6 +92,9 @@ pub struct WindowInfo {
     pub width: i32,
     pub height: i32,
     pub maximized: bool,
+    /// The window is minimized: out of sight until `unminimize`, a taskbar or an activation
+    /// request brings it back. A window in the scratchpad is not minimized.
+    pub minimized: bool,
     pub fullscreen: bool,
     /// Whether the window has the keyboard. `diff` ignores it, `Snapshot::focused` is what
     /// produces `focus` events.
@@ -205,7 +208,7 @@ impl WindowInfo {
     fn members(&self) -> String {
         format!(
             "\"id\":{},\"app_id\":{},\"title\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\
-             \"maximized\":{},\"fullscreen\":{},\"focused\":{},\"urgent\":{},\"output\":{},\"workspace\":{},\"pid\":{},\"container\":{},\"tag\":{},\"icon\":{}",
+             \"maximized\":{},\"minimized\":{},\"fullscreen\":{},\"focused\":{},\"urgent\":{},\"output\":{},\"workspace\":{},\"pid\":{},\"container\":{},\"tag\":{},\"icon\":{}",
             self.id,
             json_opt(self.app_id.as_deref()),
             json_opt(self.title.as_deref()),
@@ -214,6 +217,7 @@ impl WindowInfo {
             self.width,
             self.height,
             self.maximized,
+            self.minimized,
             self.fullscreen,
             self.focused,
             self.urgent,
@@ -675,6 +679,10 @@ pub enum Event {
         id: u64,
         on: bool,
     },
+    Minimized {
+        id: u64,
+        on: bool,
+    },
     Fullscreen {
         id: u64,
         on: bool,
@@ -740,6 +748,7 @@ impl Event {
             | Event::Geometry { .. }
             | Event::Drag { .. }
             | Event::Maximized { .. }
+            | Event::Minimized { .. }
             | Event::Fullscreen { .. }
             | Event::Urgent { .. }
             | Event::WindowWorkspace { .. }
@@ -800,6 +809,9 @@ impl Event {
             }
             Event::Maximized { id, on } => {
                 format!("{{\"event\":\"maximized\",\"id\":{id},\"on\":{on}}}")
+            }
+            Event::Minimized { id, on } => {
+                format!("{{\"event\":\"minimized\",\"id\":{id},\"on\":{on}}}")
             }
             Event::Fullscreen { id, on } => {
                 format!("{{\"event\":\"fullscreen\",\"id\":{id},\"on\":{on}}}")
@@ -956,6 +968,12 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
             events.push(Event::Maximized {
                 id,
                 on: after.maximized,
+            });
+        }
+        if before.minimized != after.minimized {
+            events.push(Event::Minimized {
+                id,
+                on: after.minimized,
             });
         }
         if before.fullscreen != after.fullscreen {
