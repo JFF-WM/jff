@@ -43,7 +43,7 @@ use crate::feature::outputs::output_rect;
 use crate::primitives::alpha;
 use crate::primitives::geom;
 use crate::primitives::layout::{self, Rect};
-use crate::render::effects::background_effect::{popup_elements, render_for_surface};
+use crate::render::effects::background_effect::{popup_elements, render_for_surface, visible_rect};
 use crate::render::effects::gamut;
 use crate::render::effects::surface_alpha::window_multiplier;
 use crate::render::elements::JffElement;
@@ -198,7 +198,7 @@ pub fn layer_elements(
     output: &Output,
     layers: &[Layer],
     blur: Option<config::Blur>,
-    ignore: &[String],
+    layers_filter: &config::BlurLayers,
     popup_radius: i32,
 ) -> Vec<JffElement> {
     let scale = Scale::from(crate::render::effects::frame_scale::get());
@@ -212,8 +212,10 @@ pub fn layer_elements(
             };
             // Layer geometry is relative to the monitor, like the frame being drawn.
             let loc: Point<i32, Physical> = geo.loc.to_physical_precise_round(scale);
-            // A layer on the ignore list (`blur { ignore-layer "…" }`) gets no blur at all.
-            let blur = blur.filter(|_| !ignore.iter().any(|n| n == surface.namespace()));
+            // A layer on the ignore list (`blur { ignore-layer "…" }`) gets no blur at all, one
+            // on the `only-layer` list gets it whole, whatever its layer.
+            let listed = layers_filter.listed(surface.namespace());
+            let blur = layers_filter.apply(blur, surface.namespace());
             // Popups in front, each with its blur right behind it.
             popup_elements(
                 &mut *renderer,
@@ -235,7 +237,7 @@ pub fn layer_elements(
                     Kind::Unspecified,
                 );
             gamut::wrap_surfaces(&mut *renderer, surface.wl_surface(), elements, &mut out);
-            push_layer_blur(&mut out, surface.wl_surface(), geo, *layer, blur);
+            push_layer_blur(&mut out, surface.wl_surface(), geo, *layer, blur, listed);
         }
     }
     out
@@ -248,14 +250,19 @@ fn push_layer_blur(
     geo: Rectangle<i32, Logical>,
     layer: Layer,
     blur: Option<config::Blur>,
+    listed: bool,
 ) {
     let Some(blur) = blur else {
         return;
     };
     // Without a region of its own, `all-layers` blurs panels and launchers whole. Not the
-    // wallpaper or `bottom` widgets: nothing worth blurring is behind them.
-    let on_blurred_layer = matches!(layer, Layer::Top | Layer::Overlay);
-    let fallback = (blur.all_layers && on_blurred_layer).then(|| Rectangle::from_size(geo.size));
+    // wallpaper or `bottom` widgets: nothing worth blurring is behind them, unless the
+    // namespace is on the `only-layer` list.
+    let on_blurred_layer = listed || matches!(layer, Layer::Top | Layer::Overlay);
+    // A panel that spans the monitor but takes input only on its dock is blurred only where it
+    // takes input (its input region), not across its whole width.
+    let fallback = (blur.all_layers && on_blurred_layer)
+        .then(|| visible_rect(surface, Rectangle::from_size(geo.size)));
     render_for_surface(
         surface,
         geo.loc.to_f64(),
@@ -274,7 +281,7 @@ pub fn layer_body_elements(
     output: &Output,
     layers: &[Layer],
     blur: Option<config::Blur>,
-    ignore: &[String],
+    layers_filter: &config::BlurLayers,
 ) -> Vec<JffElement> {
     let scale = Scale::from(crate::render::effects::frame_scale::get());
     let map = layer_map_for_output(output);
@@ -284,7 +291,8 @@ pub fn layer_body_elements(
             let Some(geo) = map.layer_geometry(surface) else {
                 continue;
             };
-            let blur = blur.filter(|_| !ignore.iter().any(|n| n == surface.namespace()));
+            let listed = layers_filter.listed(surface.namespace());
+            let blur = layers_filter.apply(blur, surface.namespace());
             let loc: Point<i32, Physical> = geo.loc.to_physical_precise_round(scale);
             let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(
@@ -296,7 +304,7 @@ pub fn layer_body_elements(
                     Kind::Unspecified,
                 );
             gamut::wrap_surfaces(&mut *renderer, surface.wl_surface(), elements, &mut out);
-            push_layer_blur(&mut out, surface.wl_surface(), geo, *layer, blur);
+            push_layer_blur(&mut out, surface.wl_surface(), geo, *layer, blur, listed);
         }
     }
     out
@@ -310,7 +318,7 @@ pub fn layer_popup_elements(
     output: &Output,
     layers: &[Layer],
     blur: Option<config::Blur>,
-    ignore: &[String],
+    layers_filter: &config::BlurLayers,
     popup_radius: i32,
 ) -> Vec<JffElement> {
     let map = layer_map_for_output(output);
@@ -320,7 +328,7 @@ pub fn layer_popup_elements(
             let Some(geo) = map.layer_geometry(surface) else {
                 continue;
             };
-            let blur = blur.filter(|_| !ignore.iter().any(|n| n == surface.namespace()));
+            let blur = layers_filter.apply(blur, surface.namespace());
             popup_elements(
                 &mut *renderer,
                 surface.wl_surface(),

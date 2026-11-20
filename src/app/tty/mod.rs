@@ -2750,7 +2750,7 @@ impl JffState {
                 &lit.output,
                 above,
                 blur,
-                self.config.blur_ignore_layers(),
+                self.config.blur_layers(),
                 self.config.popup_radius(),
             ));
             // popups of layers below the windows draw above them, except over a fullscreen
@@ -2761,7 +2761,7 @@ impl JffState {
                     &lit.output,
                     &BELOW_WINDOWS,
                     blur,
-                    self.config.blur_ignore_layers(),
+                    self.config.blur_layers(),
                     self.config.popup_radius(),
                 ));
             }
@@ -2858,7 +2858,7 @@ impl JffState {
                     &lit.output,
                     &BELOW_WINDOWS,
                     blur,
-                    self.config.blur_ignore_layers(),
+                    self.config.blur_layers(),
                 ));
             }
         }

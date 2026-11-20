@@ -1,5 +1,7 @@
 //! Scroll events becoming workspace steps.
 
+use std::time::{Duration, Instant};
+
 use jff_wm::primitives::scroll_steps::ScrollSteps;
 
 #[test]
@@ -49,4 +51,33 @@ fn reset_arms_the_touchpad_again() {
     assert_eq!(s.touch(50.0, false), 1);
     s.reset();
     assert_eq!(s.touch(50.0, false), 1);
+}
+
+#[test]
+fn a_paced_wheel_gives_one_step_per_burst() {
+    let mut s = ScrollSteps::default();
+    let (t, slide) = (Instant::now(), Duration::from_millis(260));
+    assert_eq!(s.wheel_paced(360.0, t, slide), 1);
+    // more notches while it slides are dropped, not saved up
+    assert_eq!(
+        s.wheel_paced(120.0, t + Duration::from_millis(50), slide),
+        0
+    );
+    assert_eq!(
+        s.wheel_paced(120.0, t + Duration::from_millis(200), slide),
+        0
+    );
+    // after the slide the next notch is a step again, either way
+    assert_eq!(
+        s.wheel_paced(-120.0, t + Duration::from_millis(300), slide),
+        -1
+    );
+}
+
+#[test]
+fn a_paced_wheel_still_adds_up_fine_events() {
+    let mut s = ScrollSteps::default();
+    let (t, slide) = (Instant::now(), Duration::from_millis(260));
+    assert_eq!(s.wheel_paced(60.0, t, slide), 0);
+    assert_eq!(s.wheel_paced(60.0, t, slide), 1);
 }

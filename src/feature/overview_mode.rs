@@ -1385,6 +1385,9 @@ impl JffState {
             return;
         };
         let name = output.name();
+        // What is left of the slide still running: the next one starts from there, so the
+        // view never jumps back to the start of a slide.
+        let carried = self.overview.as_ref().map_or(0, Overview::pan_offset);
         let before = self.desk.current_on(&name);
         let last = self.workspace_count().max(1) - 1;
         let target = before.saturating_add_signed(steps as isize).min(last);
@@ -1405,7 +1408,10 @@ impl JffState {
             ov.opened = Instant::now()
                 .checked_sub(ov.animation)
                 .unwrap_or_else(Instant::now);
-            ov.pan = Some((Instant::now(), f64::from(steps.signum()) * distance));
+            ov.pan = Some((
+                Instant::now(),
+                f64::from(carried) + f64::from(steps.signum()) * distance,
+            ));
         }
     }
 
@@ -2069,9 +2075,12 @@ impl JffState {
             return true;
         }
         let steps = match source {
-            AxisSource::Wheel | AxisSource::WheelTilt => self
-                .overview_scroll
-                .wheel(v120.unwrap_or(amount * 120.0 / 15.0)),
+            // One workspace per burst of notches, and none while the slide still runs.
+            AxisSource::Wheel | AxisSource::WheelTilt => self.overview_scroll.wheel_paced(
+                v120.unwrap_or(amount * 120.0 / 15.0),
+                Instant::now(),
+                PAN_DURATION,
+            ),
             _ => self.overview_scroll.touch(amount, stop),
         };
         if steps == 0 {

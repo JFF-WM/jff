@@ -115,7 +115,10 @@ fn surface_view_geo(states: &SurfaceData) -> Option<Rectangle<i32, Logical>> {
 /// leaves that margin out of the input region, so when the input region is smaller than the
 /// geometry it is the better guess. A client with no input region (the whole surface) or one
 /// that covers the geometry keeps the geometry.
-fn visible_rect(surface: &WlSurface, geometry: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+pub fn visible_rect(
+    surface: &WlSurface,
+    geometry: Rectangle<i32, Logical>,
+) -> Rectangle<i32, Logical> {
     let input = with_states(surface, |states| {
         states
             .cached_state
