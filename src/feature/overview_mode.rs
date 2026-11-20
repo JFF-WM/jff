@@ -62,7 +62,8 @@ use smithay::wayland::shell::wlr_layer::Layer;
 use crate::config;
 use crate::desk::{ContainerId, WindowMode};
 use crate::feature::osd::{
-    draw_text, half_line, text_width, toplevel_names, Fonts, Picture, Pixel, SHADOW,
+    draw_text, half_line, over, sd_round_box, text_width, toplevel_names, Fonts, Picture, Pixel,
+    SHADOW,
 };
 use crate::feature::outputs::output_rect;
 use crate::feature::overview_search::{self as search_ui, Row};
@@ -629,6 +630,11 @@ fn badge_key(window: &Window) -> (String, u64) {
 const TITLE_BOTTOM_GAP: i32 = 6;
 const TITLE_ICON_GAP: i32 = 2;
 const TITLE_SIDE_GAP: i32 = 8;
+/// Space between the title's text and the edge of the pill behind it, and the pill's colour.
+const TITLE_PAD_X: i32 = 8;
+const TITLE_PAD_Y: i32 = 3;
+const TITLE_FILL: [f32; 3] = [0.110, 0.110, 0.137];
+const TITLE_FILL_ALPHA: f32 = 0.78;
 
 /// Push the app icon badge of thumbnail `index`: at the bottom centre of it, scaled with it. Call
 /// before the thumbnail's own elements, which come after what is in front of them.
@@ -3128,7 +3134,7 @@ impl JffState {
             return None;
         }
         let px = ((f64::from(side) * 0.22).round() as i32).clamp(11, 16);
-        let max_width = (thumb.size.0 - 2 * TITLE_SIDE_GAP).max(0) as f32;
+        let max_width = (thumb.size.0 - 2 * (TITLE_SIDE_GAP + TITLE_PAD_X)).max(0) as f32;
         let text = fit_text(fonts, &text, px as f32, max_width);
         if text.is_empty() {
             return None;
@@ -3320,29 +3326,46 @@ fn paint_text(fonts: &Fonts, text: &str, px: f32) -> Picture {
     }
 }
 
-/// `text` for a thumbnail's title, `px` tall: white with a dark shadow so it reads on any window.
+/// `text` for a thumbnail's title, `px` tall: white on a dark translucent pill so it reads on
+/// any window, light ones included.
 fn paint_title(fonts: &Fonts, text: &str, px: f32) -> Picture {
-    let width = text_width(&fonts.medium, text, px).ceil() as i32 + 6;
-    let height = (px * 1.4).ceil() as i32 + 2;
+    let width = text_width(&fonts.medium, text, px).ceil() as i32 + 2 * TITLE_PAD_X;
+    let height = (px * 1.4).ceil() as i32 + 2 * TITLE_PAD_Y;
     let mut canvas: Vec<Pixel> = vec![[0.0; 4]; (width * height) as usize];
-    let baseline = (height - 2) as f32 / 2.0 + half_line(&fonts.medium, px);
-    for (dx, dy, color) in [
-        (3.0, 1.0, [0.0; 3]),
-        (2.0, 1.5, [0.0; 3]),
-        (2.0, 0.0, [1.0; 3]),
-    ] {
-        draw_text(
-            &mut canvas,
-            width,
-            height,
-            &fonts.medium,
-            text,
-            px,
-            dx,
-            baseline + dy,
-            color,
-        );
+    let (half_w, half_h) = (width as f32 / 2.0, height as f32 / 2.0);
+    for y in 0..height {
+        for x in 0..width {
+            let d = sd_round_box(
+                x as f32 + 0.5,
+                y as f32 + 0.5,
+                half_w,
+                half_h,
+                half_w,
+                half_h,
+                half_h,
+            );
+            let cover = (0.5 - d).clamp(0.0, 1.0);
+            if cover > 0.0 {
+                over(
+                    &mut canvas[(y * width + x) as usize],
+                    TITLE_FILL,
+                    cover * TITLE_FILL_ALPHA,
+                );
+            }
+        }
     }
+    let baseline = half_h + half_line(&fonts.medium, px);
+    draw_text(
+        &mut canvas,
+        width,
+        height,
+        &fonts.medium,
+        text,
+        px,
+        TITLE_PAD_X as f32,
+        baseline,
+        [1.0; 3],
+    );
     let mut rgba = Vec::with_capacity(canvas.len() * 4);
     for pixel in &canvas {
         for channel in pixel {
