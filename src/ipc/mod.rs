@@ -14,6 +14,8 @@
 //! maximize [ID]              maximize a window
 //! unmaximize [ID]            put it back
 //! toggle-maximize [ID]       maximize, or put back when it already is
+//! minimize [ID]              put a window out of sight (the focused one without an ID)
+//! unminimize [ID]            bring a minimized window back (the one minimized last without an ID)
 //! fullscreen [ID]            make a window fullscreen
 //! unfullscreen [ID]          leave fullscreen
 //! focus ID                   raise a window and give it the keyboard (switches workspace if needed)
@@ -439,6 +441,8 @@ pub enum Request {
     Info(Option<u64>),
     Close(Option<u64>),
     Maximize(Option<u64>, Maximize),
+    /// `minimize` (true) and `unminimize` (false): put a window out of sight, or bring one back.
+    Minimize(Option<u64>, bool),
     Fullscreen(Option<u64>, bool),
     /// `always-on-top`, `not-always-on-top` and `toggle-always-on-top`: keep a window above the others, or not.
     AlwaysOnTop(Option<u64>, OnTop),
@@ -505,7 +509,7 @@ pub enum Request {
 
 pub const COMMANDS: &str =
     "windows, status, outputs, focused, window-info, close, maximize, unmaximize, toggle-maximize, \
-     fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, sticky, unsticky, toggle-sticky, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
+     minimize, unminimize, fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, sticky, unsticky, toggle-sticky, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
      screenshot-area, screenshot-fullscreen, screenshot-window, window-thumbnail, move-cursor, click, toggle-overview, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, hotkeys, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
@@ -790,6 +794,8 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         "maximize" => Ok(Request::Maximize(id, Maximize::On)),
         "unmaximize" => Ok(Request::Maximize(id, Maximize::Off)),
         "toggle-maximize" => Ok(Request::Maximize(id, Maximize::Toggle)),
+        "minimize" => Ok(Request::Minimize(id, true)),
+        "unminimize" => Ok(Request::Minimize(id, false)),
         "fullscreen" => Ok(Request::Fullscreen(id, true)),
         "unfullscreen" => Ok(Request::Fullscreen(id, false)),
         "always-on-top" => Ok(Request::AlwaysOnTop(id, OnTop::On)),
@@ -975,6 +981,35 @@ impl JffState {
                 Ok(format!(
                     "{{\"ok\":true,\"window\":{}}}\n",
                     self.window_json(&window)
+                ))
+            }
+            Request::Minimize(id, true) => {
+                let window = self.target_window(id)?;
+                self.minimize_window(&window);
+                Ok(format!(
+                    "{{\"ok\":true,\"window\":{}}}\n",
+                    self.window_json(&window)
+                ))
+            }
+            Request::Minimize(Some(id), false) => {
+                let window = self.target_window(Some(id))?;
+                self.unminimize_window(&window);
+                Ok(format!(
+                    "{{\"ok\":true,\"window\":{}}}\n",
+                    self.window_json(&window)
+                ))
+            }
+            // Without an ID: the window minimized last, as the `unminimize` bind does.
+            Request::Minimize(None, false) => {
+                let last = self
+                    .desk
+                    .newest_hidden(false)
+                    .map(|entry| entry.window.clone())
+                    .ok_or("there is no minimized window")?;
+                self.unminimize_window(&last);
+                Ok(format!(
+                    "{{\"ok\":true,\"window\":{}}}\n",
+                    self.window_json(&last)
                 ))
             }
             Request::Fullscreen(id, want) => {
@@ -2071,6 +2106,8 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("maximize [ID]", "maximize a window"),
             ("unmaximize [ID]", "restore a maximized window"),
             ("toggle-maximize [ID]", "toggle maximize"),
+            ("minimize [ID]", "put a window out of sight"),
+            ("unminimize [ID]", "bring a minimized window back"),
             ("fullscreen [ID]", "make a window fullscreen"),
             ("unfullscreen [ID]", "leave fullscreen"),
             ("always-on-top [ID]", "keep a window above the others"),
