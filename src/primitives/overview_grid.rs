@@ -386,6 +386,29 @@ pub const BADGE_MIN_THUMB: i32 = 72;
 pub const BADGE_MIN: i32 = 32;
 pub const BADGE_MAX: i32 = 80;
 
+/// The thumbnails smaller than this (their short side) get no close button.
+pub const CLOSE_MIN_THUMB: i32 = 72;
+/// Smallest and largest side of a close button.
+pub const CLOSE_MIN: i32 = 20;
+pub const CLOSE_MAX: i32 = 32;
+
+/// The square the close button covers on a thumbnail at `thumb`: in its top right corner, a
+/// little in from both edges. `None` when the thumbnail is too small to carry one.
+pub fn close_rect(thumb: Rect) -> Option<Rect> {
+    let short = thumb.2.min(thumb.3);
+    if short < CLOSE_MIN_THUMB {
+        return None;
+    }
+    let side = ((f64::from(short) * 0.14).round() as i32).clamp(CLOSE_MIN, CLOSE_MAX);
+    let inset = (side / 4).max(6);
+    Some((
+        thumb.0 + thumb.2 - side - inset,
+        thumb.1 + inset,
+        side,
+        side,
+    ))
+}
+
 /// The square an app icon badge covers on a thumbnail at `thumb`: centred along the bottom
 /// edge, a little above it. `None` when the thumbnail is too small to carry one.
 pub fn badge_rect(thumb: Rect) -> Option<Rect> {

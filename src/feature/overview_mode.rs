@@ -369,6 +369,10 @@ pub struct Overview {
     previous_focus: Option<Window>,
     /// Button pressed in the overview, not released yet.
     pressed: Option<u32>,
+    /// The left button went down on the close button, so its release closes the window.
+    press_on_close: bool,
+    /// The close button painted at rest and under the pointer, made when first needed.
+    close_buttons: Option<(MemoryRenderBuffer, MemoryRenderBuffer)>,
     /// (window, pointer pos) captured when the left button went down on a thumbnail. Moving far
     /// enough starts a drag.
     press_origin: Option<(Window, Point<f64, Logical>)>,
@@ -479,6 +483,18 @@ impl Overview {
         }
     }
 
+    /// Whether the selected thumbnail carries its close button now: not in the switcher, while
+    /// closing, dragging or sliding between workspaces, nor before it is fully open (the
+    /// thumbnails are still on their way), and not with an app of the list selected.
+    fn shows_close_button(&self) -> bool {
+        self.switcher.is_none()
+            && self.closing.is_none()
+            && self.drag.is_none()
+            && self.search.app_selected.is_none()
+            && self.pan_offset() == 0
+            && self.progress() > 0.99
+    }
+
     /// How long closing takes: shorter when the overview was not fully open yet.
     fn closing_total(&self) -> Duration {
         self.animation.mul_f64(self.closing_from.clamp(0.3, 1.0))
@@ -511,6 +527,9 @@ pub struct OverviewPlan {
     /// How long ago the overview opened while the ripples at the monitor's top-left corner are
     /// still going. `None` in the switcher, while closing, and once they are over.
     ripple: Option<Duration>,
+    /// The close button of the selected thumbnail: its index in `thumbs` and its picture, drawn
+    /// in `badge_alpha`. `None` when no thumbnail shows one.
+    close: Option<(usize, MemoryRenderBuffer)>,
     /// The app icon badge of each of `thumbs` (same order), `None` for an app that has no app id.
     badges: Vec<Option<MemoryRenderBuffer>>,
     /// Fades the badges with the open and close animation.
@@ -651,6 +670,46 @@ fn badge_elements(
             RescaleRenderElement::from_element(element, corner, zoom),
         )),
         Err(err) => tracing::warn!("error drawing an app icon in the overview: {err:?}"),
+    }
+}
+
+/// Push the close button of thumbnail `index` if it is the selected one: in the top right corner
+/// of it. Call before the thumbnail's own elements, like `badge_elements`.
+fn close_elements(
+    renderer: &mut GlesRenderer,
+    plan: &OverviewPlan,
+    index: usize,
+    origin: Point<i32, Logical>,
+    out: &mut Vec<JffElement>,
+) {
+    let (Some((n, buffer)), Some((_, thumb))) = (&plan.close, plan.thumbs.get(index)) else {
+        return;
+    };
+    if *n != index {
+        return;
+    }
+    let Some((x, y, side, _)) = overview::close_rect(thumb.rect()) else {
+        return;
+    };
+    // The picture has a shadow margin around the button, scaled by the same factor.
+    let margin = (f64::from(search_ui::CLOSE_MARGIN) * f64::from(side)
+        / f64::from(search_ui::CLOSE_BODY))
+    .round() as i32;
+    let corner = Point::<i32, Physical>::from((x - margin - origin.x, y - margin - origin.y));
+    let zoom = f64::from(side + 2 * margin) / f64::from(search_ui::CLOSE_PICTURE);
+    match MemoryRenderBufferRenderElement::from_buffer(
+        &mut *renderer,
+        corner.to_f64(),
+        buffer,
+        Some(plan.badge_alpha),
+        None,
+        None,
+        Kind::Unspecified,
+    ) {
+        Ok(element) => out.push(JffElement::ScaledMemory(
+            RescaleRenderElement::from_element(element, corner, zoom),
+        )),
+        Err(err) => tracing::warn!("error drawing a close button in the overview: {err:?}"),
     }
 }
 
@@ -824,6 +883,7 @@ pub fn overview_elements(
             wall_elements(renderer, plan, origin, blur, snapshot, &mut out);
         }
         let (window, thumb) = &plan.thumbs[i];
+        close_elements(renderer, plan, i, origin, &mut out);
         badge_elements(renderer, plan, i, origin, &mut out);
         thumb_elements(
             renderer,
@@ -1837,6 +1897,8 @@ impl JffState {
             selected,
             previous_focus: focused,
             pressed: None,
+            press_on_close: false,
+            close_buttons: None,
             press_origin: None,
             drag: None,
             layer_buttons: Vec::new(),
@@ -2090,6 +2152,16 @@ impl JffState {
         true
     }
 
+    /// The window whose close button is under `p`: the selected one, while it shows its button.
+    fn overview_close_hit(&self, p: Point<f64, Logical>) -> Option<Window> {
+        let ov = self.overview.as_ref().filter(|ov| ov.shows_close_button())?;
+        let selected = ov.selected.clone()?;
+        let slots = self.overview_slots();
+        let (_, thumb) = slots.iter().find(|(window, _)| *window == selected)?;
+        let rect = overview::close_rect(thumb.rect())?;
+        layout::contains(rect, (p.x, p.y)).then_some(selected)
+    }
+
     /// The window whose thumbnail is under `p`.
     fn overview_hit(&self, p: Point<f64, Logical>) -> Option<Window> {
         let slots = self.overview_slots();
@@ -2269,7 +2341,8 @@ impl JffState {
     /// left over for the window that gets focused: left selects, middle closes, right sends the
     /// window to the next workspace (the last wraps around to the first), any button on empty
     /// space (or on another monitor) cancels. Left-drag on a thumbnail drags it, dropped on
-    /// another monitor, the window moves there.
+    /// another monitor, the window moves there. The selected thumbnail has a close button in
+    /// its top right corner: left click on it closes the window.
     pub fn overview_button(&mut self, button: u32, state: ButtonState, time: InputTime) {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
@@ -2326,13 +2399,16 @@ impl JffState {
                     return;
                 }
                 let at = pointer.current_location();
-                let hit = if button == BTN_LEFT {
+                // Pressing the close button is no selection and starts no drag.
+                let on_close = button == BTN_LEFT && self.overview_close_hit(at).is_some();
+                let hit = if button == BTN_LEFT && !on_close {
                     self.overview_hit(at)
                 } else {
                     None
                 };
                 if let Some(ov) = self.overview.as_mut() {
                     ov.pressed = Some(button);
+                    ov.press_on_close = on_close;
                     // A press is a selection: motion may not have run since the pointer reached
                     // this thumbnail.
                     if let Some(window) = &hit {
@@ -2346,11 +2422,20 @@ impl JffState {
                 if self.overview_dragging() && button != BTN_LEFT {
                     return;
                 }
-                let armed = self.overview.as_mut().and_then(|ov| {
+                let (armed, on_close) = self.overview.as_mut().map_or((None, false), |ov| {
                     ov.press_origin = None;
-                    ov.pressed.take()
+                    (ov.pressed.take(), std::mem::take(&mut ov.press_on_close))
                 });
                 if armed != Some(button) {
+                    return;
+                }
+                // Pressed and released on the close button: close that window.
+                if button == BTN_LEFT && on_close {
+                    if let Some(window) = self.overview_close_hit(pointer.current_location()) {
+                        if let Some(toplevel) = window.toplevel() {
+                            toplevel.send_close();
+                        }
+                    }
                     return;
                 }
                 if button == BTN_LEFT && self.overview_dragging() {
@@ -2912,6 +2997,18 @@ impl JffState {
             .filter(|_| ov.search.app_selected.is_none())
             .and_then(|s| thumbs.iter().position(|(w, _)| w == s));
 
+        let close = selected.filter(|_| ov.shows_close_button()).and_then(|index| {
+            let rect = overview::close_rect(thumbs.get(index)?.1.rect())?;
+            let (rest, hot) = ov.close_buttons.clone()?;
+            Some((
+                index,
+                if layout::contains(rect, (at.x, at.y)) {
+                    hot
+                } else {
+                    rest
+                },
+            ))
+        });
         let badges = thumbs
             .iter()
             .map(|(window, _)| ov.badges.get(&badge_key(window)).cloned())
@@ -2949,6 +3046,7 @@ impl JffState {
             blur_windows: self.config.blur_windows().clone(),
             search: self.search_plan(),
             ripple,
+            close,
             badges,
             badge_alpha: t as f32,
             badge_carry,
@@ -2970,6 +3068,12 @@ impl JffState {
         let Some(ov) = self.overview.as_mut() else {
             return;
         };
+        if ov.close_buttons.is_none() {
+            ov.close_buttons = Some((
+                buffer_of(&search_ui::paint_close_button(false)),
+                buffer_of(&search_ui::paint_close_button(true)),
+            ));
+        }
         let stamp = (ov.search.version, fonts.is_some());
         if ov.badges_for != stamp {
             ov.badges.clear();

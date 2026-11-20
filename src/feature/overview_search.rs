@@ -472,6 +472,51 @@ pub const BADGE_BODY: i32 = ICON_PX + 2 * BADGE_PAD;
 pub const BADGE_PICTURE: i32 = BADGE_BODY + 2 * BADGE_MARGIN;
 const BADGE_RADIUS: f32 = 22.0;
 
+/// Shadow margin around the body of the close button's picture, and the body's side.
+pub const CLOSE_MARGIN: i32 = 4;
+pub const CLOSE_BODY: i32 = 24;
+/// Side of the close button's picture.
+pub const CLOSE_PICTURE: i32 = CLOSE_BODY + 2 * CLOSE_MARGIN;
+/// Fill of the close button under the pointer.
+const CLOSE_HOT: [f32; 3] = [0.86, 0.22, 0.22];
+
+/// The close button of the selected thumbnail: a dark disc with a soft shadow and a white
+/// cross, red while the pointer is on it (`hot`).
+pub fn paint_close_button(hot: bool) -> Picture {
+    let side = CLOSE_PICTURE;
+    let mut canvas: Vec<Pixel> = vec![[0.0; 4]; (side * side) as usize];
+    let center = side as f32 / 2.0;
+    let radius = CLOSE_BODY as f32 / 2.0;
+    // Half length and half width of the cross's two strokes.
+    let (reach, half_stroke) = (CLOSE_BODY as f32 * 0.19, 0.95);
+    for py in 0..side {
+        for px in 0..side {
+            let (fx, fy) = (px as f32 + 0.5 - center, py as f32 + 0.5 - center);
+            let pixel = &mut canvas[(py * side + px) as usize];
+            let shadow = (fx * fx + (fy - 1.0) * (fy - 1.0)).sqrt() - radius;
+            over(pixel, [0.0; 3], 0.45 * (1.0 - smoothstep(-1.0, 3.5, shadow)));
+            let d = (fx * fx + fy * fy).sqrt() - radius;
+            let cover = (0.5 - d).clamp(0.0, 1.0);
+            if cover > 0.0 {
+                over(pixel, if hot { CLOSE_HOT } else { FILL }, cover * 0.94);
+                let inner = (0.5 - (d + 1.0)).clamp(0.0, 1.0);
+                over(pixel, [1.0; 3], (cover - inner).max(0.0) * 0.12);
+            }
+            // The two diagonals: distance to each segment from (-reach, -reach) to (reach, reach).
+            for flip in [1.0f32, -1.0] {
+                let (ax, ay) = (-reach, -reach * flip);
+                let (bx, by) = (reach, reach * flip);
+                let (dx, dy) = (bx - ax, by - ay);
+                let t = (((fx - ax) * dx + (fy - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+                let (qx, qy) = (ax + t * dx, ay + t * dy);
+                let dist = ((fx - qx) * (fx - qx) + (fy - qy) * (fy - qy)).sqrt();
+                over(pixel, [1.0; 3], (half_stroke + 0.5 - dist).clamp(0.0, 1.0));
+            }
+        }
+    }
+    into_picture(canvas, side, side)
+}
+
 /// The badge of an app that goes on its window's thumbnail: its icon on a dark rounded square
 /// with a soft shadow. Without an icon, the lettered round badge of the search grid, with
 /// `name`'s first letter (the letter is skipped while there's no font).
