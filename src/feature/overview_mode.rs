@@ -401,6 +401,8 @@ pub struct Overview {
     cell_blur_ids: Vec<Id>,
     /// The painted names of the containers' cells by text and text size, with their size.
     cell_labels: HashMap<(String, i32), (MemoryRenderBuffer, (i32, i32))>,
+    /// The painted title of the selected thumbnail by text and text size, with its size.
+    title_labels: HashMap<(String, i32), (MemoryRenderBuffer, (i32, i32))>,
     /// The painted number of each square of the wall: the text size it was painted at, the
     /// buffer, and its size. Painted again only when the size changes.
     wall_labels: Vec<Option<(i32, MemoryRenderBuffer, (i32, i32))>>,
@@ -539,6 +541,9 @@ pub struct OverviewPlan {
     badge_carry: Option<(usize, f64)>,
     /// The carried icon's own picture, see `Overview::carry_badges`.
     carry_badge: Option<MemoryRenderBuffer>,
+    /// The title of the selected thumbnail, shown below its icon: its index in `thumbs`, its
+    /// picture and the picture's size. `None` when the selected thumbnail shows none.
+    title: Option<(usize, MemoryRenderBuffer, (i32, i32))>,
     /// The workspace wall, while a thumbnail is dragged and `workspace-wall` is on.
     pub wall: Option<WallPlan>,
     /// Width and colour (straight alpha) of the outline of the selected thumbnail, from the
@@ -618,6 +623,12 @@ fn badge_key(window: &Window) -> (String, u64) {
     (app_id_of(window), icon)
 }
 
+/// Distance from the bottom edge of the selected thumbnail to its title, from the title to the
+/// icon above it, and the room kept free on each side of the title.
+const TITLE_BOTTOM_GAP: i32 = 6;
+const TITLE_ICON_GAP: i32 = 2;
+const TITLE_SIDE_GAP: i32 = 8;
+
 /// Push the app icon badge of thumbnail `index`: at the bottom centre of it, scaled with it. Call
 /// before the thumbnail's own elements, which come after what is in front of them.
 fn badge_elements(
@@ -648,6 +659,15 @@ fn badge_elements(
     let x = x + (full - side) / 2;
     let centre = thumb.pos.1 + (thumb.size.1 - side) / 2;
     let y = y + (full - side) / 2;
+    // With a title below it the icon sits higher, to make room for the text.
+    let title = plan.title.as_ref().filter(|(n, ..)| *n == index);
+    let y = match title {
+        Some((_, _, (_, height))) => {
+            thumb.pos.1 + thumb.size.1 - TITLE_BOTTOM_GAP - height - TITLE_ICON_GAP - side
+                + (full - side) / 2
+        }
+        None => y,
+    };
     let y = y + (f64::from(centre - y) * mix).round() as i32;
     // The picture has a shadow margin around the badge, scaled by the same factor.
     let margin = (f64::from(search_ui::BADGE_MARGIN) * f64::from(side)
@@ -670,6 +690,26 @@ fn badge_elements(
             RescaleRenderElement::from_element(element, corner, zoom),
         )),
         Err(err) => tracing::warn!("error drawing an app icon in the overview: {err:?}"),
+    }
+    // The title of the selected thumbnail: centred below the icon, near the bottom edge.
+    if let Some((_, title, (width, height))) = title {
+        let at: Point<f64, Physical> = (
+            f64::from(thumb.pos.0 + (thumb.size.0 - width) / 2 - origin.x),
+            f64::from(thumb.pos.1 + thumb.size.1 - TITLE_BOTTOM_GAP - height - origin.y),
+        )
+            .into();
+        match MemoryRenderBufferRenderElement::from_buffer(
+            &mut *renderer,
+            at,
+            title,
+            Some(plan.badge_alpha),
+            None,
+            None,
+            Kind::Unspecified,
+        ) {
+            Ok(element) => out.push(JffElement::Memory(element)),
+            Err(err) => tracing::warn!("error drawing a title in the overview: {err:?}"),
+        }
     }
 }
 
@@ -1912,6 +1952,7 @@ impl JffState {
             cell_ids: Vec::new(),
             cell_blur_ids: Vec::new(),
             cell_labels: HashMap::new(),
+            title_labels: HashMap::new(),
             wall_labels: Vec::new(),
             switcher: None,
             slide: Slide::still(0),
@@ -2154,7 +2195,10 @@ impl JffState {
 
     /// The window whose close button is under `p`: the selected one, while it shows its button.
     fn overview_close_hit(&self, p: Point<f64, Logical>) -> Option<Window> {
-        let ov = self.overview.as_ref().filter(|ov| ov.shows_close_button())?;
+        let ov = self
+            .overview
+            .as_ref()
+            .filter(|ov| ov.shows_close_button())?;
         let selected = ov.selected.clone()?;
         let slots = self.overview_slots();
         let (_, thumb) = slots.iter().find(|(window, _)| *window == selected)?;
@@ -2997,18 +3041,20 @@ impl JffState {
             .filter(|_| ov.search.app_selected.is_none())
             .and_then(|s| thumbs.iter().position(|(w, _)| w == s));
 
-        let close = selected.filter(|_| ov.shows_close_button()).and_then(|index| {
-            let rect = overview::close_rect(thumbs.get(index)?.1.rect())?;
-            let (rest, hot) = ov.close_buttons.clone()?;
-            Some((
-                index,
-                if layout::contains(rect, (at.x, at.y)) {
-                    hot
-                } else {
-                    rest
-                },
-            ))
-        });
+        let close = selected
+            .filter(|_| ov.shows_close_button())
+            .and_then(|index| {
+                let rect = overview::close_rect(thumbs.get(index)?.1.rect())?;
+                let (rest, hot) = ov.close_buttons.clone()?;
+                Some((
+                    index,
+                    if layout::contains(rect, (at.x, at.y)) {
+                        hot
+                    } else {
+                        rest
+                    },
+                ))
+            });
         let badges = thumbs
             .iter()
             .map(|(window, _)| ov.badges.get(&badge_key(window)).cloned())
@@ -3034,7 +3080,7 @@ impl JffState {
                 cells: wall_cells,
             })
             .or(stage_wall);
-        Some(OverviewPlan {
+        let mut plan = OverviewPlan {
             output,
             thumbs,
             selected,
@@ -3051,13 +3097,60 @@ impl JffState {
             badge_alpha: t as f32,
             badge_carry,
             carry_badge,
+            title: None,
             wall,
             outline: {
                 let config = self.config.overview();
                 (config.selection_width, config.selection_color)
             },
             highlight,
-        })
+        };
+        plan.title = self.selected_title(&plan);
+        Some(plan)
+    }
+
+    /// The title of the selected thumbnail, painted below its icon. Only that one shows a title:
+    /// not while a thumbnail is dragged, with an app of the list selected, or on a thumbnail too
+    /// small to carry an icon. Painted again only when its text or size changes.
+    fn selected_title(
+        &mut self,
+        plan: &OverviewPlan,
+    ) -> Option<(usize, MemoryRenderBuffer, (i32, i32))> {
+        let fonts = self.osd.fonts()?;
+        let ov = self.overview.as_mut()?;
+        if ov.drag.is_some() || ov.search.app_selected.is_some() {
+            return None;
+        }
+        let index = plan.selected?;
+        let (window, thumb) = plan.thumbs.get(index)?;
+        let (_, _, side, _) = overview::badge_rect(thumb.rect())?;
+        let (app_id, title) = window
+            .toplevel()
+            .map(|toplevel| toplevel_names(toplevel.wl_surface()))
+            .unwrap_or_default();
+        let text = if title.is_empty() { app_id } else { title };
+        if text.is_empty() {
+            return None;
+        }
+        let px = ((f64::from(side) * 0.22).round() as i32).clamp(11, 16);
+        let max_width = (thumb.size.0 - 2 * TITLE_SIDE_GAP).max(0) as f32;
+        let text = fit_text(fonts, &text, px as f32, max_width);
+        if text.is_empty() {
+            return None;
+        }
+        if ov.title_labels.len() > MAX_CELL_LABELS {
+            ov.title_labels.clear();
+        }
+        let key = (text, px);
+        if !ov.title_labels.contains_key(&key) {
+            let picture = paint_title(fonts, &key.0, px as f32);
+            ov.title_labels.insert(
+                key.clone(),
+                (buffer_of(&picture), (picture.width, picture.height)),
+            );
+        }
+        let (buffer, size) = ov.title_labels.get(&key)?;
+        Some((index, buffer.clone(), *size))
     }
 
     /// Paint the app icon badge of every app with a window in the overview that has none yet.
@@ -3214,6 +3307,42 @@ fn paint_text(fonts: &Fonts, text: &str, px: f32) -> Picture {
         baseline,
         WALL_NUMBER,
     );
+    let mut rgba = Vec::with_capacity(canvas.len() * 4);
+    for pixel in &canvas {
+        for channel in pixel {
+            rgba.push((channel.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        }
+    }
+    Picture {
+        rgba,
+        width,
+        height,
+    }
+}
+
+/// `text` for a thumbnail's title, `px` tall: white with a dark shadow so it reads on any window.
+fn paint_title(fonts: &Fonts, text: &str, px: f32) -> Picture {
+    let width = text_width(&fonts.medium, text, px).ceil() as i32 + 6;
+    let height = (px * 1.4).ceil() as i32 + 2;
+    let mut canvas: Vec<Pixel> = vec![[0.0; 4]; (width * height) as usize];
+    let baseline = (height - 2) as f32 / 2.0 + half_line(&fonts.medium, px);
+    for (dx, dy, color) in [
+        (3.0, 1.0, [0.0; 3]),
+        (2.0, 1.5, [0.0; 3]),
+        (2.0, 0.0, [1.0; 3]),
+    ] {
+        draw_text(
+            &mut canvas,
+            width,
+            height,
+            &fonts.medium,
+            text,
+            px,
+            dx,
+            baseline + dy,
+            color,
+        );
+    }
     let mut rgba = Vec::with_capacity(canvas.len() * 4);
     for pixel in &canvas {
         for channel in pixel {
