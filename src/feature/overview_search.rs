@@ -472,29 +472,36 @@ pub const BADGE_BODY: i32 = ICON_PX + 2 * BADGE_PAD;
 pub const BADGE_PICTURE: i32 = BADGE_BODY + 2 * BADGE_MARGIN;
 const BADGE_RADIUS: f32 = 22.0;
 
-/// Shadow margin around the body of the close button's picture, and the body's side.
-pub const CLOSE_MARGIN: i32 = 4;
-pub const CLOSE_BODY: i32 = 24;
-/// Side of the close button's picture.
-pub const CLOSE_PICTURE: i32 = CLOSE_BODY + 2 * CLOSE_MARGIN;
+/// Shadow margin around the body of a close button whose body is `body` pixels wide.
+pub fn close_margin(body: i32) -> i32 {
+    (body + 4) / 5
+}
 /// Fill of the close button under the pointer.
 const CLOSE_HOT: [f32; 3] = [0.86, 0.22, 0.22];
 
 /// The close button of the selected thumbnail: a dark disc with a soft shadow and a white
 /// cross, red while the pointer is on it (`hot`).
-pub fn paint_close_button(hot: bool) -> Picture {
-    let side = CLOSE_PICTURE;
+///
+/// The disc is `body` pixels wide and the picture adds `close_margin(body)` around it, so the
+/// picture maps 1:1 to screen pixels and is never resampled.
+pub fn paint_close_button(body: i32, hot: bool) -> Picture {
+    let margin = close_margin(body);
+    let side = body + 2 * margin;
     let mut canvas: Vec<Pixel> = vec![[0.0; 4]; (side * side) as usize];
     let center = side as f32 / 2.0;
-    let radius = CLOSE_BODY as f32 / 2.0;
-    // Half length and half width of the cross's two strokes.
-    let (reach, half_stroke) = (CLOSE_BODY as f32 * 0.19, 0.95);
+    let radius = body as f32 / 2.0;
+    let k = body as f32 / 24.0;
+    let (reach, half_stroke) = (body as f32 * 0.19, (0.95 * k).max(0.9));
     for py in 0..side {
         for px in 0..side {
             let (fx, fy) = (px as f32 + 0.5 - center, py as f32 + 0.5 - center);
             let pixel = &mut canvas[(py * side + px) as usize];
-            let shadow = (fx * fx + (fy - 1.0) * (fy - 1.0)).sqrt() - radius;
-            over(pixel, [0.0; 3], 0.45 * (1.0 - smoothstep(-1.0, 3.5, shadow)));
+            let shadow = (fx * fx + (fy - k) * (fy - k)).sqrt() - radius;
+            over(
+                pixel,
+                [0.0; 3],
+                0.45 * (1.0 - smoothstep(-k, 3.5 * k, shadow)),
+            );
             let d = (fx * fx + fy * fy).sqrt() - radius;
             let cover = (0.5 - d).clamp(0.0, 1.0);
             if cover > 0.0 {

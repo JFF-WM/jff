@@ -371,8 +371,9 @@ pub struct Overview {
     pressed: Option<u32>,
     /// The left button went down on the close button, so its release closes the window.
     press_on_close: bool,
-    /// The close button painted at rest and under the pointer, made when first needed.
-    close_buttons: Option<(MemoryRenderBuffer, MemoryRenderBuffer)>,
+    /// The close button painted at rest and under the pointer, for every side it can have, made
+    /// when first needed.
+    close_buttons: HashMap<i32, (MemoryRenderBuffer, MemoryRenderBuffer)>,
     /// (window, pointer pos) captured when the left button went down on a thumbnail. Moving far
     /// enough starts a drag.
     press_origin: Option<(Window, Point<f64, Logical>)>,
@@ -731,12 +732,8 @@ fn close_elements(
     let Some((x, y, side, _)) = overview::close_rect(thumb.rect()) else {
         return;
     };
-    // The picture has a shadow margin around the button, scaled by the same factor.
-    let margin = (f64::from(search_ui::CLOSE_MARGIN) * f64::from(side)
-        / f64::from(search_ui::CLOSE_BODY))
-    .round() as i32;
+    let margin = search_ui::close_margin(side);
     let corner = Point::<i32, Physical>::from((x - margin - origin.x, y - margin - origin.y));
-    let zoom = f64::from(side + 2 * margin) / f64::from(search_ui::CLOSE_PICTURE);
     match MemoryRenderBufferRenderElement::from_buffer(
         &mut *renderer,
         corner.to_f64(),
@@ -746,9 +743,7 @@ fn close_elements(
         None,
         Kind::Unspecified,
     ) {
-        Ok(element) => out.push(JffElement::ScaledMemory(
-            RescaleRenderElement::from_element(element, corner, zoom),
-        )),
+        Ok(element) => out.push(JffElement::Memory(element)),
         Err(err) => tracing::warn!("error drawing a close button in the overview: {err:?}"),
     }
 }
@@ -1938,7 +1933,7 @@ impl JffState {
             previous_focus: focused,
             pressed: None,
             press_on_close: false,
-            close_buttons: None,
+            close_buttons: HashMap::new(),
             press_origin: None,
             drag: None,
             layer_buttons: Vec::new(),
@@ -3045,7 +3040,7 @@ impl JffState {
             .filter(|_| ov.shows_close_button())
             .and_then(|index| {
                 let rect = overview::close_rect(thumbs.get(index)?.1.rect())?;
-                let (rest, hot) = ov.close_buttons.clone()?;
+                let (rest, hot) = ov.close_buttons.get(&rect.2)?.clone();
                 Some((
                     index,
                     if layout::contains(rect, (at.x, at.y)) {
@@ -3161,11 +3156,16 @@ impl JffState {
         let Some(ov) = self.overview.as_mut() else {
             return;
         };
-        if ov.close_buttons.is_none() {
-            ov.close_buttons = Some((
-                buffer_of(&search_ui::paint_close_button(false)),
-                buffer_of(&search_ui::paint_close_button(true)),
-            ));
+        if ov.close_buttons.is_empty() {
+            for side in overview::CLOSE_MIN..=overview::CLOSE_MAX {
+                ov.close_buttons.insert(
+                    side,
+                    (
+                        buffer_of(&search_ui::paint_close_button(side, false)),
+                        buffer_of(&search_ui::paint_close_button(side, true)),
+                    ),
+                );
+            }
         }
         let stamp = (ov.search.version, fonts.is_some());
         if ov.badges_for != stamp {
