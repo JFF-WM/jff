@@ -100,7 +100,7 @@ drag-modifier "Super"
 // (and closes it again if it is open). Off unless this block (or `hot-corner N`) exists.
 // `hot-corner 0` turns it off. While it is on, the pointer cannot change monitor through the
 // corner's `size` px of edge. On a touchscreen, a finger that starts in the corner and swipes
-// diagonally away from it opens the overview; a tap, or a drag along an edge, stays with the app.
+// diagonally away from it opens the overview, a tap, or a drag along an edge, stays with the app.
 hot-corner {
     size 10         // px, 0 to 64, 4 by default
     dwell-ms 50     // how long the pointer has to rest, 0 to 5000, 250 by default
@@ -196,6 +196,7 @@ overview {
                               // can type an app's name and start it. On by default, false: off
     animation-ms 320          // 0 to 2000, how long the overview takes to open and close, 0 = no
                               // animation, 320 by default
+    blur                      // (off by default) for the frames and the search box
 }
 
 // Window switcher (the `switch-window` binds): a row of thumbnails, most recently used first.
@@ -284,7 +285,7 @@ input {
     // }
 
     // Touchscreens. Without a mapping a touchscreen covers the built-in panel (eDP, LVDS, DSI), else
-    // the first monitor. `map-to-output` takes a monitor name (`jff msg outputs`); `touchscreen { }`
+    // the first monitor. `map-to-output` takes a monitor name (`jff msg outputs`), `touchscreen { }`
     // is for every touchscreen, `touchscreen "NAME" { }` for the one with that libinput name (jff
     // logs touchscreen names at info level) and wins. A monitor that is not connected is ignored.
     // A turned or scaled monitor needs nothing more. Three fingers on a touchscreen are jff's own:
@@ -358,7 +359,7 @@ cursor {
 //         hdr-tone-map "bt2390"              // how the frame is rolled off under the peak: "knee" (default) or "bt2390"
 //         hdr-content-metadata #true         // fit the roll-off to the content's own peak (on by default)
 //         hdr-gamut-map "clip"               // colors outside the panel's gamut: "compress" (default, toward grey) or "clip" (each channel)
-//         hdr-min-luminance 0.05             // cd/m2 of the panel's black, 0.0 to 1.0, replaces the EDID's; the shadows are raised off it
+//         hdr-min-luminance 0.05             // cd/m2 of the panel's black, 0.0 to 1.0, replaces the EDID's, the shadows are raised off it
 //     }
 //     output "jff-winit" {
 //         hdr                                // simulate HDR when nested (hdr-peak is 1000 by default here)
@@ -537,11 +538,11 @@ window-rule { match app-id="kitty"; opacity 0.9; }
 // light above it follows). `sdr` reads the window as plain sRGB whatever its client tagged it
 // with. Both are set when the window opens, and a rule with only these does not use up the one
 // rule a window gets for its placement.
-// window-rule { match app-id="mpv"; sdr-white 350; }
-// window-rule { match app-id="steam_app_1091500"; sdr; sdr-white 160; }
+// window-rule { match app-id="mpv", sdr-white 350, }
+// window-rule { match app-id="steam_app_1091500", sdr, sdr-white 160, }
 
 // Keep a window above the others, e.g. a picture-in-picture player.
-// window-rule { match title="Picture-in-Picture"; always-on-top; sticky; }
+// window-rule { match title="Picture-in-Picture", always-on-top, sticky, }
 
 // ---------------------------------------------------------------------------------------------
 // Container rules (need `tiling-containers`). Any number of blocks.

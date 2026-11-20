@@ -28,18 +28,20 @@ const MAX_COLUMNS: i32 = 4;
 /// Space between the search box and whatever sits under it.
 pub const GAP: i32 = 12;
 /// Distance from the top of the usable area to the search box.
-pub const TOP_OFFSET: i32 = 24;
+pub const TOP_OFFSET: i32 = 8;
 
 const QUERY_PX: f32 = 18.0;
 const NAME_PX: f32 = 13.5;
 const INITIAL_PX: f32 = 26.0;
-const BOX_RADIUS: i32 = BOX_HEIGHT / 2;
+pub const BOX_RADIUS: i32 = BOX_HEIGHT / 2;
 const LIST_RADIUS: i32 = 26;
 const TILE_RADIUS: i32 = 16;
 /// Space from the top of a tile to its icon.
 const ICON_TOP: i32 = 12;
 
 const FILL: [f32; 3] = [0.110, 0.110, 0.137];
+/// How much of the fill's opacity a translucent panel keeps.
+const TRANSLUCENT_FILL: f32 = 0.45;
 const TEXT: [f32; 3] = [0.95, 0.95, 0.97];
 const HINT: [f32; 3] = [0.52, 0.52, 0.58];
 const SELECTED: [f32; 3] = [0.35, 0.55, 0.95];
@@ -120,8 +122,17 @@ fn into_picture(canvas: Vec<Pixel>, width: i32, height: i32) -> Picture {
 }
 
 /// A rounded panel `width` x `height` with a soft shadow and a faint rim, at the canvas's
-/// shadow margin.
-fn panel(canvas: &mut [Pixel], cw: i32, ch: i32, width: i32, height: i32, radius: i32) {
+/// shadow margin. `translucent` lets what is behind show through the fill, and keeps the
+/// shadow outside the panel.
+fn panel(
+    canvas: &mut [Pixel],
+    cw: i32,
+    ch: i32,
+    width: i32,
+    height: i32,
+    radius: i32,
+    translucent: bool,
+) {
     let (half_w, half_h, radius) = (width as f32 / 2.0, height as f32 / 2.0, radius as f32);
     for py in 0..ch {
         for px in 0..cw {
@@ -129,15 +140,20 @@ fn panel(canvas: &mut [Pixel], cw: i32, ch: i32, width: i32, height: i32, radius
             let fy = py as f32 + 0.5 - SHADOW as f32;
             let pixel = &mut canvas[(py * cw + px) as usize];
             let shadow = sd_round_box(fx, fy - 4.0, half_w, half_h, half_w, half_h, radius);
+            let d = sd_round_box(fx, fy, half_w, half_h, half_w, half_h, radius);
+            let cover = (0.5 - d).clamp(0.0, 1.0);
+            let hidden = if translucent { cover } else { 0.0 };
             over(
                 pixel,
                 [0.0; 3],
-                0.5 * (1.0 - smoothstep(-6.0, 18.0, shadow)),
+                0.5 * (1.0 - smoothstep(-6.0, 18.0, shadow)) * (1.0 - hidden),
             );
-            let d = sd_round_box(fx, fy, half_w, half_h, half_w, half_h, radius);
-            let cover = (0.5 - d).clamp(0.0, 1.0);
             if cover > 0.0 {
-                over(pixel, FILL, cover);
+                over(
+                    pixel,
+                    FILL,
+                    cover * if translucent { TRANSLUCENT_FILL } else { 1.0 },
+                );
                 let inner = (0.5 - (d + 1.0)).clamp(0.0, 1.0);
                 over(pixel, [1.0; 3], (cover - inner).max(0.0) * 0.08);
             }
@@ -271,9 +287,17 @@ fn keep_tail(text: &str, max: f32, width: impl Fn(&str) -> f32) -> String {
 
 /// The search box with `query` in it, or a hint when it's empty. `width` is the box itself,
 /// the picture is wider by the shadow.
-pub fn paint_box(fonts: Option<&Fonts>, query: &str, width: i32) -> Picture {
+pub fn paint_box(fonts: Option<&Fonts>, query: &str, width: i32, translucent: bool) -> Picture {
     let (mut canvas, cw, ch) = new_canvas(width, BOX_HEIGHT);
-    panel(&mut canvas, cw, ch, width, BOX_HEIGHT, BOX_RADIUS);
+    panel(
+        &mut canvas,
+        cw,
+        ch,
+        width,
+        BOX_HEIGHT,
+        BOX_RADIUS,
+        translucent,
+    );
 
     let middle = SHADOW as f32 + BOX_HEIGHT as f32 / 2.0;
     let glass_x = (SHADOW + 26) as f32;
@@ -354,7 +378,7 @@ pub fn paint_list(
         lines * TILE_H + 2 * LIST_PAD
     };
     let (mut canvas, cw, ch) = new_canvas(width, height);
-    panel(&mut canvas, cw, ch, width, height, LIST_RADIUS);
+    panel(&mut canvas, cw, ch, width, height, LIST_RADIUS, false);
 
     for (i, row) in rows.iter().enumerate() {
         let left = SHADOW + LIST_PAD + (i % cols) as i32 * TILE_W;

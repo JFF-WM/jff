@@ -917,7 +917,8 @@ pub const DEFAULT_SELECTION_COLOR: [f32; 4] = [0.35, 0.55, 0.95, 0.6];
 /// colour (`#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`). The square of the workspace wall the
 /// pointer is over uses the same outline. `auto-open` (on by default) opens the overview when
 /// the monitor in use has no windows. `animation-ms` is how long the overview takes to open and
-/// close, 0 to skip the animation.
+/// close, 0 to skip the animation. `blur` (off by default) blurs what is behind the squares of
+/// the workspaces the overview shows, when `blur { … }` is on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OverviewConfig {
     pub selection_width: i32,
@@ -926,6 +927,7 @@ pub struct OverviewConfig {
     /// or you switched to an empty workspace), so an app can be started by typing its name.
     pub auto_open: bool,
     pub animation_ms: u32,
+    pub blur: bool,
 }
 
 impl Default for OverviewConfig {
@@ -935,6 +937,7 @@ impl Default for OverviewConfig {
             selection_color: DEFAULT_SELECTION_COLOR,
             auto_open: true,
             animation_ms: DEFAULT_OVERVIEW_ANIMATION_MS,
+            blur: false,
         }
     }
 }
@@ -3112,6 +3115,7 @@ fn parse_overview(node: &KdlNode) -> anyhow::Result<OverviewConfig> {
             "selection-width" => config.selection_width = int_arg(child, MAX_BORDER_WIDTH)?,
             "selection-color" => config.selection_color = parse_color(&string_arg(child)?)?,
             "auto-open" => config.auto_open = flag_value(child)?,
+            "blur" => config.blur = flag_value(child)?,
             "animation-ms" => {
                 config.animation_ms = u32::try_from(int_arg(child, MAX_OVERVIEW_ANIMATION_MS)?)?
             }

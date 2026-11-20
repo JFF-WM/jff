@@ -87,6 +87,22 @@ use crate::state::JffState;
 const MARGIN: i32 = 150;
 /// Space between thumbnails.
 const GAP: i32 = 24;
+/// Share of the monitor's width the shown workspace takes, at most: the neighbours peek out
+/// on both sides of what is left.
+const STAGE_PERCENT: i32 = 82;
+/// Least space above and below the shown workspace.
+const STAGE_MARGIN: i32 = 110;
+/// Space between the shown workspace's frame and its windows.
+const STAGE_PAD: i32 = 24;
+/// Space between the shown workspace and its neighbours.
+const STAGE_GAP: i32 = 32;
+/// Corner radius of the workspaces' frames.
+const STAGE_RADIUS: i32 = 28;
+/// Opacity of the black laid over the wallpaper of the workspaces of the overview, when fully
+/// open.
+const STAGE_DIM_ALPHA: f32 = 0.45;
+/// How long the slide to a neighbouring workspace takes.
+const PAN_DURATION: Duration = Duration::from_millis(260);
 /// Colour (straight alpha) of the ripples at the top-left corner when the overview opens.
 const RIPPLE_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.9];
 /// How far the pointer moves with the left button held before it's a drag, not a click.
@@ -100,6 +116,8 @@ pub enum OverviewKey {
     /// Leave and focus the selected window.
     Select,
     Move(Dir),
+    /// Slide to the workspace on the left (`-1`) or right (`1`).
+    Workspace(i32),
     Cycle {
         backwards: bool,
     },
@@ -128,6 +146,10 @@ pub fn overview_key(sym: Keysym) -> Option<OverviewKey> {
         Some(OverviewKey::Move(Dir::Up))
     } else if sym == Keysym::Down {
         Some(OverviewKey::Move(Dir::Down))
+    } else if sym == Keysym::Page_Up {
+        Some(OverviewKey::Workspace(-1))
+    } else if sym == Keysym::Page_Down {
+        Some(OverviewKey::Workspace(1))
     } else if sym == Keysym::BackSpace {
         Some(OverviewKey::Backspace)
     } else {
@@ -396,6 +418,14 @@ pub struct Overview {
     carry_badges: HashMap<(String, u64), MemoryRenderBuffer>,
     /// The icon of the dragged thumbnail moving to its centre.
     carry: Carry,
+    /// When the slide from the previous workspace started and how far sideways it began.
+    pan: Option<(Instant, f64)>,
+    /// The black pixel that darkens the workspaces' wallpaper, made when first needed.
+    stage_dim: Option<MemoryRenderBuffer>,
+    /// Stable ids of the blur behind each square of the shown workspace and its neighbours.
+    stage_blur_ids: Vec<Id>,
+    /// Stable id of the blur behind the search box.
+    search_blur: Id,
 }
 
 impl Overview {
@@ -435,6 +465,17 @@ impl Overview {
             None => {
                 overview::ease_overview(overview::progress(self.opened.elapsed(), self.animation))
             }
+        }
+    }
+
+    /// How far sideways everything is still shifted by the slide between workspaces, in pixels.
+    fn pan_offset(&self) -> i32 {
+        match self.pan {
+            Some((since, distance)) => {
+                let t = overview::ease_overview(overview::progress(since.elapsed(), PAN_DURATION));
+                (distance * (1.0 - t)).round() as i32
+            }
+            None => 0,
         }
     }
 
@@ -504,6 +545,17 @@ pub struct WallPlan {
     current: usize,
     /// The square the pointer is over.
     hover: Option<usize>,
+    /// Corner radius of the squares.
+    radius: i32,
+    /// Drawn behind everything else of the overview: the shown workspace and its neighbours
+    /// instead of the squares of a drag.
+    behind: bool,
+    /// A black pixel, stretched over every square to darken its wallpaper.
+    dim: Option<MemoryRenderBuffer>,
+    /// Blur what is behind the squares instead of drawing the wallpaper in them.
+    blur: bool,
+    /// Stable ids of the blur behind each square.
+    blur_ids: Vec<Id>,
 }
 
 /// Fill of a square of the wall (premultiplied).
@@ -523,6 +575,9 @@ pub struct SearchPlan {
     box_buffer: MemoryRenderBuffer,
     box_pos: Point<i32, Logical>,
     list: Option<(MemoryRenderBuffer, Point<i32, Logical>)>,
+    /// Blur behind the box, with the box's rectangle in the shared space (shadow margin not
+    /// included). Set when the box is painted translucent.
+    box_blur: Option<(Id, Rect)>,
     /// Fades in and out with the overview.
     alpha: f32,
 }
@@ -732,6 +787,21 @@ pub fn overview_elements(
                 Err(err) => tracing::warn!("error drawing the overview search: {err:?}"),
             }
         }
+        if let (Some((id, rect)), Some(blur)) = (&search.box_blur, blur) {
+            let local = Rectangle::<i32, Logical>::new(
+                (rect.0 - origin.x, rect.1 - origin.y).into(),
+                (rect.2, rect.3).into(),
+            );
+            let mask = Rounding::new(renderer, local, search_ui::BOX_RADIUS);
+            let element = FramebufferEffectElement::for_rect(
+                id.clone(),
+                local,
+                BlurOptions::from(blur),
+                mask,
+                search.alpha.clamp(0.0, 1.0),
+            );
+            out.push(JffElement::from(element.with_wallpaper_source(snapshot)));
+        }
     }
 
     // The dragged thumbnail sits in front of the rest, the workspace wall right behind it.
@@ -747,10 +817,11 @@ pub fn overview_elements(
         .iter()
         .copied()
         .chain((0..plan.thumbs.len()).filter(|i| !carrying && !front.contains(i)));
-    let wall_at = front.len();
+    let behind = plan.wall.as_ref().is_some_and(|wall| wall.behind);
+    let wall_at = if behind { usize::MAX } else { front.len() };
     for (n, i) in order.enumerate() {
         if n == wall_at {
-            wall_elements(renderer, plan, origin, &mut out);
+            wall_elements(renderer, plan, origin, blur, snapshot, &mut out);
         }
         let (window, thumb) = &plan.thumbs[i];
         badge_elements(renderer, plan, i, origin, &mut out);
@@ -766,8 +837,8 @@ pub fn overview_elements(
         );
     }
     // Nothing came after the dragged thumbnail (or there are no thumbnails): the wall goes last.
-    if carrying || plan.thumbs.len() <= wall_at {
-        wall_elements(renderer, plan, origin, &mut out);
+    if !behind && (carrying || plan.thumbs.len() <= wall_at) {
+        wall_elements(renderer, plan, origin, blur, snapshot, &mut out);
     }
 
     cell_elements(renderer, plan, origin, blur, snapshot, &mut out);
@@ -818,6 +889,9 @@ pub fn overview_elements(
                 Kind::Unspecified,
             )));
         }
+    }
+    if behind {
+        wall_elements(renderer, plan, origin, blur, snapshot, &mut out);
     }
     out
 }
@@ -904,12 +978,14 @@ fn wall_elements(
     renderer: &mut GlesRenderer,
     plan: &OverviewPlan,
     origin: Point<i32, Logical>,
+    blur: Option<config::Blur>,
+    snapshot: Option<&WallpaperSnapshot>,
     out: &mut Vec<JffElement>,
 ) {
     let Some(wall) = &plan.wall else {
         return;
     };
-    let radius = plan.radius / 2;
+    let radius = wall.radius;
     for (i, cell) in wall.cells.iter().enumerate() {
         let local = Rectangle::<i32, Logical>::new(
             (cell.0 - origin.x, cell.1 - origin.y).into(),
@@ -963,7 +1039,55 @@ fn wall_elements(
             None,
         );
     }
-    wallpaper_elements(renderer, plan, wall, origin, out);
+    if let Some(dim) = &wall.dim {
+        for cell in &wall.cells {
+            let local = Rectangle::<i32, Logical>::new(
+                (cell.0 - origin.x, cell.1 - origin.y).into(),
+                (cell.2, cell.3).into(),
+            );
+            let loc: Point<f64, Physical> = (f64::from(local.loc.x), f64::from(local.loc.y)).into();
+            match MemoryRenderBufferRenderElement::from_buffer(
+                &mut *renderer,
+                loc,
+                dim,
+                Some(STAGE_DIM_ALPHA * plan.cell_alpha),
+                None,
+                Some((cell.2, cell.3).into()),
+                Kind::Unspecified,
+            ) {
+                Ok(element) => out.push(match Rounding::new(renderer, local, wall.radius) {
+                    Some(mask) => mask.wrap_memory(element),
+                    None => JffElement::Memory(element),
+                }),
+                Err(err) => tracing::warn!("error darkening a workspace: {err:?}"),
+            }
+        }
+    }
+    // Blurred, the squares show the wallpaper behind them through the blur, so it is not drawn
+    // again in them.
+    let blurred = wall.blur && blur.is_some();
+    if let (true, Some(blur)) = (wall.blur, blur) {
+        for (cell, id) in wall.cells.iter().zip(&wall.blur_ids) {
+            let local = Rectangle::<i32, Logical>::new(
+                (cell.0 - origin.x, cell.1 - origin.y).into(),
+                (cell.2, cell.3).into(),
+            );
+            let mask = Rounding::new(renderer, local, wall.radius);
+            let element = FramebufferEffectElement::for_rect(
+                id.clone(),
+                local,
+                BlurOptions::from(blur),
+                mask,
+                plan.cell_alpha.clamp(0.0, 1.0),
+            );
+            out.push(JffElement::from(element.with_wallpaper_source(snapshot)));
+        }
+    } else {
+        wallpaper_elements(renderer, plan, wall, origin, out);
+    }
+    if wall.behind && (blurred || !wall.wallpaper.is_empty()) {
+        return;
+    }
     for (i, cell) in wall.cells.iter().enumerate() {
         let Some(id) = wall.ids.get(i) else {
             continue;
@@ -1004,7 +1128,7 @@ fn wallpaper_elements(
                 (cell.0 - origin.x, cell.1 - origin.y).into(),
                 (cell.2, cell.3).into(),
             ),
-            plan.radius / 2,
+            wall.radius,
         );
         // Later surfaces of the layer are in front: the list is back to front, draw it so.
         for (surface, loc) in wall.wallpaper.iter().rev() {
@@ -1123,6 +1247,166 @@ impl JffState {
     /// stays on its own monitor, other monitors keep their panels and draw as usual.
     pub fn pointer_bounds(&self) -> Vec<Rect> {
         self.output_rects()
+    }
+
+    /// The neighbours of the workspace shown: for each side, `-1` or `1`, its workspace and
+    /// where its frame is, in the shared space, empty workspaces included. Empty in the
+    /// switcher, while typing and while closing.
+    fn overview_peeks(&self) -> Vec<(i32, usize, Rect)> {
+        let Some(ov) = self
+            .overview
+            .as_ref()
+            .filter(|ov| ov.switcher.is_none() && !ov.search.active() && ov.closing.is_none())
+        else {
+            return Vec::new();
+        };
+        let stage = stage_rect(output_rect(&ov.output));
+        let name = ov.output.name();
+        let current = self.desk.current_on(&name);
+        let count = self.workspace_count();
+        [-1, 1]
+            .into_iter()
+            .filter_map(|dir| {
+                let target = current
+                    .checked_add_signed(dir as isize)
+                    .filter(|t| *t < count)?;
+                Some({
+                    let cell = (
+                        stage.0 + dir * (stage.2 + STAGE_GAP),
+                        stage.1,
+                        stage.2,
+                        stage.3,
+                    );
+                    (dir, target, cell)
+                })
+            })
+            .collect()
+    }
+
+    /// The side (`-1` left, `1` right) of the neighbouring workspace under `p`, if any.
+    fn overview_peek_at(&self, p: Point<f64, Logical>) -> Option<i32> {
+        self.overview_peeks()
+            .into_iter()
+            .find(|(_, _, cell)| layout::contains(*cell, (p.x, p.y)))
+            .map(|(dir, _, _)| dir)
+    }
+
+    /// The frames of the workspace shown and of its neighbours, shifted sideways by `pan`: the
+    /// wallpaper and, in the neighbours, their windows, shrunk into the frames. The first
+    /// frame is the shown workspace, whose windows are the overview's own. `None` in the
+    /// switcher and while typing, and while closing the frames are gone.
+    fn stage_wall(&mut self, pan: i32) -> Option<WallPlan> {
+        let ov = self.overview.as_ref()?;
+        if ov.switcher.is_some() || ov.search.active() {
+            return None;
+        }
+        let output = ov.output.clone();
+        let blur = self.config.overview().blur;
+        let closing = ov.closing.is_some();
+        let monitor = output_rect(&output);
+        let peeks = self.overview_peeks();
+        let shift = |cell: Rect| (cell.0 + pan, cell.1, cell.2, cell.3);
+        // Closing takes every frame away at once, only the darkening fades with the windows.
+        let mut cells = if closing {
+            Vec::new()
+        } else {
+            vec![shift(stage_rect(monitor))]
+        };
+        cells.extend(peeks.iter().map(|(_, _, cell)| shift(*cell)));
+        let mut thumbs: Vec<Vec<(Window, Thumb)>> = cells.iter().map(|_| Vec::new()).collect();
+        for entry in self.desk.all_top_down() {
+            let Some(i) = peeks
+                .iter()
+                .position(|(_, workspace, _)| *workspace == entry.workspace)
+            else {
+                continue;
+            };
+            let size = entry.window.geometry().size;
+            if thumbs[i + 1].len() >= WALL_MAX_THUMBS
+                || size.w <= 0
+                || size.h <= 0
+                || self.rect_for_window(entry.pos, (size.w, size.h)) != monitor
+            {
+                continue;
+            }
+            let thumb = overview::wall_thumb(cells[i + 1], monitor, entry.pos, (size.w, size.h));
+            thumbs[i + 1].push((entry.window.clone(), thumb));
+        }
+        let wallpaper: Vec<(WlSurface, Point<i32, Logical>)> = {
+            let map = layer_map_for_output(&output);
+            map.layers_on(Layer::Background)
+                .filter_map(|layer| {
+                    let geo = map.layer_geometry(layer)?;
+                    Some((layer.wl_surface().clone(), geo.loc))
+                })
+                .collect()
+        };
+        let ov = self.overview.as_mut()?;
+        while ov.wall_ids.len() < cells.len() {
+            ov.wall_ids.push(Id::new());
+        }
+        while ov.stage_blur_ids.len() < cells.len() {
+            ov.stage_blur_ids.push(Id::new());
+        }
+        let blur_ids = ov.stage_blur_ids.clone();
+        let dim = ov
+            .stage_dim
+            .get_or_insert_with(|| {
+                MemoryRenderBuffer::from_slice(
+                    &[0, 0, 0, 255],
+                    Fourcc::Abgr8888,
+                    (1, 1),
+                    1,
+                    Transform::Normal,
+                    None,
+                )
+            })
+            .clone();
+        Some(WallPlan {
+            ids: ov.wall_ids.clone(),
+            labels: Vec::new(),
+            thumbs,
+            wallpaper,
+            current: usize::MAX,
+            hover: None,
+            radius: STAGE_RADIUS,
+            behind: true,
+            dim: Some(dim),
+            blur,
+            blur_ids,
+            cells,
+        })
+    }
+
+    /// Slide the overview `steps` workspaces left (`steps < 0`) or right (`steps > 0`), empty
+    /// ones included, stopping at the first and the last.
+    fn overview_navigate(&mut self, steps: i32) {
+        let Some(output) = self.overview.as_ref().map(|ov| ov.output.clone()) else {
+            return;
+        };
+        let name = output.name();
+        let before = self.desk.current_on(&name);
+        let last = self.workspace_count().max(1) - 1;
+        let target = before.saturating_add_signed(steps as isize).min(last);
+        if target == before {
+            return;
+        }
+        let distance = f64::from(stage_rect(output_rect(&output)).2 + STAGE_GAP);
+        let at = self.seat.get_pointer().map(|p| p.current_location());
+        self.switch_workspace_on(&name, target);
+        // With the overview gone for a moment the new workspace's topmost window takes the
+        // keyboard and `warp-mouse-to-focus` moves the pointer to it, clamped to the nearest
+        // monitor's edge when that window is out of view. The pointer stays where it was.
+        if let Some(at) = at {
+            self.move_cursor((at.x, at.y));
+        }
+        self.open_overview_with(true, Some(output));
+        if let Some(ov) = self.overview.as_mut() {
+            ov.opened = Instant::now()
+                .checked_sub(ov.animation)
+                .unwrap_or_else(Instant::now);
+            ov.pan = Some((Instant::now(), f64::from(steps.signum()) * distance));
+        }
     }
 
     /// The squares of the workspace wall on the overview's monitor, in the shared space. Empty
@@ -1567,6 +1851,10 @@ impl JffState {
             badges_for: (version, self.osd.fonts().is_some()),
             carry_badges: HashMap::new(),
             carry: Carry::new(),
+            pan: None,
+            stage_dim: None,
+            stage_blur_ids: Vec::new(),
+            search_blur: Id::new(),
             search: Search::new(entries, version),
         });
 
@@ -1789,23 +2077,7 @@ impl JffState {
         if steps == 0 {
             return true;
         }
-        // The monitor that was scrolled on, not whichever the pointer or the keyboard focus is
-        // on once the workspace has changed.
-        let Some(output) = self.overview.as_ref().map(|ov| ov.output.clone()) else {
-            return false;
-        };
-        let name = output.name();
-        let before = self.desk.current_on(&name);
-        // Workspaces without windows are skipped, there is nothing to see in their overview.
-        let target = self
-            .desk
-            .step_occupied(&name, before, steps, self.workspace_count());
-        if target == before {
-            return true;
-        }
-        // Switching closes the overview: open it again on the new workspace.
-        self.switch_workspace_on(&name, target);
-        self.open_overview_with(true, Some(output));
+        self.overview_navigate(steps);
         true
     }
 
@@ -2083,6 +2355,12 @@ impl JffState {
                         return;
                     }
                 }
+                if button == BTN_LEFT {
+                    if let Some(steps) = self.overview_peek_at(pointer.current_location()) {
+                        self.overview_navigate(steps);
+                        return;
+                    }
+                }
                 match self.overview_hit(pointer.current_location()) {
                     Some(window) if button == BTN_LEFT => self.end_overview(Some(window)),
                     Some(window) if button == BTN_MIDDLE => {
@@ -2120,6 +2398,7 @@ impl JffState {
             }
             OverviewKey::Select => self.select_result(),
             OverviewKey::Move(dir) => self.move_selection(dir),
+            OverviewKey::Workspace(steps) => self.overview_navigate(steps),
             OverviewKey::Cycle { backwards } => self.cycle_selection(backwards),
             OverviewKey::Type(c) => self.edit_query(|query| query.push(c)),
             OverviewKey::Backspace => self.edit_query(Query::backspace),
@@ -2393,6 +2672,12 @@ impl JffState {
             }
             _ => Vec::new(),
         };
+        let pan = self.overview.as_ref().map_or(0, Overview::pan_offset);
+        let stage_wall = if self.overview_dragging() {
+            None
+        } else {
+            self.stage_wall(pan)
+        };
         self.refresh_badges();
         let carry = self.overview.as_mut().and_then(|ov| {
             let dragging = ov.drag.as_ref().map(|drag| drag.window.clone());
@@ -2457,11 +2742,17 @@ impl JffState {
                 overview::dragged_thumb(carried, drag.anchor, (pointer_at.x, pointer_at.y));
             Some((id, *cell, carried, factor))
         });
-        let cell_plans = self.cell_plans(
+        let mut cell_plans = self.cell_plans(
             &groups,
             &cells,
             group_drag.map(|(id, _, carried, _)| (id, carried)),
         );
+        for cell in &mut cell_plans {
+            cell.rect.0 += pan;
+            if let Some((_, at)) = cell.label.as_mut() {
+                at.x += pan;
+            }
+        }
         let ov = self.overview.as_ref()?;
         let t = ov.progress();
         let at = pointer_at;
@@ -2565,6 +2856,9 @@ impl JffState {
         // was raised in the desk, so follow the desk's real stacking: the window being selected
         // must travel in front, not behind the one that was active.
         let mut thumbs = thumbs;
+        for (_, thumb) in &mut thumbs {
+            thumb.pos.0 += pan;
+        }
         if ov.closing.is_some() {
             let stacking: Vec<Window> = self
                 .desk
@@ -2618,15 +2912,22 @@ impl JffState {
         let ripple =
             Some(ov.opened.elapsed()).filter(|_| ov.switcher.is_none() && ov.closing.is_none());
         let radius = self.config.radius();
-        let wall = (!wall_cells.is_empty()).then(|| WallPlan {
-            ids: ov.wall_ids.clone(),
-            labels: wall_labels,
-            thumbs: wall_thumbs,
-            wallpaper,
-            current: self.desk.current_on(&output.name()),
-            hover: overview::wall_hit(&wall_cells, (at.x, at.y)),
-            cells: wall_cells,
-        });
+        let wall = (!wall_cells.is_empty())
+            .then(|| WallPlan {
+                ids: ov.wall_ids.clone(),
+                labels: wall_labels,
+                thumbs: wall_thumbs,
+                wallpaper,
+                current: self.desk.current_on(&output.name()),
+                hover: overview::wall_hit(&wall_cells, (at.x, at.y)),
+                radius: radius / 2,
+                behind: false,
+                dim: None,
+                blur: false,
+                blur_ids: Vec::new(),
+                cells: wall_cells,
+            })
+            .or(stage_wall);
         Some(OverviewPlan {
             output,
             thumbs,
@@ -2701,6 +3002,7 @@ impl JffState {
 
     /// The search box and the app list, painted again only when what they show changed.
     fn search_plan(&mut self) -> Option<SearchPlan> {
+        let translucent = self.config.overview().blur && !self.config.blur().off;
         let ov = self.overview.as_mut().filter(|ov| ov.switcher.is_none())?;
         let alpha = ov.progress() as f32;
         let layout = search_layout(ov);
@@ -2710,9 +3012,9 @@ impl JffState {
         let has_fonts = fonts.is_some();
 
         let (x, y, width, _) = layout.box_rect;
-        let key = hash_of((ov.search.query.as_str(), width, has_fonts));
+        let key = hash_of((ov.search.query.as_str(), width, has_fonts, translucent));
         if ov.search.box_paint.as_ref().map(|(k, _)| *k) != Some(key) {
-            let picture = search_ui::paint_box(fonts, ov.search.query.as_str(), width);
+            let picture = search_ui::paint_box(fonts, ov.search.query.as_str(), width, translucent);
             ov.search.box_paint = Some((key, buffer_of(&picture)));
         }
         let box_buffer = ov.search.box_paint.as_ref().map(|(_, b)| b.clone())?;
@@ -2747,6 +3049,7 @@ impl JffState {
             box_buffer,
             box_pos: Point::from((x - SHADOW, y - SHADOW)),
             list,
+            box_blur: translucent.then(|| (ov.search_blur.clone(), layout.box_rect)),
             alpha,
         })
     }
@@ -2823,6 +3126,22 @@ fn buffer_of(picture: &crate::feature::osd::Picture) -> MemoryRenderBuffer {
     )
 }
 
+/// The frame of the workspace shown in the overview on the monitor at `monitor`: the monitor's
+/// shape, centered, narrow enough for its neighbours to peek out on both sides.
+fn stage_rect(monitor: Rect) -> Rect {
+    let (mw, mh) = (i64::from(monitor.2.max(1)), i64::from(monitor.3.max(1)));
+    let by_width = mw * i64::from(STAGE_PERCENT) / 100;
+    let by_height = (mh - i64::from(2 * STAGE_MARGIN)).max(1) * mw / mh;
+    let w = by_width.min(by_height).max(1);
+    let h = (w * mh / mw).max(1);
+    (
+        monitor.0 + ((mw - w) / 2) as i32,
+        monitor.1 + ((mh - h) / 2) as i32,
+        w as i32,
+        h as i32,
+    )
+}
+
 /// Where the overview puts its windows, before the switcher's slide: the grid, or in the
 /// switcher a row of fixed-size thumbnails that starts at the left edge. One thumbnail per
 /// visible window, the windows of a container (`groups`) inside the container's cell.
@@ -2838,7 +3157,11 @@ fn overview_arrangement(
     groups: &[Group],
 ) -> (Vec<Thumb>, Vec<(usize, Thumb)>) {
     let rect = output_rect(&ov.output);
-    let mut area = layout::grow(rect, -MARGIN);
+    let mut area = if ov.switcher.is_none() && !ov.search.active() {
+        layout::grow(stage_rect(rect), -STAGE_PAD)
+    } else {
+        layout::grow(rect, -MARGIN)
+    };
     if ov.switcher.is_none() && ov.search.active() {
         // Room above the thumbnails for the search box and, under it, the app list.
         let wanted = search_layout(ov);
