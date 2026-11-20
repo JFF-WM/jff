@@ -279,6 +279,12 @@ impl JffState {
                 .map_or(KeyboardFocus::Nobody, KeyboardFocus::Layer);
         }
         if self.overview_active() {
+            // A panel's popover raised in the overview (a search field in it, say) owns the keys
+            // while its grab lasts: the overview's own search must not read them. The grab ends
+            // by itself (an outside click, Escape in the popover) or with the overview.
+            if let Some(grab) = self.popup_grab.as_ref().filter(|grab| !grab.window_root) {
+                return KeyboardFocus::Layer(grab.root.clone());
+            }
             return KeyboardFocus::Overview;
         }
         if self.screenshot.is_some() {

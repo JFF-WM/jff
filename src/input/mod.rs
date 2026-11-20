@@ -408,7 +408,9 @@ impl JffState {
             keyboard.input_intercept(source, self, key_code, key_state, |state, mods, handle| {
                 // While the overview is open it gets first pick, and keeps releases
                 // (and every key it doesn't use) from reaching anyone.
-                let overview = state.overview_active();
+                // Except while a panel's popover has the keyboard grab: its keys are the
+                // popover's (see `compute_keyboard_focus`), not the overview search's.
+                let overview = state.overview_active() && state.popup_grab.is_none();
                 let screenshot = state.screenshot.is_some();
                 if !pressed {
                     state.client_hotkey_key_released(key_code);
