@@ -102,8 +102,9 @@ const STAGE_RADIUS: i32 = 28;
 /// Opacity of the black laid over the wallpaper of the workspaces of the overview, when fully
 /// open.
 const STAGE_DIM_ALPHA: f32 = 0.45;
-/// How long the slide to a neighbouring workspace takes.
-const PAN_DURATION: Duration = Duration::from_millis(260);
+/// How long the slide to a neighbouring workspace takes. Also the wheel's pause after a step
+/// (`wheel_paced`): notches during it are dropped, so a long slide made scrolling feel stuck.
+const PAN_DURATION: Duration = Duration::from_millis(150);
 /// Colour (straight alpha) of the ripples at the top-left corner when the overview opens.
 const RIPPLE_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.9];
 /// How far the pointer moves with the left button held before it's a drag, not a click.
