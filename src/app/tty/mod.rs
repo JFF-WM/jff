@@ -102,7 +102,7 @@ use crate::primitives::stats as nerd;
 use crate::protocol::color_management::WorkingSpace;
 use crate::protocol::content_type::Content;
 use crate::protocol::layer_shell::{
-    fullscreen_covers, fullscreen_surface, layer_body_elements, layer_elements,
+    below_windows_elements, fullscreen_covers, fullscreen_surface, layer_elements,
     layer_popup_elements, layers_above, layers_shown, BELOW_WINDOWS,
 };
 use crate::protocol::session_lock::LOCKED_BACKGROUND;
@@ -2849,16 +2849,14 @@ impl JffState {
             }
             // Wallpapers and desktop widgets are behind everything.
             if !(direct_scanout || hdr_scanout_try.is_some()) {
-                // Fills the wallpaper copy: drawn right after the background layers.
-                if let Some(snapshot) = &snapshot {
-                    elements.push(JffElement::from(snapshot.element((rect.2, rect.3).into())));
-                }
-                elements.extend(layer_body_elements(
+                // The wallpaper copy sits between the bottom and background layers.
+                elements.extend(below_windows_elements(
                     &mut *renderer,
                     &lit.output,
-                    &BELOW_WINDOWS,
                     blur,
                     self.config.blur_layers(),
+                    snapshot.as_ref().map(|s| (s, (rect.2, rect.3).into())),
+                    !(blur.is_some() && overview_here.is_some_and(|p| p.draws_bottom_layer())),
                 ));
             }
         }

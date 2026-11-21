@@ -74,7 +74,7 @@ use crate::primitives::hdr_output::FinalPass;
 use crate::primitives::layout::{self, Rect};
 use crate::protocol::color_management::{OutputColor, WorkingSpace};
 use crate::protocol::layer_shell::{
-    layer_body_elements, layer_elements, layer_popup_elements, layers_above, BELOW_WINDOWS,
+    below_windows_elements, layer_elements, layer_popup_elements, layers_above, BELOW_WINDOWS,
 };
 use crate::protocol::session_lock::{lock_surface_elements, LOCKED_BACKGROUND};
 use crate::render::cursor::RenderCursor;
@@ -1023,16 +1023,14 @@ impl JffState {
                 );
             }
         }
-        // Fills the wallpaper copy the window blurs read: right after the background layers.
-        if let Some(snapshot) = &snapshot {
-            elements.push(JffElement::from(snapshot.element((rect.2, rect.3).into())));
-        }
-        elements.extend(layer_body_elements(
+        // The wallpaper copy the window blurs read sits between the bottom and background layers.
+        elements.extend(below_windows_elements(
             &mut *renderer,
             output,
-            &BELOW_WINDOWS,
             blur_config,
             self.config.blur_layers(),
+            snapshot.as_ref().map(|s| (s, (rect.2, rect.3).into())),
+            true,
         ));
 
         Ok(OutputFrame {
@@ -1303,15 +1301,13 @@ impl JffState {
             OpenFrame::DONE,
             &mut elements,
         );
-        if let Some(snapshot) = &snapshot {
-            elements.push(JffElement::from(snapshot.element((on.2, on.3).into())));
-        }
-        elements.extend(layer_body_elements(
+        elements.extend(below_windows_elements(
             &mut *renderer,
             &output,
-            &BELOW_WINDOWS,
             None,
             &Default::default(),
+            snapshot.as_ref().map(|s| (s, (on.2, on.3).into())),
+            true,
         ));
 
         Ok(ShownFrame {

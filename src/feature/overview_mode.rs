@@ -506,6 +506,16 @@ impl Overview {
     }
 }
 
+impl OverviewPlan {
+    /// Whether the overview draws the bottom layer itself, in front of the blur it lays over the
+    /// whole monitor. The renderers then leave it out of the layers behind the windows.
+    pub fn draws_bottom_layer(&self) -> bool {
+        self.wall
+            .as_ref()
+            .is_some_and(|wall| wall.behind && wall.blur)
+    }
+}
+
 /// What a renderer needs for one frame of the overview.
 pub struct OverviewPlan {
     /// The monitor showing the overview. Others draw as usual.
@@ -1502,6 +1512,7 @@ impl JffState {
         }
         let wallpaper: Vec<(WlSurface, Point<i32, Logical>)> = {
             let map = layer_map_for_output(&output);
+            log_wallpaper_layers(&map);
             map.layers_on(Layer::Background)
                 .filter_map(|layer| {
                     let geo = map.layer_geometry(layer)?;
@@ -3457,6 +3468,33 @@ fn buffer_of(picture: &crate::feature::osd::Picture) -> MemoryRenderBuffer {
         Transform::Normal,
         None,
     )
+}
+
+/// Debug log of what the overview takes as wallpaper (the background layer surfaces) and what
+/// it draws again in front of the blur (the bottom layer), only when that list changes.
+fn log_wallpaper_layers(map: &smithay::desktop::LayerMap) {
+    thread_local! {
+        static LAST: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    let mut line = String::new();
+    for layer in [Layer::Background, Layer::Bottom] {
+        for surface in map.layers_on(layer) {
+            line.push_str(&format!(
+                "{layer:?} {:?} at {:?}; ",
+                surface.namespace(),
+                map.layer_geometry(surface)
+            ));
+        }
+    }
+    LAST.with(|last| {
+        if *last.borrow() != line {
+            tracing::debug!("overview wallpaper and bottom layers: {line}");
+            *last.borrow_mut() = line;
+        }
+    });
 }
 
 /// The frame of the workspace shown in the overview on the monitor at `monitor`: the monitor's

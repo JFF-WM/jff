@@ -29,7 +29,7 @@ use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Physical, Point, Rectangle, Scale};
+use smithay::utils::{Logical, Physical, Point, Rectangle, Scale, Size};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::wlr_layer::{
     KeyboardInteractivity, Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData,
@@ -46,6 +46,7 @@ use crate::primitives::layout::{self, Rect};
 use crate::render::effects::background_effect::{
     blur_bounds, popup_elements, render_for_surface_zoomed, visible_rect,
 };
+use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
 use crate::render::effects::gamut;
 use crate::render::effects::rounded::Rounding;
 use crate::render::effects::surface_alpha::window_multiplier;
@@ -346,6 +347,46 @@ pub fn layer_body_elements(
             );
         }
     }
+    out
+}
+
+/// The layers behind the windows, front to back, with the wallpaper copy (`snapshot`, the
+/// output size) between the `bottom` layer and the `background` one. The copy is taken once
+/// the background layers are drawn, so it holds the wallpaper alone: a panel on the bottom
+/// layer would otherwise be baked into it and show up blurred behind everything that blurs it.
+///
+/// `bottom`: `false` leaves the bottom layer out, for the overview, which draws it itself in
+/// front of its blur. Drawn twice, the panel's elements share their ids, and a copy behind the
+/// blur shows through it.
+pub fn below_windows_elements(
+    renderer: &mut GlesRenderer,
+    output: &Output,
+    blur: Option<config::Blur>,
+    layers_filter: &config::BlurLayers,
+    snapshot: Option<(&WallpaperSnapshot, Size<i32, Logical>)>,
+    bottom: bool,
+) -> Vec<JffElement> {
+    let mut out = if bottom {
+        layer_body_elements(
+            &mut *renderer,
+            output,
+            &[Layer::Bottom],
+            blur,
+            layers_filter,
+        )
+    } else {
+        Vec::new()
+    };
+    if let Some((snapshot, size)) = snapshot {
+        out.push(JffElement::from(snapshot.element(size)));
+    }
+    out.extend(layer_body_elements(
+        &mut *renderer,
+        output,
+        &[Layer::Background],
+        blur,
+        layers_filter,
+    ));
     out
 }
 

@@ -15,7 +15,7 @@ use crate::feature::outputs::output_rect;
 use crate::feature::overview_mode::{overview_elements, overview_ripple_elements};
 use crate::primitives::layout;
 use crate::protocol::layer_shell::{
-    layer_body_elements, layer_elements, layer_popup_elements, layers_above, ABOVE_WINDOWS,
+    below_windows_elements, layer_elements, layer_popup_elements, layers_above, ABOVE_WINDOWS,
     BELOW_WINDOWS,
 };
 use crate::render::effects::background_effect::window_elements;
@@ -457,18 +457,17 @@ impl JffState {
                         );
                     }
                 }
-                // Fills the wallpaper copy: drawn right after the background layers.
-                if let (Some(snapshot), Some(output)) = (&snapshot, &layer_output) {
-                    let rect = output_rect(output);
-                    elements.push(JffElement::from(snapshot.element((rect.2, rect.3).into())));
-                }
+                // The wallpaper copy sits between the bottom and background layers.
                 if let Some(output) = &layer_output {
-                    elements.extend(layer_body_elements(
+                    let rect = output_rect(output);
+                    elements.extend(below_windows_elements(
                         &mut *renderer,
                         output,
-                        &BELOW_WINDOWS,
                         blur,
                         self.config.blur_layers(),
+                        snapshot.as_ref().map(|s| (s, (rect.2, rect.3).into())),
+                        !(blur.is_some()
+                            && overview.as_ref().is_some_and(|p| p.draws_bottom_layer())),
                     ));
                 }
             }
