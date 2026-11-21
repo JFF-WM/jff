@@ -178,6 +178,10 @@ window-animations {
 //   * `only-layer "NAMESPACE"`  blur ONLY these layer surfaces, the whole surface, on any layer
 //                               (also `bottom`). Case-sensitive. Repeat the line for more.
 //   * `ignore-layer "NAMESPACE"` never blur this one (wins over `only-layer`).
+// Corner radius of the blur behind layer surfaces (0 = square, the default), cut from the area
+// that is really blurred (the client's blur region, else the surface):
+//   * `layer-radius 16`                  every layer surface
+//   * `layer-radius "JFShell-Bottom" 24` one namespace, wins over the general line
 blur {
     only-window "kitty"
     //only-window "foot"
@@ -186,6 +190,8 @@ blur {
     //only-layer "JFShell-Top"
     //ignore-layer "JFShell-Bottom"   // layer-surface namespaces that never get blur
     //ignore-layer "selection"
+    //layer-radius 16                  // round the blur behind every layer surface
+    //layer-radius "JFShell-Bottom" 24 // ...or just this namespace
     passes 5            // 1-31, each pass doubles the radius, 3 by default
     offset 3.0          // sample stretch, bigger = blurrier (and blockier), above 0, 3.0 by default
     //all-windows       // blur every window, not just those that ask for it

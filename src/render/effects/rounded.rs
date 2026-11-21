@@ -224,6 +224,12 @@ impl Rounding {
         }
     }
 
+    /// What shapes the mask, its rectangle (frame pixels) and radius: two masks with the same
+    /// shape cut the same corners, so a blur can tell when its mask changed.
+    pub fn shape(&self) -> (Rectangle<i32, Physical>, i32) {
+        (self.geo, self.radius)
+    }
+
     /// Make the next texture draw on `frame` go through the mask. Pair with
     /// [`Rounding::clear`] once that draw is done.
     pub fn apply(&self, frame: &mut GlesFrame<'_, '_>) {

@@ -43,8 +43,11 @@ use crate::feature::outputs::output_rect;
 use crate::primitives::alpha;
 use crate::primitives::geom;
 use crate::primitives::layout::{self, Rect};
-use crate::render::effects::background_effect::{popup_elements, render_for_surface, visible_rect};
+use crate::render::effects::background_effect::{
+    blur_bounds, popup_elements, render_for_surface_zoomed, visible_rect,
+};
 use crate::render::effects::gamut;
+use crate::render::effects::rounded::Rounding;
 use crate::render::effects::surface_alpha::window_multiplier;
 use crate::render::elements::JffElement;
 use crate::state::JffState;
@@ -237,20 +240,35 @@ pub fn layer_elements(
                     Kind::Unspecified,
                 );
             gamut::wrap_surfaces(&mut *renderer, surface.wl_surface(), elements, &mut out);
-            push_layer_blur(&mut out, surface.wl_surface(), geo, *layer, blur, listed);
+            push_layer_blur(
+                &mut *renderer,
+                &mut out,
+                surface.wl_surface(),
+                surface.namespace(),
+                geo,
+                *layer,
+                blur,
+                listed,
+                layers_filter.radius_for(surface.namespace()),
+            );
         }
     }
     out
 }
 
-/// The blur behind a layer surface, pushed after (behind) its own elements.
+/// The blur behind a layer surface, pushed after (behind) its own elements. `radius` is the
+/// corner radius (`blur { layer-radius }`) the blur is shaped with, 0 for square.
+#[allow(clippy::too_many_arguments)]
 fn push_layer_blur(
+    renderer: &mut GlesRenderer,
     out: &mut Vec<JffElement>,
     surface: &WlSurface,
+    namespace: &str,
     geo: Rectangle<i32, Logical>,
     layer: Layer,
     blur: Option<config::Blur>,
     listed: bool,
+    radius: i32,
 ) {
     let Some(blur) = blur else {
         return;
@@ -263,12 +281,23 @@ fn push_layer_blur(
     // takes input (its input region), not across its whole width.
     let fallback = (blur.all_layers && on_blurred_layer)
         .then(|| visible_rect(surface, Rectangle::from_size(geo.size)));
-    render_for_surface(
+    // The corners are cut from what is really blurred, so a dock that sent a blur region of its
+    // own gets round corners on that, not on its whole surface.
+    let bounds = blur_bounds(surface, geo.loc, fallback);
+    tracing::trace!("layer blur of {namespace:?} on {layer:?}: radius {radius}, bounds {bounds:?}, surface {geo:?}");
+    let mask = if radius > 0 {
+        bounds.and_then(|bounds| Rounding::new(&mut *renderer, bounds, radius))
+    } else {
+        None
+    };
+    render_for_surface_zoomed(
         surface,
         geo.loc.to_f64(),
+        1.0,
         fallback,
         1.0,
         blur,
+        mask.as_ref(),
         &mut |element| {
             out.push(JffElement::from(element));
         },
@@ -304,7 +333,17 @@ pub fn layer_body_elements(
                     Kind::Unspecified,
                 );
             gamut::wrap_surfaces(&mut *renderer, surface.wl_surface(), elements, &mut out);
-            push_layer_blur(&mut out, surface.wl_surface(), geo, *layer, blur, listed);
+            push_layer_blur(
+                &mut *renderer,
+                &mut out,
+                surface.wl_surface(),
+                surface.namespace(),
+                geo,
+                *layer,
+                blur,
+                listed,
+                layers_filter.radius_for(surface.namespace()),
+            );
         }
     }
     out

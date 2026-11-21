@@ -6,7 +6,7 @@
 //! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9, per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
-//! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `only-layer \"NS\"`: blur only those layer namespaces, whole surface, on any layer, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
+//! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `only-layer \"NS\"`: blur only those layer namespaces, whole surface, on any layer, `layer-radius N` / `layer-radius \"NS\" N`: corner radius of the blur behind layer surfaces, all of them or one namespace, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
 //! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `open-position X Y` (from the top left of the monitor, kept inside it, floating), `open-centered` (the middle of the monitor, floating, not together with `open-position`), `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), `content-type "game"|"video"|"photo"|"none"` (what the window shows, whatever its client says through wp_content_type_v1: with `game`, `video` or `photo`, a fullscreen window covering a monitor with `content-type-hint` makes jff tell the monitor a game, a video or a photo is on screen, which X11 and Proton windows cannot say for themselves, `none` ignores what the client says, set when the window opens like `opacity`, a rule with only a `content-type` does not use up the one rule a window gets either), `always-on-top` (the window stays above the ones that are not, even above a fullscreen one, set when the window opens like `opacity`, a rule with only an `always-on-top` does not use up the one rule a window gets either), `sticky` (the window is shown on every workspace of its monitor, set when the window opens, a window that joins a container is not sticky, a rule with only a `sticky` does not use up the one rule a window gets either), the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
@@ -863,9 +863,24 @@ impl BlurWindows {
 pub struct BlurLayers {
     pub ignore: Vec<String>,
     pub only: Vec<String>,
+    /// `layer-radius N`: corner radius in pixels of the blur behind layer surfaces, for every
+    /// namespace without an entry in `radii`. 0 = square.
+    pub radius: i32,
+    /// `layer-radius "NAMESPACE" N`: a radius for one namespace, over `radius`.
+    pub radii: Vec<(String, i32)>,
 }
 
 impl BlurLayers {
+    /// Corner radius in pixels of the blur behind a layer surface with this namespace: its own
+    /// `layer-radius "NAMESPACE" N` entry (the last one wins), else the general `layer-radius N`.
+    pub fn radius_for(&self, namespace: &str) -> i32 {
+        self.radii
+            .iter()
+            .rev()
+            .find(|(n, _)| n == namespace)
+            .map_or(self.radius, |(_, radius)| *radius)
+    }
+
     /// Whether `namespace` is on the `only-layer` list.
     pub fn listed(&self, namespace: &str) -> bool {
         self.only.iter().any(|n| n == namespace)
@@ -2485,6 +2500,31 @@ fn int_arg(node: &KdlNode, max: i32) -> anyhow::Result<i32> {
     }
 }
 
+/// The arguments of `layer-radius`: `N`, or `"NAMESPACE" N`, with N in `0..=MAX_RADIUS`.
+fn layer_radius_arg(node: &KdlNode) -> anyhow::Result<(Option<String>, i32)> {
+    let name = node.name().value();
+    let radius = |value: &KdlValue| {
+        value
+            .as_integer()
+            .and_then(|n| i32::try_from(n).ok())
+            .filter(|n| (0..=MAX_RADIUS).contains(n))
+            .with_context(|| format!("{name} takes a radius from 0 to {MAX_RADIUS}"))
+    };
+    match positional(node).as_slice() {
+        [value] => Ok((None, radius(value)?)),
+        [namespace, value] => {
+            let namespace = namespace
+                .as_string()
+                .map(str::to_owned)
+                .with_context(|| format!("{name} takes a namespace string, then a radius"))?;
+            Ok((Some(namespace), radius(value)?))
+        }
+        _ => bail!(
+            "{name} takes a radius, or a namespace and a radius: {name} \"JFShell-Bottom\" 16"
+        ),
+    }
+}
+
 /// One integer argument in `range`, a luminance in cd/m² like `sdr-white 203`.
 fn nits_arg(node: &KdlNode, range: &RangeInclusive<u32>, example: u32) -> anyhow::Result<u32> {
     let name = node.name().value();
@@ -2828,6 +2868,12 @@ fn parse_blur(node: &KdlNode) -> anyhow::Result<(Blur, BlurLayers, BlurWindows)>
             // With any `only-layer`, only those namespaces are blurred, whole surface, on any
             // layer (the `bottom` layer too).
             "only-layer" => layers.only.push(string_arg(child)?),
+            // Corner radius of the blur behind layer surfaces: `layer-radius 16` for all of
+            // them, `layer-radius "JFShell-Bottom" 16` for one namespace (wins over the former).
+            "layer-radius" => match layer_radius_arg(child)? {
+                (None, radius) => layers.radius = radius,
+                (Some(namespace), radius) => layers.radii.push((namespace, radius)),
+            },
             // App ids (`jff msg` windows), e.g. `ignore-window "firefox"`: never blurred.
             "ignore-window" => windows.ignore.push(string_arg(child)?),
             // With any `only-window`, only those app ids are blurred.

@@ -58,6 +58,8 @@ struct BackgroundEffect {
     options: Option<BlurOptions>,
     /// Strength of the last frame's blur.
     alpha: f32,
+    /// Shape of the last frame's rounded mask (`Rounding::shape`), `None` for square.
+    mask: Option<(Rectangle<i32, Physical>, i32)>,
 }
 
 impl BackgroundEffect {
@@ -80,6 +82,15 @@ impl BackgroundEffect {
             self.damage();
         }
     }
+
+    /// Same for the rounded corners: a new radius (a config reload) or a new rectangle moves
+    /// no pixel behind the blur, so without this the old corners would stay on screen.
+    fn set_mask(&mut self, mask: Option<(Rectangle<i32, Physical>, i32)>) {
+        if self.mask != mask {
+            self.mask = mask;
+            self.damage();
+        }
+    }
 }
 
 struct SurfaceBackgroundEffect(Mutex<BackgroundEffect>);
@@ -91,6 +102,7 @@ impl SurfaceBackgroundEffect {
                 framebuffer: FramebufferEffect::new(),
                 options: None,
                 alpha: 1.0,
+                mask: None,
             }))
         })
     }
@@ -140,6 +152,27 @@ pub fn visible_rect(
     };
     tracing::trace!("popup geometry {geometry:?}, input region {bounds:?}, blurred {visible:?}");
     visible
+}
+
+/// The rectangle a layer surface's blur covers, in frame coordinates: the bounds of the
+/// client's blur region, or `fallback_geo` (surface coordinates) when it sent none. This is what
+/// `layer-radius` rounds. `None` when nothing is blurred (an empty region, no buffer).
+pub fn blur_bounds(
+    surface: &WlSurface,
+    surface_loc: Point<i32, Logical>,
+    fallback_geo: Option<Rectangle<i32, Logical>>,
+) -> Option<Rectangle<i32, Logical>> {
+    with_states(surface, |states| match get_cached_blur_region(states) {
+        Some(rects) => {
+            let view = surface_view_geo(states)?;
+            let bounds = rects.iter().copied().reduce(|a, b| a.merge(b))?;
+            Some(Rectangle::new(
+                bounds.loc + view.loc + surface_loc,
+                bounds.size,
+            ))
+        }
+        None => fallback_geo.map(|geo| Rectangle::new(geo.loc + surface_loc, geo.size)),
+    })
 }
 
 /// Push the blur element for `surface`, if it should have one.
@@ -261,6 +294,7 @@ pub fn render_for_surface_faded(
         let mut effect = effect.0.lock().unwrap();
         effect.set_options(options);
         effect.set_alpha(alpha);
+        effect.set_mask(mask.map(Rounding::shape));
 
         let subregion = TransformedRegion {
             rects,
