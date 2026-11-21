@@ -92,6 +92,14 @@ warp-mouse-to-focus #true
 // `open-in-container` in a window-rule, `container-rule`, and the container binds below.
 // tiling-containers #true
 
+// Remember how every container is arranged (off by default, needs `tiling-containers`). The
+// splits, their ratios and which window stands where are kept, by the app ids of the windows,
+// until jff ends. When windows with the same app ids are tiled into a new container together
+// again, say you dragged one of three kitty windows to the edge, which takes the container
+// apart, and then one to the edge again, which tiles all three, the container gets the
+// arrangement it had instead of the default split. A `container-rule` `layout` wins over it.
+// remember-container-layouts #true
+
 // Hold this key and drag with the mouse to move/resize windows. Alt (the default), Super, Ctrl
 // or Shift.
 drag-modifier "Super"

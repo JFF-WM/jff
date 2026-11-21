@@ -1208,13 +1208,39 @@ impl<W> Desk<W> {
         tag: impl Fn(&W) -> Option<String>,
         gap: i32,
     ) -> Result<LayoutApplied, ContainerError> {
+        self.apply_container_layout_ordered(container, template, tag, &[], gap)
+    }
+
+    /// [`Desk::apply_container_layout`], with the windows offered to the slots in the order of
+    /// `prefer` first (an id that is not a member is skipped), then the members it does not
+    /// name, in tree order. Free slots take windows in that order, so it decides which window
+    /// goes where.
+    pub fn apply_container_layout_ordered(
+        &mut self,
+        container: ContainerId,
+        template: &Template,
+        tag: impl Fn(&W) -> Option<String>,
+        prefer: &[WindowId],
+        gap: i32,
+    ) -> Result<LayoutApplied, ContainerError> {
         let Some(ci) = self.container_index(container) else {
             return Err(ContainerError::NoSuchContainer);
         };
-        let (order, area) = match self.containers.get(ci) {
+        let (leaves, area) = match self.containers.get(ci) {
             Some(c) => (c.tree.leaves(), c.area),
             None => return Err(ContainerError::NoSuchContainer),
         };
+        let mut order: Vec<WindowId> = Vec::with_capacity(leaves.len());
+        for id in prefer {
+            if leaves.contains(id) && !order.contains(id) {
+                order.push(*id);
+            }
+        }
+        for id in &leaves {
+            if !order.contains(id) {
+                order.push(*id);
+            }
+        }
         let windows: Vec<(WindowId, Option<String>)> = order
             .iter()
             .filter_map(|id| self.find_by_id(*id).map(|e| (*id, tag(&e.window))))

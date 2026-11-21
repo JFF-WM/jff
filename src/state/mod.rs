@@ -200,6 +200,9 @@ pub struct JffState {
     /// `close-kill`: windows asked to close and the processes that are never killed (see
     /// `feature/close_watch.rs`).
     pub close_watch: crate::feature::close_watch::CloseWatch,
+    /// `remember-container-layouts`: how containers were arranged, by the app ids of their
+    /// windows (see `feature/layout_memory.rs`).
+    pub layout_memory: crate::primitives::layout_memory::LayoutMemory<crate::desk::WindowId>,
     /// The stats overlay and its counters (`toggle-stats`, see `feature/stats.rs`).
     pub stats: crate::feature::stats::StatsOverlay,
     /// Installed applications, for the overview search.
@@ -661,6 +664,7 @@ impl JffState {
             tile_carry: None,
             osd: crate::feature::osd::Osd::new(config.osd().font.clone()),
             close_watch: crate::feature::close_watch::CloseWatch::default(),
+            layout_memory: crate::primitives::layout_memory::LayoutMemory::default(),
             stats: crate::feature::stats::StatsOverlay::new(),
             app_index: crate::feature::app_index::AppIndex::new(),
             app_restore: crate::feature::app_restore::AppRestore::default(),

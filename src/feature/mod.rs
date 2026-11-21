@@ -9,6 +9,7 @@ pub mod containers;
 pub mod dnd;
 pub mod hdr_control;
 pub mod icc;
+pub mod layout_memory;
 pub mod monitors;
 pub mod osd;
 pub mod outputs;

@@ -199,7 +199,10 @@ impl JffState {
         self.desk.float_in_place_where(|w| w == window);
 
         let area = geom::inset_rect(free, self.config.maximize_inset());
-        self.auto_apply_layout_any(id, &[snapped.clone(), window.clone()]);
+        // A rule's layout first, else the way these windows were arranged before.
+        if !self.auto_apply_layout_any(id, &[snapped.clone(), window.clone()]) {
+            self.restore_container_layout(id);
+        }
         self.tile_and_configure(id, area);
         tracing::info!(
             "container {} started beside a window snapped {side:?}",
@@ -423,12 +426,14 @@ impl JffState {
     }
 
     /// Applies the first `container-rule` `layout` that fits one of `windows`, the members of the new container `id`.
-    fn auto_apply_layout_any(&mut self, id: ContainerId, windows: &[Window]) {
+    /// Returns true when one applied.
+    fn auto_apply_layout_any(&mut self, id: ContainerId, windows: &[Window]) -> bool {
         for window in windows {
             if self.auto_apply_layout(id, window) {
-                return;
+                return true;
             }
         }
+        false
     }
 
     /// A window whose `container-rule` has a `layout` opened with no container to join: it starts one that fills the usable area, and the windows that open from it join.
@@ -1003,6 +1008,8 @@ impl JffState {
     /// the others, and the container is gone. `keep` (the window the user carried) goes on top
     /// and has the keyboard. A fullscreen member stays fullscreen.
     fn dissolve_container(&mut self, id: ContainerId, keep: &Window) {
+        // The windows come back as a container later: remember how this one is arranged.
+        self.remember_container_layout(id);
         let members: Vec<Window> = self
             .desk
             .members(id)
@@ -1059,6 +1066,8 @@ impl JffState {
         let size = window.geometry().size;
         let monitor = self.rect_for_window(pos, (size.w, size.h));
         let (new_pos, new_size) = shrunk_geometry(monitor, at);
+        // With the window in it, so the same windows tiled together again get this back.
+        self.remember_container_layout(from);
         if !self.desk.leave_container(|w| w == window) {
             return None;
         }
@@ -1154,7 +1163,10 @@ impl JffState {
         let members: Vec<Window> = std::iter::once(window.clone())
             .chain(others.iter().cloned())
             .collect();
-        self.auto_apply_layout_any(id, &members);
+        // A rule's layout first, else the way these windows were arranged before.
+        if !self.auto_apply_layout_any(id, &members) {
+            self.restore_container_layout(id);
+        }
         self.tile_and_configure(id, area);
         tracing::info!(
             "container {} started by a window snapped {side:?}",

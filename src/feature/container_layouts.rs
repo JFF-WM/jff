@@ -72,6 +72,9 @@ impl JffState {
     /// opening them, or after some were closed). A layout with no tagged slot is kept while the
     /// container has fewer windows than it has slots. `save-container-layout` saves it as it is.
     pub(crate) fn autosave_container_layout(&mut self, id: ContainerId) {
+        // Called after every change the user finishes making to a container, which is also
+        // when `remember-container-layouts` takes its snapshot.
+        self.remember_container_layout(id);
         let Some(name) = self.layout_autosave.get(&id).cloned() else {
             return;
         };

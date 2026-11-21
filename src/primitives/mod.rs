@@ -21,6 +21,7 @@ pub mod hdr_scanout;
 pub mod input_settings;
 pub mod json;
 pub mod layout;
+pub mod layout_memory;
 pub mod layout_template;
 pub mod overview_grid;
 pub mod region;

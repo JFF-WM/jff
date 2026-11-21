@@ -26,6 +26,7 @@
 //! `focus-follows-mouse` gives the keyboard to the window under the pointer as soon as the pointer moves onto it, without a click and without raising it. The keyboard stays where it is while the overview, the screenshot selection or the lock screen is up, a panel or launcher has the keyboard, a menu is open, or a button is held. Off by default.
 //!
 //! `tiling-containers` turns on tiling containers (groups of windows that tile among themselves, see `desk::container`), and is off by default. It accepts a bare name or `#true` / `#false`.
+//! `remember-container-layouts` (off by default, needs `tiling-containers`) remembers how every container was arranged (its splits and ratios, and which window stood where) by the app ids of its windows, until jff ends. When windows with the same app ids are tiled into a new container together again, for instance after one was dragged to the edge, which takes the container apart, and then another one is dragged to the edge, which tiles them all again, the container gets that arrangement instead of the default split. A `container-rule` `layout` wins over it. It accepts a bare name or `#true` / `#false`.
 //! `restore-apps` starts the applications that were open when the last session ended (one launch per app, found by the app id of its windows in the installed `.desktop` files, see `feature::app_restore`), puts each of their windows on the monitor and the workspace it was on, and keeps that list up to date while you work. It is off by default, and while it is off jff neither reads nor writes the list. It accepts a bare name or `#true` / `#false`. Turning it on in a running session starts saving, and the next start restores. Its monitor and workspace win over those of a `window-rule`, a monitor that is not connected any more leaves the window where it opens by default.
 //! `container-rule { match app-id="…", title="…", tag="…", name "…" }` (any number, the `match` lines all have to hold, the first rule that fits a window gives the container its name): a rule does not create a container, it names the one the user creates, from the first window that fits. `name` and `layout "NAME"` are its actions (`layout` applies the saved container layout NAME, see `save-container-layout`, every time a window that fits the rule joins a container, so tagged windows find their slot as they open), `jff check-config` warns about a rule with neither, and any other key inside it is an error.
 //! `binds` has five actions for containers: `focus-container "NAME"` focuses the first container with that name on the current workspace (an error toast when there is none), `container-next` and `container-prev` move the focus to the next or previous window of the focused window's container in tree order, wrapping, and do nothing for a window that is in no container. `maximize` on a window of a container makes it fill the container's rectangle, the others stay under it, and `maximize` again (or the window closing) shows the tree again. A window that closes leaves the tree, and the others take its room. `container-drag` picks up the focused window of a container with the pointer: the next left click puts it down (a right click cancels), over another window of a container the middle swaps the two places and an edge puts it beside that window, at the edge of the monitor or off every container it leaves the container and snaps, maximizes or floats as any dropped window does. Dragging a window of a container by its titlebar or with `drag-modifier` does the same. `container-eject` takes the focused window out of its container and floats it. Both do nothing for a window that is in no container. `save-container-layout "NAME"` saves the shape of the focused window's container (its splits and ratios, one slot per window, the slot of a tagged window keeps the tag, see `window-rule` `tag`) and `apply-container-layout "NAME"` puts the container in that shape again: each window goes to the slot with its tag, the others fill the free slots in their current order, a slot with no window closes up and a window with no slot is split off the last one. Both show an error toast when they cannot. The layouts are kept in `$XDG_STATE_HOME/jff-wm/container-layouts` (see `jff msg layout-list`).
@@ -202,6 +203,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "outputs",
     "window-rule",
     "tiling-containers",
+    "remember-container-layouts",
     "container-rule",
     "color-representation",
     "color-management",
@@ -1571,6 +1573,9 @@ pub struct Config {
     window_rules: Vec<WindowRule>,
     /// `tiling-containers`: windows can be grouped in tiling containers. Off by default.
     tiling_containers: bool,
+    /// `remember-container-layouts`: windows tiled together again get the arrangement their
+    /// container had. Off by default.
+    remember_container_layouts: bool,
     /// `container-rule` blocks, in file order.
     container_rules: Vec<ContainerRule>,
     /// `color-representation { yuv }`: draw YUV buffers with the matrix and range the client
@@ -1635,6 +1640,7 @@ impl Default for Config {
                 autostart: Vec::new(),
                 window_rules: Vec::new(),
                 tiling_containers: false,
+                remember_container_layouts: false,
                 container_rules: Vec::new(),
                 color_representation_yuv: true,
                 color_management: ColorManagementConfig::default(),
@@ -1717,6 +1723,11 @@ impl Config {
             .is_some_and(|c| c.nodes().iter().any(|n| n.name().value() != "enable"));
         if has_close_kill_settings && !config.close_kill().enable {
             warnings.push("close-kill has settings but no `enable`, nothing is killed".to_string());
+        }
+        if config.remember_container_layouts() && !config.tiling_containers() {
+            warnings.push(
+                "remember-container-layouts does nothing without `tiling-containers`".to_string(),
+            );
         }
         let border = config.border();
         if border.animate != BorderAnimation::None && !border.animated() {
@@ -2002,6 +2013,7 @@ impl Config {
         }
 
         let tiling_containers = parse_flag(&doc, "tiling-containers", false)?;
+        let remember_container_layouts = parse_flag(&doc, "remember-container-layouts", false)?;
         let mut container_rules = Vec::new();
         for node in doc.nodes() {
             if node.name().value() == "container-rule" {
@@ -2049,6 +2061,7 @@ impl Config {
             autostart,
             window_rules,
             tiling_containers,
+            remember_container_layouts,
             container_rules,
             color_representation_yuv,
             color_management,
@@ -2310,6 +2323,12 @@ impl Config {
     /// Whether windows can be grouped in tiling containers (`tiling-containers`, off by default).
     pub fn tiling_containers(&self) -> bool {
         self.tiling_containers
+    }
+
+    /// Whether a container's arrangement is remembered and given back to the same windows
+    /// tiled together again (`remember-container-layouts`, off by default).
+    pub fn remember_container_layouts(&self) -> bool {
+        self.remember_container_layouts
     }
 
     /// The `container-rule` blocks, in file order.
