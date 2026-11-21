@@ -214,6 +214,10 @@ pub fn run() -> anyhow::Result<()> {
 
     // xwayland-satellite is optional, when present it exports DISPLAY for spawned apps.
     let mut satellite = crate::feature::xwayland::spawn();
+    // Its one client owns every X11 window: `close-kill` must never kill it.
+    if let Some(child) = &satellite {
+        state.close_watch.protect(child.id());
+    }
 
     // Has to run after the satellite so DISPLAY ends up in the exported environment.
     crate::feature::portals::setup(state.backend.is_tty());

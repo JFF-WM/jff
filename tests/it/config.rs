@@ -99,3 +99,72 @@ fn layer_radius_has_a_range_and_a_shape() {
         assert!(Config::parse(&text).is_err(), "{line}");
     }
 }
+
+#[test]
+fn close_kill_is_off_by_default_and_waits_five_seconds() {
+    use std::time::Duration;
+    for text in ["", "close-kill { }", "close-kill { seconds 9; }"] {
+        let config = Config::parse(text).unwrap();
+        assert!(!config.close_kill().enable, "{text:?}");
+    }
+    let config = Config::parse("").unwrap();
+    assert_eq!(config.close_kill().timeout, Duration::from_secs(5));
+}
+
+#[test]
+fn close_kill_takes_enable_and_seconds() {
+    use std::time::Duration;
+    let config = Config::parse("close-kill { enable; }").unwrap();
+    assert!(config.close_kill().enable);
+    assert_eq!(config.close_kill().timeout, Duration::from_secs(5));
+
+    let config = Config::parse("close-kill { enable; seconds 12; }").unwrap();
+    assert!(config.close_kill().enable);
+    assert_eq!(config.close_kill().timeout, Duration::from_secs(12));
+
+    let config = Config::parse("close-kill { enable; seconds 2.5; }").unwrap();
+    assert_eq!(config.close_kill().timeout, Duration::from_millis(2500));
+
+    let config = Config::parse("close-kill { enable #false; seconds 3; }").unwrap();
+    assert!(!config.close_kill().enable);
+}
+
+#[test]
+fn close_kill_seconds_has_a_range_and_unknown_keys_are_errors() {
+    for line in [
+        "seconds 0",
+        "seconds 0.5",
+        "seconds -1",
+        "seconds 3601",
+        "seconds",
+        "seconds \"x\"",
+    ] {
+        let text = format!("close-kill {{ enable; {line}; }}");
+        assert!(Config::parse(&text).is_err(), "{line}");
+    }
+    assert!(Config::parse("close-kill { enable; timeout 5; }").is_err());
+}
+
+#[test]
+fn check_config_warns_about_close_kill_settings_without_enable() {
+    let warnings = Config::check_text("close-kill { seconds 3; }").unwrap();
+    assert!(
+        warnings.iter().any(|w| w.contains("close-kill")),
+        "{warnings:?}"
+    );
+    let warnings = Config::check_text("close-kill { enable; seconds 3; }").unwrap();
+    assert!(
+        !warnings.iter().any(|w| w.contains("close-kill")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn close_kill_seconds_read_as_text() {
+    use jff_wm::feature::close_watch::seconds_text;
+    use std::time::Duration;
+    assert_eq!(seconds_text(Duration::from_secs(1)), "1 second");
+    assert_eq!(seconds_text(Duration::from_secs(5)), "5 seconds");
+    assert_eq!(seconds_text(Duration::from_millis(2500)), "2.5 seconds");
+    assert_eq!(seconds_text(Duration::from_millis(1250)), "1.25 seconds");
+}

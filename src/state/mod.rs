@@ -197,6 +197,9 @@ pub struct JffState {
     /// pointer until it is put down (see `feature/containers.rs`, `TileMoveGrab`).
     pub tile_carry: Option<crate::feature::containers::TileCarry>,
     pub osd: crate::feature::osd::Osd,
+    /// `close-kill`: windows asked to close and the processes that are never killed (see
+    /// `feature/close_watch.rs`).
+    pub close_watch: crate::feature::close_watch::CloseWatch,
     /// The stats overlay and its counters (`toggle-stats`, see `feature/stats.rs`).
     pub stats: crate::feature::stats::StatsOverlay,
     /// Installed applications, for the overview search.
@@ -657,6 +660,7 @@ impl JffState {
             dnd_icon: None,
             tile_carry: None,
             osd: crate::feature::osd::Osd::new(config.osd().font.clone()),
+            close_watch: crate::feature::close_watch::CloseWatch::default(),
             stats: crate::feature::stats::StatsOverlay::new(),
             app_index: crate::feature::app_index::AppIndex::new(),
             app_restore: crate::feature::app_restore::AppRestore::default(),
@@ -1397,6 +1401,7 @@ impl XdgShellHandler for JffState {
         if let Some((window, _, _, Some(container))) = &closing {
             self.container_after_close(*container, window);
         }
+        self.close_watch_gone(surface.wl_surface());
         self.dialog_toplevels.remove(surface.wl_surface());
         self.settling_dialogs.remove(surface.wl_surface());
         self.focus_before_open.remove(surface.wl_surface());
@@ -2339,12 +2344,12 @@ impl JffState {
         let Some(focus) = self.seat.get_keyboard().and_then(|k| k.current_focus()) else {
             return;
         };
-        if let Some(toplevel) = self
+        let toplevel = self
             .desk
             .find_by(|w| is_window_for(w, &focus))
-            .and_then(|e| e.window.toplevel())
-        {
-            toplevel.send_close();
+            .and_then(|e| e.window.toplevel().cloned());
+        if let Some(toplevel) = toplevel {
+            self.request_close(&toplevel);
         }
     }
 

@@ -6,7 +6,7 @@
 //! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9, per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
-//! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `only-layer \"NS\"`: blur only those layer namespaces, whole surface, on any layer, `layer-radius N` / `layer-radius \"NS\" N`: corner radius of the blur behind layer surfaces, all of them or one namespace, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
+//! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `only-layer \"NS\"`: blur only those layer namespaces, whole surface, on any layer, `layer-radius N` / `layer-radius \"NS\" N`: corner radius of the blur behind layer surfaces, all of them or one namespace, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `close-kill { … }` (`enable`, `seconds N`: a window that is still open `N` seconds (5 by default, 1 to 3600, fractions are fine) after it was asked to close, by a bind, the overview, a taskbar or `jff msg close`, has its process killed with SIGKILL and a toast says why, off by default, the process is that of the window's Wayland client, so every window of that process goes with it, X11 windows are never killed, they all share the process of xwayland-satellite), `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
 //! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `open-position X Y` (from the top left of the monitor, kept inside it, floating), `open-centered` (the middle of the monitor, floating, not together with `open-position`), `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), `content-type "game"|"video"|"photo"|"none"` (what the window shows, whatever its client says through wp_content_type_v1: with `game`, `video` or `photo`, a fullscreen window covering a monitor with `content-type-hint` makes jff tell the monitor a game, a video or a photo is on screen, which X11 and Proton windows cannot say for themselves, `none` ignores what the client says, set when the window opens like `opacity`, a rule with only a `content-type` does not use up the one rule a window gets either), `always-on-top` (the window stays above the ones that are not, even above a fullscreen one, set when the window opens like `opacity`, a rule with only an `always-on-top` does not use up the one rule a window gets either), `sticky` (the window is shown on every workspace of its monitor, set when the window opens, a window that joins a container is not sticky, a rule with only a `sticky` does not use up the one rule a window gets either), the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
@@ -192,6 +192,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "cursor",
     "blur",
     "osd",
+    "close-kill",
     "switcher",
     "overview",
     "workspace-wall",
@@ -904,6 +905,33 @@ impl BlurLayers {
     }
 }
 
+/// Smallest and largest `close-kill { seconds }`.
+pub const MIN_CLOSE_KILL_SECS: f64 = 1.0;
+pub const MAX_CLOSE_KILL_SECS: f64 = 3600.0;
+/// `close-kill { seconds }` when it is not set.
+pub const DEFAULT_CLOSE_KILL_SECS: u64 = 5;
+
+/// The `close-kill { … }` block: a window that was asked to close and is still there after
+/// `seconds` gets its process killed (SIGKILL, by the pid of its Wayland client), and a toast
+/// says why. Off unless `enable` is there, since a window that is slow to close may be asking
+/// something first (a "save changes?" dialog), and killing a process takes down every window
+/// it owns. Applies on reload to the windows asked to close after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloseKillConfig {
+    pub enable: bool,
+    /// How long a window gets to close after the request.
+    pub timeout: Duration,
+}
+
+impl Default for CloseKillConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            timeout: Duration::from_secs(DEFAULT_CLOSE_KILL_SECS),
+        }
+    }
+}
+
 /// The `osd { … }` block, the toasts shown for the system bell. On unless `off`. A changed
 /// `font` applies on reload.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1533,6 +1561,7 @@ pub struct Config {
     /// Which windows get blur (`blur { ignore-window "…", only-window "…" }`).
     blur_windows: BlurWindows,
     osd: OsdConfig,
+    close_kill: CloseKillConfig,
     switcher: SwitcherConfig,
     overview: OverviewConfig,
     workspace_wall: Option<WorkspaceWallConfig>,
@@ -1598,6 +1627,7 @@ impl Default for Config {
                 blur_layers: BlurLayers::default(),
                 blur_windows: BlurWindows::default(),
                 osd: OsdConfig::default(),
+                close_kill: CloseKillConfig::default(),
                 switcher: SwitcherConfig::default(),
                 overview: OverviewConfig::default(),
                 workspace_wall: None,
@@ -1680,6 +1710,13 @@ impl Config {
             .is_some_and(|c| c.nodes().iter().any(|n| n.name().value() != "enable"));
         if has_log_settings && !config.log().enable {
             warnings.push("log has settings but no `enable`, nothing is written".to_string());
+        }
+        let has_close_kill_settings = doc
+            .get("close-kill")
+            .and_then(KdlNode::children)
+            .is_some_and(|c| c.nodes().iter().any(|n| n.name().value() != "enable"));
+        if has_close_kill_settings && !config.close_kill().enable {
+            warnings.push("close-kill has settings but no `enable`, nothing is killed".to_string());
         }
         let border = config.border();
         if border.animate != BorderAnimation::None && !border.animated() {
@@ -1897,6 +1934,11 @@ impl Config {
             Some(node) => parse_osd(node).context("in osd")?,
         };
 
+        let close_kill = match doc.get("close-kill") {
+            None => CloseKillConfig::default(),
+            Some(node) => parse_close_kill(node).context("in close-kill")?,
+        };
+
         let workspace_wall = match doc.get("workspace-wall") {
             None => None,
             Some(node) => parse_workspace_wall(node).context("in workspace-wall")?,
@@ -1999,6 +2041,7 @@ impl Config {
             blur_layers,
             blur_windows,
             osd,
+            close_kill,
             switcher,
             overview,
             workspace_wall,
@@ -2140,6 +2183,10 @@ impl Config {
 
     pub fn osd(&self) -> &OsdConfig {
         &self.osd
+    }
+
+    pub fn close_kill(&self) -> &CloseKillConfig {
+        &self.close_kill
     }
 
     pub fn switcher(&self) -> &SwitcherConfig {
@@ -2944,6 +2991,31 @@ fn parse_osd(node: &KdlNode) -> anyhow::Result<OsdConfig> {
             other => bail!("unknown osd setting {other:?}"),
         }
     }
+    Ok(config)
+}
+
+/// `close-kill { enable, seconds N }`. `seconds` may be fractional (`seconds 2.5`).
+fn parse_close_kill(node: &KdlNode) -> anyhow::Result<CloseKillConfig> {
+    let mut config = CloseKillConfig::default();
+    let Some(children) = node.children() else {
+        return Ok(config);
+    };
+    for child in children.nodes() {
+        match child.name().value() {
+            "seconds" => {
+                let secs = float_arg(child)?;
+                if !(MIN_CLOSE_KILL_SECS..=MAX_CLOSE_KILL_SECS).contains(&secs) {
+                    bail!(
+                        "seconds takes a number from {MIN_CLOSE_KILL_SECS} to {MAX_CLOSE_KILL_SECS}"
+                    );
+                }
+                config.timeout = Duration::from_secs_f64(secs);
+            }
+            "enable" => {}
+            other => bail!("unknown close-kill setting {other:?}"),
+        }
+    }
+    config.enable = parse_flag(children, "enable", config.enable)?;
     Ok(config)
 }
 

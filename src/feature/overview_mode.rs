@@ -2555,8 +2555,8 @@ impl JffState {
                 // Pressed and released on the close button: close that window.
                 if button == BTN_LEFT && on_close {
                     if let Some(window) = self.overview_close_hit(pointer.current_location()) {
-                        if let Some(toplevel) = window.toplevel() {
-                            toplevel.send_close();
+                        if let Some(toplevel) = window.toplevel().cloned() {
+                            self.request_close(&toplevel);
                         }
                     }
                     return;
@@ -2581,8 +2581,8 @@ impl JffState {
                 match self.overview_hit(pointer.current_location()) {
                     Some(window) if button == BTN_LEFT => self.end_overview(Some(window)),
                     Some(window) if button == BTN_MIDDLE => {
-                        if let Some(toplevel) = window.toplevel() {
-                            toplevel.send_close();
+                        if let Some(toplevel) = window.toplevel().cloned() {
+                            self.request_close(&toplevel);
                         }
                     }
                     Some(window) if button == BTN_RIGHT => {

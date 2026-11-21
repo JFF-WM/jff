@@ -224,6 +224,18 @@ osd {
     font "Inter"      // a family name, "sans-serif" by default
 }
 
+// Kill the process of a window that does not close when it is asked to (off by default).
+// "Asked to close" is the `close` bind, the overview's close button and middle click, a taskbar
+// and `jff msg close`. If the window is still open after `seconds`, jff sends SIGKILL to the
+// process of its client and shows a toast that says why (shown even with `osd { off }`).
+// Careful: the whole process dies, with every other window it has and anything unsaved. A
+// window that is slow to close because it asks "save changes?" counts as not closing.
+// X11 windows are never killed, they all belong to one process (xwayland-satellite).
+close-kill {
+    enable
+    seconds 5         // 1 to 3600, fractions are fine (2.5), 5 by default
+}
+
 // Screenshots.
 screenshot {
     // Where screenshots are saved. Leave out to only copy to the clipboard.

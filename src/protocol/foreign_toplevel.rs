@@ -466,7 +466,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, u64> for JffState {
                     state.focus_window(&window);
                 }
             }
-            Request::Close => toplevel.send_close(),
+            Request::Close => state.request_close(&toplevel),
             Request::SetMinimized => state.minimize_window(&window),
             Request::UnsetMinimized => state.unminimize_window(&window),
             Request::SetRectangle {

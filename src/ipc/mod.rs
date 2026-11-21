@@ -959,8 +959,11 @@ impl JffState {
             }
             Request::Close(id) => {
                 let window = self.target_window(id)?;
-                let toplevel = window.toplevel().ok_or("the window cannot be closed")?;
-                toplevel.send_close();
+                let toplevel = window
+                    .toplevel()
+                    .cloned()
+                    .ok_or("the window cannot be closed")?;
+                self.request_close(&toplevel);
                 Ok("{\"ok\":true}\n".to_string())
             }
             Request::Maximize(id, how) => {
