@@ -94,7 +94,7 @@ impl DbusAnnotationManager {
     }
 
     /// The next [`DbusAnnotation::id`].
-    fn next_id(&mut self) -> u64 {
+    pub(crate) fn next_id(&mut self) -> u64 {
         self.last_id += 1;
         self.last_id
     }
@@ -160,6 +160,54 @@ pub fn surface_address(surface: &WlSurface, interface: &str) -> Option<DbusAddre
             .find(|slot| slot.annotation.interface == interface)
             .and_then(|slot| slot.annotation.address.clone())
     })
+}
+
+/// File a new, addressless annotation of `interface` on `surface`, owned by the protocol object
+/// `owner`. For other protocols that carry the same thing (`kde_appmenu.rs`). Returns `false`
+/// and stores nothing when `surface` already has an annotation with this interface.
+pub(crate) fn add_surface_slot(
+    manager: &mut DbusAnnotationManager,
+    surface: &WlSurface,
+    owner: ObjectId,
+    interface: &str,
+) -> bool {
+    let taken = with_slots(surface, |slots| {
+        slots.iter().any(|s| s.annotation.interface == interface)
+    });
+    if taken {
+        return false;
+    }
+    let id = manager.next_id();
+    with_slots(surface, |slots| {
+        slots.push(Slot {
+            owner,
+            annotation: DbusAnnotation {
+                id,
+                interface: interface.to_string(),
+                address: None,
+            },
+        });
+    });
+    true
+}
+
+/// Give the annotation `owner` made on `surface` an address. Does nothing when `owner` has no
+/// annotation there.
+pub(crate) fn set_surface_slot_address(
+    surface: &WlSurface,
+    owner: &ObjectId,
+    address: DbusAddress,
+) {
+    with_slots(surface, |slots| {
+        if let Some(slot) = slots.iter_mut().find(|slot| &slot.owner == owner) {
+            slot.annotation.address = Some(address);
+        }
+    });
+}
+
+/// Drop the annotation `owner` made on `surface`, if it has one.
+pub(crate) fn remove_surface_slot(surface: &WlSurface, owner: &ObjectId) {
+    with_slots(surface, |slots| slots.retain(|slot| &slot.owner != owner));
 }
 
 impl GlobalDispatch<XdgDbusAnnotationManagerV1, ()> for JffState {

@@ -156,7 +156,7 @@
 //!  "locked":false,                         the session is locked
 //!  "popups":[POPUP,...],                   mapped menus and popovers
 //!  "layers":[LAYER,...],                   mapped panels, bars, launchers, wallpapers
-//!  "dbus_annotations":[ANNOTATION,...]}    DBus objects apps tied to a window or to themselves
+//!  "dbus_annotations":[ANNOTATION,...]}    DBus objects apps tied to a window or to themselves (xdg-dbus-annotation, KDE appmenu)
 //! ```
 //!
 //! Following events are written flat, `{"event":"title","id":5,"title":"..."}`, in an order a

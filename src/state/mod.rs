@@ -110,6 +110,7 @@ use crate::protocol::foreign_toplevel::ForeignToplevel;
 use crate::protocol::gamma_control::GammaControl;
 use crate::protocol::image_copy::ImageCopy;
 use crate::protocol::input_timestamps::InputTimestamps;
+use crate::protocol::kde_appmenu::KdeAppmenuManager;
 use crate::protocol::output_management::OutputManagement;
 use crate::protocol::output_power::OutputPower;
 use crate::protocol::pointer_warp::PointerWarp;
@@ -339,6 +340,8 @@ pub struct JffState {
     pub toplevel_tag_manager: ToplevelTagManager,
     /// xdg-dbus-annotation: DBus objects apps tie to their windows (`protocol/xdg_dbus_annotation.rs`).
     pub dbus_annotation: DbusAnnotationManager,
+    /// KDE appmenu: the older protocol Qt and some browsers use for the same (`protocol/kde_appmenu.rs`).
+    pub kde_appmenu: KdeAppmenuManager,
     /// wlr-virtual-pointer: clients that move the pointer and click (`protocol/virtual_pointer.rs`).
     pub virtual_pointer_manager: VirtualPointerManager,
     /// zwp-virtual-keyboard: clients that type for the user (wtype, wayvnc). Smithay does the
@@ -595,6 +598,7 @@ impl JffState {
         let toplevel_drags = ToplevelDrags::new(&display_handle);
         let toplevel_tag_manager = ToplevelTagManager::new(&display_handle);
         let dbus_annotation = DbusAnnotationManager::new(&display_handle);
+        let kde_appmenu = KdeAppmenuManager::new(&display_handle);
         let virtual_pointer_manager = VirtualPointerManager::new(&display_handle);
         // A client that can type can do anything the user can: not for sandboxed apps.
         let virtual_keyboard_state =
@@ -724,6 +728,7 @@ impl JffState {
             toplevel_drags,
             toplevel_tag_manager,
             dbus_annotation,
+            kde_appmenu,
             virtual_pointer_manager,
             virtual_keyboard_state,
             transient_seats,
