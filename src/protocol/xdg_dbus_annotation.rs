@@ -205,6 +205,47 @@ pub(crate) fn set_surface_slot_address(
     });
 }
 
+/// Make the annotations `owner` has on `surface` exactly `entries`, each an interface with its
+/// address. An annotation the owner already has keeps its id when its interface is in
+/// `entries`, so a client that repeats itself does not look like a new annotation. One for an
+/// interface that another object of the surface holds is left to that object. For protocols
+/// that carry several addresses in one request (`gtk_shell.rs`).
+pub(crate) fn replace_surface_slots(
+    manager: &mut DbusAnnotationManager,
+    surface: &WlSurface,
+    owner: &ObjectId,
+    entries: Vec<(&'static str, DbusAddress)>,
+) {
+    with_slots(surface, |slots| {
+        slots.retain(|slot| {
+            &slot.owner != owner
+                || entries
+                    .iter()
+                    .any(|(interface, _)| *interface == slot.annotation.interface)
+        });
+        for (interface, address) in entries {
+            if let Some(slot) = slots
+                .iter_mut()
+                .find(|slot| slot.annotation.interface == interface)
+            {
+                if &slot.owner == owner {
+                    slot.annotation.address = Some(address);
+                }
+                continue;
+            }
+            let id = manager.next_id();
+            slots.push(Slot {
+                owner: owner.clone(),
+                annotation: DbusAnnotation {
+                    id,
+                    interface: interface.to_string(),
+                    address: Some(address),
+                },
+            });
+        }
+    });
+}
+
 /// Drop the annotation `owner` made on `surface`, if it has one.
 pub(crate) fn remove_surface_slot(surface: &WlSurface, owner: &ObjectId) {
     with_slots(surface, |slots| slots.retain(|slot| &slot.owner != owner));

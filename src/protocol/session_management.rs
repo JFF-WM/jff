@@ -605,6 +605,7 @@ impl JffState {
                 self.session_restore(toplevel, &surface, pending);
             }
         }
+        crate::protocol::gtk_shell::send_configure(toplevel);
         toplevel.send_configure();
     }
 

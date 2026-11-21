@@ -108,6 +108,7 @@ use crate::protocol::ext_foreign_toplevel::ExtForeignToplevel;
 use crate::protocol::fixes::Fixes;
 use crate::protocol::foreign_toplevel::ForeignToplevel;
 use crate::protocol::gamma_control::GammaControl;
+use crate::protocol::gtk_shell::GtkShellManager;
 use crate::protocol::image_copy::ImageCopy;
 use crate::protocol::input_timestamps::InputTimestamps;
 use crate::protocol::kde_appmenu::KdeAppmenuManager;
@@ -342,6 +343,8 @@ pub struct JffState {
     pub dbus_annotation: DbusAnnotationManager,
     /// KDE appmenu: the older protocol Qt and some browsers use for the same (`protocol/kde_appmenu.rs`).
     pub kde_appmenu: KdeAppmenuManager,
+    /// gtk_shell1: GTK's private extension: menu addresses, modal, focus requests, title bar gestures (`protocol/gtk_shell.rs`).
+    pub gtk_shell: GtkShellManager,
     /// wlr-virtual-pointer: clients that move the pointer and click (`protocol/virtual_pointer.rs`).
     pub virtual_pointer_manager: VirtualPointerManager,
     /// zwp-virtual-keyboard: clients that type for the user (wtype, wayvnc). Smithay does the
@@ -599,6 +602,7 @@ impl JffState {
         let toplevel_tag_manager = ToplevelTagManager::new(&display_handle);
         let dbus_annotation = DbusAnnotationManager::new(&display_handle);
         let kde_appmenu = KdeAppmenuManager::new(&display_handle);
+        let gtk_shell = GtkShellManager::new(&display_handle);
         let virtual_pointer_manager = VirtualPointerManager::new(&display_handle);
         // A client that can type can do anything the user can: not for sandboxed apps.
         let virtual_keyboard_state =
@@ -729,6 +733,7 @@ impl JffState {
             toplevel_tag_manager,
             dbus_annotation,
             kde_appmenu,
+            gtk_shell,
             virtual_pointer_manager,
             virtual_keyboard_state,
             transient_seats,
@@ -2465,6 +2470,7 @@ pub fn configure_mode(
     // commit (`send_initial_configure`), after a `restore_toplevel` has had its say. Sending
     // one now would end that, and make the window look mapped to its session.
     if toplevel.is_initial_configure_sent() {
+        crate::protocol::gtk_shell::send_configure(toplevel);
         toplevel.send_pending_configure();
     }
 }
@@ -2492,5 +2498,6 @@ pub fn configure_member(toplevel: &ToplevelSurface, size: (i32, i32), maximized:
         }
         state.size = Some(size.into());
     });
+    crate::protocol::gtk_shell::send_configure(toplevel);
     toplevel.send_pending_configure();
 }

@@ -57,6 +57,17 @@ impl InputSerials {
     }
 }
 
+impl InputSerials {
+    /// Whether `client` got a key press, click or touch at most `max_age` ago. For requests
+    /// that carry no serial but still say \"the user just did something here\" (gtk_shell's
+    /// `present`).
+    pub fn client_acted_within(&self, client: &ClientId, max_age: Duration) -> bool {
+        self.recent
+            .iter()
+            .any(|entry| entry.client.as_ref() == Some(client) && entry.at.elapsed() <= max_age)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

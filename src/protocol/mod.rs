@@ -10,6 +10,8 @@ pub mod ext_foreign_toplevel;
 pub mod fixes;
 pub mod foreign_toplevel;
 pub mod gamma_control;
+pub mod gtk_shell;
+pub mod gtk_shell_bindings;
 pub mod idle;
 pub mod image_copy;
 pub mod input_timestamps;

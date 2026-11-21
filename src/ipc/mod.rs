@@ -156,7 +156,7 @@
 //!  "locked":false,                         the session is locked
 //!  "popups":[POPUP,...],                   mapped menus and popovers
 //!  "layers":[LAYER,...],                   mapped panels, bars, launchers, wallpapers
-//!  "dbus_annotations":[ANNOTATION,...]}    DBus objects apps tied to a window or to themselves (xdg-dbus-annotation, KDE appmenu)
+//!  "dbus_annotations":[ANNOTATION,...]}    DBus objects apps tied to a window or to themselves (xdg-dbus-annotation, KDE appmenu, gtk_shell1)
 //! ```
 //!
 //! Following events are written flat, `{"event":"title","id":5,"title":"..."}`, in an order a
@@ -325,6 +325,10 @@
 //! made for itself, `service_name` and `object_path` are null until the app has sent an address.
 //! A `dbus-annotation` event comes when an annotation appears and whenever its address changes,
 //! `dbus-annotation-removed` when the app drops it, its window closes or the app exits.
+//!
+//! GTK windows (gtk_shell1) show up the same way, one annotation per address they gave, under the
+//! interfaces `org.gtk.Menus:menubar`, `org.gtk.Menus:app-menu`, `org.gtk.Actions:window` and
+//! `org.gtk.Actions:application`.
 //!
 //! jff never waits for a watcher: one that doesn't read fast enough (256 KiB of unsent events)
 //! is disconnected, and can just connect again to get a fresh snapshot.
