@@ -33,6 +33,8 @@ pub mod window_sdr;
 pub mod wlr_screencopy;
 pub mod wlr_screencopy_bindings;
 pub mod workspace;
+pub mod xdg_dbus_annotation;
+pub mod xdg_dbus_annotation_bindings;
 pub mod xdg_session_bindings;
 pub mod xx_hotkey;
 pub mod xx_hotkey_bindings;

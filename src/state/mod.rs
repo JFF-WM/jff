@@ -123,6 +123,7 @@ use crate::protocol::transient_seat::TransientSeats;
 use crate::protocol::virtual_pointer::VirtualPointerManager;
 use crate::protocol::wlr_screencopy::WlrScreencopy;
 use crate::protocol::workspace::ExtWorkspace;
+use crate::protocol::xdg_dbus_annotation::DbusAnnotationManager;
 use crate::protocol::xx_hotkey::Hotkeys;
 use crate::protocol::xx_image_capture_color_management::XxImageCaptureColor;
 use crate::protocol::xx_zones::Zones;
@@ -336,6 +337,8 @@ pub struct JffState {
     pub toplevel_drags: ToplevelDrags,
     /// xdg-toplevel-tag: window tags for `window-rule` (`protocol/toplevel_tag.rs`).
     pub toplevel_tag_manager: ToplevelTagManager,
+    /// xdg-dbus-annotation: DBus objects apps tie to their windows (`protocol/xdg_dbus_annotation.rs`).
+    pub dbus_annotation: DbusAnnotationManager,
     /// wlr-virtual-pointer: clients that move the pointer and click (`protocol/virtual_pointer.rs`).
     pub virtual_pointer_manager: VirtualPointerManager,
     /// zwp-virtual-keyboard: clients that type for the user (wtype, wayvnc). Smithay does the
@@ -591,6 +594,7 @@ impl JffState {
         let input_timestamps = InputTimestamps::new(&display_handle);
         let toplevel_drags = ToplevelDrags::new(&display_handle);
         let toplevel_tag_manager = ToplevelTagManager::new(&display_handle);
+        let dbus_annotation = DbusAnnotationManager::new(&display_handle);
         let virtual_pointer_manager = VirtualPointerManager::new(&display_handle);
         // A client that can type can do anything the user can: not for sandboxed apps.
         let virtual_keyboard_state =
@@ -719,6 +723,7 @@ impl JffState {
             motion_hw_time: None,
             toplevel_drags,
             toplevel_tag_manager,
+            dbus_annotation,
             virtual_pointer_manager,
             virtual_keyboard_state,
             transient_seats,

@@ -33,12 +33,14 @@ pub enum Group {
     Layers,
     /// Mouse button presses, with what was under the pointer.
     Clicks,
+    /// DBus objects apps tied to a window or to themselves (xdg-dbus-annotation).
+    DbusAnnotation,
 }
 
 impl Group {
     /// Group names as typed on the command line, for error messages.
     pub const NAMES: &'static str =
-        "windows, focus, workspaces, outputs, modes, popups, layers, clicks";
+        "windows, focus, workspaces, outputs, modes, popups, layers, clicks, dbus-annotation";
 
     pub fn parse(word: &str) -> Option<Group> {
         match word {
@@ -50,21 +52,22 @@ impl Group {
             "popups" => Some(Group::Popups),
             "layers" => Some(Group::Layers),
             "clicks" => Some(Group::Clicks),
+            "dbus-annotation" => Some(Group::DbusAnnotation),
             _ => None,
         }
     }
 
-    fn bit(self) -> u8 {
+    fn bit(self) -> u16 {
         1 << (self as u8)
     }
 }
 
 /// The groups one watcher asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GroupSet(u8);
+pub struct GroupSet(u16);
 
 impl GroupSet {
-    pub const ALL: GroupSet = GroupSet(0b1111_1111);
+    pub const ALL: GroupSet = GroupSet(0b1_1111_1111);
 
     /// No groups named means all of them.
     pub fn from_groups(groups: &[Group]) -> GroupSet {
@@ -575,6 +578,41 @@ impl LayerInfo {
     }
 }
 
+/// A DBus object an app tied to one of its windows, or to itself (xdg-dbus-annotation).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DbusAnnotationInfo {
+    pub id: u64,
+    /// The window it belongs to, `None` for an annotation of the app itself.
+    pub window: Option<u64>,
+    /// Process id of the app, from the Wayland socket's peer credentials, `None` when jff
+    /// can't tell.
+    pub pid: Option<u32>,
+    /// The interface the object is expected to implement.
+    pub interface: String,
+    /// Bus name of the service, `None` until the app has set an address.
+    pub service_name: Option<String>,
+    /// Object path on that service, `None` until the app has set an address.
+    pub object_path: Option<String>,
+}
+
+impl DbusAnnotationInfo {
+    fn members(&self) -> String {
+        format!(
+            "\"id\":{},\"window\":{},\"pid\":{},\"interface\":{},\"service_name\":{},\"object_path\":{}",
+            self.id,
+            json_id(self.window),
+            self.pid.map_or_else(|| "null".to_string(), |pid| pid.to_string()),
+            json_str(&self.interface),
+            json_opt(self.service_name.as_deref()),
+            json_opt(self.object_path.as_deref()),
+        )
+    }
+
+    pub fn to_json(&self) -> String {
+        format!("{{{}}}", self.members())
+    }
+}
+
 /// Everything `watch` reports, at one moment.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
@@ -593,6 +631,8 @@ pub struct Snapshot {
     pub popups: Vec<PopupInfo>,
     /// Mapped layer-shell surfaces.
     pub layers: Vec<LayerInfo>,
+    /// DBus objects apps tied to a window or to themselves.
+    pub dbus_annotations: Vec<DbusAnnotationInfo>,
     /// The window the user is moving with the pointer right now (a titlebar drag, or a thumbnail
     /// carried in the overview). `diff` turns
     /// changes of it into `drag` events, the snapshot itself doesn't carry it.
@@ -633,6 +673,17 @@ impl Snapshot {
         if groups.contains(Group::Layers) {
             let layers: Vec<String> = self.layers.iter().map(LayerInfo::to_json).collect();
             out.push_str(&format!(",\"layers\":[{}]", layers.join(",")));
+        }
+        if groups.contains(Group::DbusAnnotation) {
+            let annotations: Vec<String> = self
+                .dbus_annotations
+                .iter()
+                .map(DbusAnnotationInfo::to_json)
+                .collect();
+            out.push_str(&format!(
+                ",\"dbus_annotations\":[{}]",
+                annotations.join(",")
+            ));
         }
         out.push('}');
         out
@@ -743,6 +794,12 @@ pub enum Event {
     LayerClosed {
         id: u64,
     },
+    /// An app tied a DBus object to a window or to itself, or changed the address of one.
+    DbusAnnotation(DbusAnnotationInfo),
+    /// The app took a DBus annotation away, or its window or the app went away.
+    DbusAnnotationRemoved {
+        id: u64,
+    },
     /// A mouse button was pressed (not part of the snapshot diff, queued by the input code).
     Click(ClickInfo),
 }
@@ -780,6 +837,7 @@ impl Event {
             Event::PopupOpened(_) | Event::PopupClosed { .. } => Group::Popups,
             Event::LayerOpened(_) | Event::LayerClosed { .. } => Group::Layers,
             Event::Click(_) => Group::Clicks,
+            Event::DbusAnnotation(_) | Event::DbusAnnotationRemoved { .. } => Group::DbusAnnotation,
         }
     }
 
@@ -874,6 +932,12 @@ impl Event {
                 format!("{{\"event\":\"popup-opened\",{}}}", popup.members())
             }
             Event::PopupClosed { id } => format!("{{\"event\":\"popup-closed\",\"id\":{id}}}"),
+            Event::DbusAnnotation(annotation) => {
+                format!("{{\"event\":\"dbus-annotation\",{}}}", annotation.members())
+            }
+            Event::DbusAnnotationRemoved { id } => {
+                format!("{{\"event\":\"dbus-annotation-removed\",\"id\":{id}}}")
+            }
             Event::LayerOpened(layer) => {
                 format!("{{\"event\":\"layer-opened\",{}}}", layer.members())
             }
@@ -947,6 +1011,20 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
         popups_opened
             .into_iter()
             .map(|p| Event::PopupOpened(p.clone())),
+    );
+    let old_annotations: HashMap<u64, &DbusAnnotationInfo> =
+        old.dbus_annotations.iter().map(|a| (a.id, a)).collect();
+    let new_annotation_ids: HashSet<u64> = new.dbus_annotations.iter().map(|a| a.id).collect();
+    let mut annotations_changed: Vec<&DbusAnnotationInfo> = new
+        .dbus_annotations
+        .iter()
+        .filter(|a| old_annotations.get(&a.id).copied() != Some(*a))
+        .collect();
+    annotations_changed.sort_by_key(|a| a.id);
+    events.extend(
+        annotations_changed
+            .into_iter()
+            .map(|a| Event::DbusAnnotation(a.clone())),
     );
     for (before, after) in kept {
         let id = after.id;
@@ -1076,6 +1154,19 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
         .collect();
     closed.sort_unstable();
     events.extend(closed.into_iter().map(|id| Event::WindowClosed { id }));
+
+    let mut annotations_removed: Vec<u64> = old
+        .dbus_annotations
+        .iter()
+        .map(|a| a.id)
+        .filter(|id| !new_annotation_ids.contains(id))
+        .collect();
+    annotations_removed.sort_unstable();
+    events.extend(
+        annotations_removed
+            .into_iter()
+            .map(|id| Event::DbusAnnotationRemoved { id }),
+    );
 
     let mut layers_closed: Vec<u64> = old
         .layers

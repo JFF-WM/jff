@@ -1,8 +1,8 @@
 //! Tests for `jff_wm::ipc::events`.
 
 use jff_wm::ipc::events::{
-    diff, ContainerInfo, ContainerRef, Event, Group, GroupSet, IconRef, LayerInfo, OutputColor,
-    OutputHdr, OutputInfo, PopupInfo, Snapshot, WindowInfo,
+    diff, ContainerInfo, ContainerRef, DbusAnnotationInfo, Event, Group, GroupSet, IconRef,
+    LayerInfo, OutputColor, OutputHdr, OutputInfo, PopupInfo, Snapshot, WindowInfo,
 };
 use jff_wm::primitives::color::{ImageDescription, NamedPrimaries};
 
@@ -718,6 +718,10 @@ fn groups_are_parsed_and_collected() {
     assert_eq!(Group::parse("modes"), Some(Group::Modes));
     assert_eq!(Group::parse("popups"), Some(Group::Popups));
     assert_eq!(Group::parse("layers"), Some(Group::Layers));
+    assert_eq!(
+        Group::parse("dbus-annotation"),
+        Some(Group::DbusAnnotation)
+    );
     assert_eq!(Group::parse("window"), None);
     assert_eq!(Group::parse("Windows"), None);
 
@@ -730,6 +734,8 @@ fn groups_are_parsed_and_collected() {
         Group::Modes,
         Group::Popups,
         Group::Layers,
+        Group::Clicks,
+        Group::DbusAnnotation,
     ] {
         assert!(all.contains(group));
     }
@@ -1151,7 +1157,7 @@ fn an_empty_snapshot_is_valid() {
         s.to_json(GroupSet::ALL),
         "{\"event\":\"snapshot\",\"windows\":[],\"workspace\":1,\"count\":9,\
              \"focused\":null,\"outputs\":[],\"overview\":false,\"screenshot\":false,\
-             \"locked\":false,\"popups\":[],\"layers\":[]}"
+             \"locked\":false,\"popups\":[],\"layers\":[],\"dbus_annotations\":[]}"
     );
 }
 
@@ -1384,4 +1390,97 @@ fn sticky_is_an_event_and_a_member_of_the_window() {
     assert_eq!(event.group(), Group::Windows);
     assert!(stuck.windows[0].to_json().contains("\"sticky\":true"));
     assert!(old.windows[0].to_json().contains("\"sticky\":false"));
+}
+
+fn annotation(id: u64, window: Option<u64>, address: Option<(&str, &str)>) -> DbusAnnotationInfo {
+    DbusAnnotationInfo {
+        id,
+        window,
+        pid: Some(4242),
+        interface: "com.canonical.dbusmenu".to_string(),
+        service_name: address.map(|(service, _)| service.to_string()),
+        object_path: address.map(|(_, path)| path.to_string()),
+    }
+}
+
+#[test]
+fn a_dbus_annotation_is_announced_updated_and_removed() {
+    let empty = snapshot(vec![window(1)]);
+    let mut bare = snapshot(vec![window(1)]);
+    bare.dbus_annotations = vec![annotation(1, Some(1), None)];
+    let mut set = snapshot(vec![window(1)]);
+    set.dbus_annotations = vec![annotation(1, Some(1), Some((":1.42", "/MenuBar")))];
+
+    assert_eq!(
+        diff(&empty, &bare),
+        vec![Event::DbusAnnotation(annotation(1, Some(1), None))]
+    );
+    assert_eq!(
+        diff(&bare, &set),
+        vec![Event::DbusAnnotation(annotation(
+            1,
+            Some(1),
+            Some((":1.42", "/MenuBar"))
+        ))]
+    );
+    assert!(diff(&set, &set).is_empty());
+    assert_eq!(
+        diff(&set, &empty),
+        vec![Event::DbusAnnotationRemoved { id: 1 }]
+    );
+}
+
+#[test]
+fn a_dbus_annotation_follows_its_window_in_the_event_order() {
+    let mut new = snapshot(vec![window(1)]);
+    new.dbus_annotations = vec![annotation(7, Some(1), None)];
+    let events = diff(&snapshot(vec![]), &new);
+    let opened = events
+        .iter()
+        .position(|e| matches!(e, Event::WindowOpened(_)))
+        .unwrap();
+    let annotated = events
+        .iter()
+        .position(|e| matches!(e, Event::DbusAnnotation(_)))
+        .unwrap();
+    assert!(opened < annotated);
+}
+
+#[test]
+fn dbus_annotation_json() {
+    let event = Event::DbusAnnotation(annotation(2, Some(3), Some((":1.42", "/MenuBar"))));
+    assert_eq!(event.group(), Group::DbusAnnotation);
+    assert_eq!(
+        event.to_json(),
+        "{\"event\":\"dbus-annotation\",\"id\":2,\"window\":3,\"pid\":4242,\
+         \"interface\":\"com.canonical.dbusmenu\",\"service_name\":\":1.42\",\
+         \"object_path\":\"/MenuBar\"}"
+    );
+    let client = Event::DbusAnnotation(DbusAnnotationInfo {
+        pid: None,
+        ..annotation(4, None, None)
+    });
+    assert_eq!(
+        client.to_json(),
+        "{\"event\":\"dbus-annotation\",\"id\":4,\"window\":null,\"pid\":null,\
+         \"interface\":\"com.canonical.dbusmenu\",\"service_name\":null,\"object_path\":null}"
+    );
+    let removed = Event::DbusAnnotationRemoved { id: 2 };
+    assert_eq!(removed.group(), Group::DbusAnnotation);
+    assert_eq!(
+        removed.to_json(),
+        "{\"event\":\"dbus-annotation-removed\",\"id\":2}"
+    );
+}
+
+#[test]
+fn the_snapshot_has_dbus_annotations_only_for_their_group() {
+    let mut s = snapshot(vec![]);
+    s.dbus_annotations = vec![annotation(1, None, None)];
+    assert!(s
+        .to_json(GroupSet::from_groups(&[Group::DbusAnnotation]))
+        .contains("\"dbus_annotations\":[{\"id\":1"));
+    assert!(!s
+        .to_json(GroupSet::from_groups(&[Group::Windows]))
+        .contains("dbus_annotations"));
 }

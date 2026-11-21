@@ -16,6 +16,7 @@ mod container_drop;
 mod container_view;
 mod cursor_config;
 mod cursor_hide;
+mod dbus_name;
 mod desk;
 mod desk_container;
 mod edid;

@@ -155,7 +155,8 @@
 //!  "overview":false,"screenshot":false,    overview / screenshot selection is open
 //!  "locked":false,                         the session is locked
 //!  "popups":[POPUP,...],                   mapped menus and popovers
-//!  "layers":[LAYER,...]}                   mapped panels, bars, launchers, wallpapers
+//!  "layers":[LAYER,...],                   mapped panels, bars, launchers, wallpapers
+//!  "dbus_annotations":[ANNOTATION,...]}    DBus objects apps tied to a window or to themselves
 //! ```
 //!
 //! Following events are written flat, `{"event":"title","id":5,"title":"..."}`, in an order a
@@ -191,6 +192,9 @@
 //! layer-opened     id, namespace, layer, output, x, y,       layers
 //!                  width, height
 //! layer-closed     id                                        layers
+//! dbus-annotation  id, window, pid, interface, service_name,   dbus-annotation
+//!                  object_path
+//! dbus-annotation-removed  id                                  dbus-annotation
 //! click            button, x, y, target, + see below         clicks
 //! ```
 //!
@@ -307,11 +311,20 @@
 //! follow it.
 //!
 //! `watch` takes the groups to report (`windows`, `focus`, `workspaces`, `outputs`, `modes` for
-//! overview, screenshot selection and lock, `popups`, `layers`). `watch windows workspaces` sends
+//! overview, screenshot selection and lock, `popups`, `layers`, `clicks`, `dbus-annotation`).
+//! `watch windows workspaces` sends
 //! only those events and a snapshot with only matching members (`windows`, `workspace` and
-//! `count`, `focused`, `outputs`, `overview`, `screenshot` and `locked`, `popups`, `layers`).
+//! `count`, `focused`, `outputs`, `overview`, `screenshot` and `locked`, `popups`, `layers`,
+//! `dbus_annotations`).
 //! No groups means all of them. An unknown group gets the usual
 //! `{"ok":false,...}` reply and the connection closes.
+//!
+//! ANNOTATION (xdg-dbus-annotation-v1, `watch dbus-annotation`) is
+//! `{"id":1,"window":3,"pid":4242,"interface":"com.canonical.dbusmenu",
+//! "service_name":":1.42","object_path":"/MenuBar"}`. `window` is null for an annotation the app
+//! made for itself, `service_name` and `object_path` are null until the app has sent an address.
+//! A `dbus-annotation` event comes when an annotation appears and whenever its address changes,
+//! `dbus-annotation-removed` when the app drops it, its window closes or the app exits.
 //!
 //! jff never waits for a watcher: one that doesn't read fast enough (256 KiB of unsent events)
 //! is disconnected, and can just connect again to get a fresh snapshot.
@@ -343,8 +356,8 @@ use crate::desk::Goto;
 use crate::feature::outputs::output_rect;
 use crate::input::{spawn_command, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use crate::ipc::events::{
-    ClickInfo, ClickTarget, ContainerInfo, ContainerRef, Event, Group, GroupSet, LayerInfo,
-    OutputColor, OutputInfo, PopupInfo, Snapshot, WindowInfo,
+    ClickInfo, ClickTarget, ContainerInfo, ContainerRef, DbusAnnotationInfo, Event, Group,
+    GroupSet, LayerInfo, OutputColor, OutputInfo, PopupInfo, Snapshot, WindowInfo,
 };
 use crate::primitives::json::{json_opt, json_str, pretty};
 use crate::primitives::layout::MonitorTarget;
@@ -1517,10 +1530,55 @@ impl JffState {
             locked: self.session_locked(),
             popups: self.popup_list(),
             layers: self.layer_list(),
+            dbus_annotations: self.dbus_annotation_list(),
             dragging: self
                 .dragging_window
                 .or_else(|| self.overview_dragged_view()),
         }
+    }
+
+    /// Every DBus annotation of a window, then those of apps that annotated themselves.
+    fn dbus_annotation_list(&self) -> Vec<DbusAnnotationInfo> {
+        use crate::protocol::xdg_dbus_annotation::{surface_annotations, DbusAnnotation};
+
+        let info = |annotation: DbusAnnotation, window: Option<u64>, pid: Option<u32>| {
+            let (service_name, object_path) = match annotation.address {
+                Some(address) => (Some(address.service_name), Some(address.object_path)),
+                None => (None, None),
+            };
+            DbusAnnotationInfo {
+                id: annotation.id,
+                window,
+                pid,
+                interface: annotation.interface,
+                service_name,
+                object_path,
+            }
+        };
+        let mut out = Vec::new();
+        for entry in self.desk.all_top_down() {
+            let Some(toplevel) = entry.window.toplevel() else {
+                continue;
+            };
+            let window = entry.window.user_data().get::<WindowId>().map(|id| id.0);
+            let pid = self.window_pid(&entry.window);
+            for annotation in surface_annotations(toplevel.wl_surface()) {
+                out.push(info(annotation, window, pid));
+            }
+        }
+        for (client, annotations) in self.dbus_annotation.all_client_annotations() {
+            // `get_client` takes an object id, not a client id, so ask the backend directly.
+            let pid = self
+                .display_handle
+                .backend_handle()
+                .get_client_credentials(client)
+                .ok()
+                .and_then(|creds| u32::try_from(creds.pid).ok());
+            for annotation in annotations {
+                out.push(info(annotation, None, pid));
+            }
+        }
+        out
     }
 
     /// Every mapped menu, of windows and of panels. Position is the menu's own top-left in the
