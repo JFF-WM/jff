@@ -73,7 +73,7 @@ use crate::primitives::container_view;
 use crate::primitives::geom::Size;
 use crate::primitives::layout::{self, Rect};
 use crate::primitives::overview_grid::{self as overview, Dir, Held, Thumb};
-use crate::protocol::layer_shell::{ABOVE_WINDOWS, BELOW_WINDOWS};
+use crate::protocol::layer_shell::{layer_body_elements, ABOVE_WINDOWS, BELOW_WINDOWS};
 use crate::protocol::toplevel_icon;
 use crate::render::effects::background_effect::render_for_surface_zoomed;
 use crate::render::effects::blur::BlurOptions;
@@ -527,6 +527,8 @@ pub struct OverviewPlan {
     pub radius: i32,
     /// Which windows get blur (`blur { ignore-window / only-window }`).
     pub blur_windows: config::BlurWindows,
+    /// Which layer surfaces get blur, for the panels drawn over the blurred background.
+    pub blur_layers: config::BlurLayers,
     /// The search box and the app list. Not in the switcher.
     pub search: Option<SearchPlan>,
     /// How long ago the overview opened while the ripples at the monitor's top-left corner are
@@ -589,6 +591,13 @@ pub struct WallPlan {
 const WALL_FILL: [f32; 4] = [0.05, 0.06, 0.10, 0.55];
 /// Outline of the square of the workspace that is shown now (straight alpha).
 const WALL_CURRENT: [f32; 4] = [0.85, 0.85, 0.90, 0.55];
+/// Rim of the frames of the stage (straight alpha), drawn just outside each frame. The frame of
+/// the shown workspace has it fully, the neighbours' frames weaker.
+const STAGE_BORDER: [f32; 4] = [0.92, 0.93, 0.98, 0.50];
+/// Width of that rim.
+const STAGE_BORDER_WIDTH: i32 = 2;
+/// How much of the rim the neighbours' frames get.
+const STAGE_PEEK_STRENGTH: f32 = 0.55;
 /// Colour of the numbers on the wall.
 const WALL_NUMBER: [f32; 3] = [0.95, 0.95, 0.97];
 /// Distance between squares, and from the bottom of the usable area.
@@ -1097,6 +1106,11 @@ fn wall_elements(
             Some(plan.outline).filter(|(width, _)| *width > 0)
         } else if i == wall.current {
             Some((2, WALL_CURRENT))
+        } else if wall.behind {
+            // The stage: a rim around every frame, so it stands out from the blurred background.
+            let strength = stage_strength(i) * plan.cell_alpha.clamp(0.0, 1.0);
+            let [r, g, b, a] = STAGE_BORDER;
+            Some((STAGE_BORDER_WIDTH, [r, g, b, a * strength]))
         } else {
             None
         };
@@ -1165,27 +1179,59 @@ fn wall_elements(
             }
         }
     }
-    // Blurred, the squares show the wallpaper behind them through the blur, so it is not drawn
-    // again in them.
-    let blurred = wall.blur && blur.is_some();
-    if let (true, Some(blur)) = (wall.blur, blur) {
-        for (cell, id) in wall.cells.iter().zip(&wall.blur_ids) {
-            let local = Rectangle::<i32, Logical>::new(
-                (cell.0 - origin.x, cell.1 - origin.y).into(),
-                (cell.2, cell.3).into(),
-            );
-            let mask = Rounding::new(renderer, local, wall.radius);
-            let element = FramebufferEffectElement::for_rect(
-                id.clone(),
-                local,
-                BlurOptions::from(blur),
-                mask,
-                plan.cell_alpha.clamp(0.0, 1.0),
-            );
-            out.push(JffElement::from(element.with_wallpaper_source(snapshot)));
+    // A wall of drag squares blurs what is behind each square and shows no wallpaper in it. The
+    // frames of the stage keep their wallpaper as it is and the blur goes around them instead.
+    let blurred = wall.blur && blur.is_some() && !wall.behind;
+    match (wall.blur, blur) {
+        (true, Some(blur)) if !wall.behind => {
+            for (cell, id) in wall.cells.iter().zip(&wall.blur_ids) {
+                let local = Rectangle::<i32, Logical>::new(
+                    (cell.0 - origin.x, cell.1 - origin.y).into(),
+                    (cell.2, cell.3).into(),
+                );
+                let mask = Rounding::new(renderer, local, wall.radius);
+                let element = FramebufferEffectElement::for_rect(
+                    id.clone(),
+                    local,
+                    BlurOptions::from(blur),
+                    mask,
+                    plan.cell_alpha.clamp(0.0, 1.0),
+                );
+                out.push(JffElement::from(element.with_wallpaper_source(snapshot)));
+            }
         }
-    } else {
-        wallpaper_elements(renderer, plan, wall, origin, out);
+        (true, Some(blur)) => {
+            wallpaper_elements(renderer, plan, wall, origin, out);
+            // A panel on the bottom layer (the windows cover it, the overview does not) is
+            // drawn again here, in front of the blur, or the blur would hide it. The frames
+            // still cover it where they overlap, as they do without blur.
+            out.extend(layer_body_elements(
+                renderer,
+                &plan.output,
+                &[Layer::Bottom],
+                Some(blur),
+                &plan.blur_layers,
+            ));
+            // The whole monitor, last in the list so it is drawn first: the frames and
+            // everything in them are drawn over it and stay sharp. It fades with the overview,
+            // also once the frames are gone while it closes.
+            if let Some(id) = wall.blur_ids.first() {
+                let monitor = output_rect(&plan.output);
+                let local = Rectangle::<i32, Logical>::new(
+                    (monitor.0 - origin.x, monitor.1 - origin.y).into(),
+                    (monitor.2, monitor.3).into(),
+                );
+                let element = FramebufferEffectElement::for_rect(
+                    id.clone(),
+                    local,
+                    BlurOptions::from(blur),
+                    None,
+                    plan.cell_alpha.clamp(0.0, 1.0),
+                );
+                out.push(JffElement::from(element.with_wallpaper_source(snapshot)));
+            }
+        }
+        _ => wallpaper_elements(renderer, plan, wall, origin, out),
     }
     if wall.behind && (blurred || !wall.wallpaper.is_empty()) {
         return;
@@ -1208,6 +1254,16 @@ fn wall_elements(
     }
 }
 
+/// How much of the rim frame `i` of the stage gets: the first one is the shown
+/// workspace, the rest are its neighbours.
+fn stage_strength(i: usize) -> f32 {
+    if i == 0 {
+        1.0
+    } else {
+        STAGE_PEEK_STRENGTH
+    }
+}
+
 /// The monitor's wallpaper shrunk into every square of the wall, with the square's rounded
 /// corners. Behind the windows of the square and in front of its fill.
 fn wallpaper_elements(
@@ -1221,8 +1277,18 @@ fn wallpaper_elements(
         return;
     }
     let monitor = output_rect(&plan.output);
-    let scale =
-        f64::from(wall.cells.first().map_or(1, |cell| cell.2)) / f64::from(monitor.2.max(1));
+    // The mask only shapes what is inside the frame's rectangle: what an element draws outside
+    // it is left as it is, not cut off. Scaled to the width alone, rounding could make the
+    // wallpaper a pixel taller than the frame, and that extra row showed as a line along the
+    // edge that the rounded corners then leave sticking out. So it is made to fit inside the
+    // frame, whichever side is the tight one, and centered in it.
+    let (cell_w, cell_h) = wall.cells.first().map_or((1, 1), |cell| (cell.2, cell.3));
+    let scale = f64::min(
+        f64::from((cell_w - 2).max(1)) / f64::from(monitor.2.max(1)),
+        f64::from((cell_h - 2).max(1)) / f64::from(monitor.3.max(1)),
+    );
+    let inset_x = (f64::from(cell_w) - f64::from(monitor.2) * scale) / 2.0;
+    let inset_y = (f64::from(cell_h) - f64::from(monitor.3) * scale) / 2.0;
     for cell in &wall.cells {
         let rounding = Rounding::new(
             renderer,
@@ -1235,10 +1301,10 @@ fn wallpaper_elements(
         // Later surfaces of the layer are in front: the list is back to front, draw it so.
         for (surface, loc) in wall.wallpaper.iter().rev() {
             let frame = crate::render::effects::frame_scale::get();
-            let slot: Point<i32, Physical> = Point::from((
-                ((f64::from(cell.0 - origin.x) + f64::from(loc.x) * scale) * frame).round() as i32,
-                ((f64::from(cell.1 - origin.y) + f64::from(loc.y) * scale) * frame).round() as i32,
-            ));
+            let x = f64::from(cell.0 - origin.x) + inset_x + f64::from(loc.x) * scale;
+            let y = f64::from(cell.1 - origin.y) + inset_y + f64::from(loc.y) * scale;
+            let slot: Point<i32, Physical> =
+                Point::from(((x * frame).round() as i32, (y * frame).round() as i32));
             let surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(
                     &mut *renderer,
@@ -3092,6 +3158,7 @@ impl JffState {
             cell_alpha: t as f32,
             radius,
             blur_windows: self.config.blur_windows().clone(),
+            blur_layers: self.config.blur_layers().clone(),
             search: self.search_plan(),
             ripple,
             close,

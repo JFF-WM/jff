@@ -949,8 +949,9 @@ pub const DEFAULT_SELECTION_COLOR: [f32; 4] = [0.35, 0.55, 0.95, 0.6];
 /// colour (`#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`). The square of the workspace wall the
 /// pointer is over uses the same outline. `auto-open` (on by default) opens the overview when
 /// the monitor in use has no windows. `animation-ms` is how long the overview takes to open and
-/// close, 0 to skip the animation. `blur` (off by default) blurs what is behind the squares of
-/// the workspaces the overview shows, when `blur { … }` is on.
+/// close, 0 to skip the animation. `blur` (off by default) blurs the wallpaper around the
+/// frames of the workspaces the overview shows, when `blur { … }` is on, inside the frames it
+/// stays as it is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OverviewConfig {
     pub selection_width: i32,
