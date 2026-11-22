@@ -118,6 +118,27 @@ impl JffState {
         self.update_keyboard_focus();
     }
 
+    /// Whether a window that just opened must not take the keyboard (`focus-new-windows` off):
+    /// a locked session, the screenshot selection, a panel or launcher that has the keyboard, or
+    /// a window on the monitor in use is where the user is working. With the overview open and
+    /// no window to return to, the new window is the first one and takes over as usual.
+    pub fn keeps_focus_from_new_window(&self) -> bool {
+        self.session_locked()
+            || self.screenshot.is_some()
+            || self.layer_on_demand_focus.is_some()
+            || self.exclusive_layer_surface().is_some()
+            || self.layout_focus().is_some()
+    }
+
+    /// A window that just showed (`join_container_on_map`) takes the keyboard, like a new window
+    /// does. With `focus-new-windows` off it does not, unless it has the keyboard already (it
+    /// opened with nothing to take it from, see `keeps_focus_from_new_window`).
+    pub(crate) fn focus_mapped_window(&mut self, window: &Window) {
+        if self.config.focus_new_windows() || self.focused_window.as_ref() == Some(window) {
+            self.focus_window(window);
+        }
+    }
+
     /// Keep a window above the others (`on`) or let it stack like any other again, true when that changed anything.
     pub fn set_always_on_top(&mut self, window: &Window, on: bool) -> bool {
         let changed = self.desk.set_above_where(|w| w == window, on);

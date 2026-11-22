@@ -25,6 +25,8 @@
 //!
 //! `focus-follows-mouse` gives the keyboard to the window under the pointer as soon as the pointer moves onto it, without a click and without raising it. The keyboard stays where it is while the overview, the screenshot selection or the lock screen is up, a panel or launcher has the keyboard, a menu is open, or a button is held. Off by default.
 //!
+//! `focus-new-windows` (on by default) makes a newly opened window take the keyboard. With `focus-new-windows #false` focus stealing is prevented strictly: a window that opens while another one has the keyboard (on the monitor in use) leaves the keyboard where it is, is marked urgent instead, and gets focus only when the user picks it (click, binding, switcher, taskbar) or an activation request carries a real input serial. A window that opens with nothing to take the keyboard from (an empty workspace) still takes it.
+//!
 //! `tiling-containers` turns on tiling containers (groups of windows that tile among themselves, see `desk::container`), and is off by default. It accepts a bare name or `#true` / `#false`.
 //! `hide-behind-containers` (on by default) leaves out of the frame the windows behind the container that has the keyboard, so the gaps between its tiles show the wallpaper and not them. It accepts a bare name or `#true` / `#false`.
 //! `remember-container-layouts` (off by default, needs `tiling-containers`) remembers how every container was arranged (its splits and ratios, and which window stood where) by the app ids of its windows, until jff ends. When windows with the same app ids are tiled into a new container together again, for instance after one was dragged to the edge, which takes the container apart, and then another one is dragged to the edge, which tiles them all again, the container gets that arrangement instead of the default split. A `container-rule` `layout` wins over it. It accepts a bare name or `#true` / `#false`.
@@ -63,7 +65,7 @@
 //! - `split` (in `output`) takes a quoted string (`"auto"` / `"horizontal"` / `"vertical"`): how a
 //!   window that joins a tiling container on that monitor is split off, `"vertical"` for a portrait
 //!   monitor (one above the other). `"auto"`, the default, cuts the leaf along its longer side.
-//! - `maximize-new-windows`, `warp-mouse-to-focus`, `focus-follows-mouse`, `no-client-decorations`, `numlock`, `include-cursor`,
+//! - `maximize-new-windows`, `focus-new-windows`, `warp-mouse-to-focus`, `focus-follows-mouse`, `no-client-decorations`, `numlock`, `include-cursor`,
 //!   `copy-to-clipboard` and `enable` (in `log`) accept a bare name (`numlock`), `true` / `false`, `"true"` /
 //!   `"false"`, `"yes"` / `"no"`, or `"on"` / `"off"`.
 //!
@@ -179,6 +181,7 @@ binds {
 pub const TOP_LEVEL_NODES: &[&str] = &[
     "workspaces",
     "maximize-new-windows",
+    "focus-new-windows",
     "warp-mouse-to-focus",
     "focus-follows-mouse",
     "edge-warp",
@@ -1633,6 +1636,8 @@ pub struct Config {
     /// Every monitor has its own shown workspace, `workspaces { per-output }`.
     workspaces_per_output: bool,
     maximize_new_windows: bool,
+    /// `focus-new-windows`: a new window takes the keyboard. Off means strict focus stealing prevention. On by default.
+    focus_new_windows: bool,
     /// `warp-mouse-to-focus`: the pointer follows the keyboard focus. Off by default.
     warp_mouse_to_focus: bool,
     /// `focus-follows-mouse`: the window under the pointer gets the keyboard. Off by default.
@@ -1726,6 +1731,7 @@ impl Default for Config {
                 workspaces: DEFAULT_WORKSPACES,
                 workspaces_per_output: false,
                 maximize_new_windows: true,
+                focus_new_windows: true,
                 warp_mouse_to_focus: false,
                 focus_follows_mouse: false,
                 edge_warp: false,
@@ -2002,6 +2008,7 @@ impl Config {
         };
 
         let maximize_new_windows = parse_flag(&doc, "maximize-new-windows", true)?;
+        let focus_new_windows = parse_flag(&doc, "focus-new-windows", true)?;
         let warp_mouse_to_focus = parse_flag(&doc, "warp-mouse-to-focus", false)?;
         let focus_follows_mouse = parse_flag(&doc, "focus-follows-mouse", false)?;
         let edge_warp = parse_flag(&doc, "edge-warp", false)?;
@@ -2204,6 +2211,7 @@ impl Config {
             workspaces,
             workspaces_per_output,
             maximize_new_windows,
+            focus_new_windows,
             warp_mouse_to_focus,
             focus_follows_mouse,
             edge_warp,
@@ -2599,6 +2607,11 @@ impl Config {
     /// Whether new windows start maximized.
     pub fn maximize_new_windows(&self) -> bool {
         self.maximize_new_windows
+    }
+
+    /// Whether a new window takes the keyboard (`focus-new-windows`, on by default).
+    pub fn focus_new_windows(&self) -> bool {
+        self.focus_new_windows
     }
 
     /// Whether the pointer follows the keyboard focus (`warp-mouse-to-focus`, off by default).

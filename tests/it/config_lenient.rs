@@ -68,3 +68,12 @@ fn a_good_file_leaves_nothing_out() {
 fn text_that_is_not_kdl_still_fails() {
     assert!(Config::parse_lenient("gaps {{{").is_err());
 }
+
+#[test]
+fn focus_new_windows_defaults_on_and_can_be_turned_off() {
+    assert!(Config::parse_lenient("gaps 30\n")
+        .unwrap()
+        .focus_new_windows());
+    let config = Config::parse_lenient("focus-new-windows #false\n").unwrap();
+    assert!(!config.focus_new_windows());
+}

@@ -449,12 +449,13 @@ impl JffState {
     }
 
     /// `window` has just joined container `id`: lay the container out again, configuring every
-    /// member, and give the keyboard to the window.
+    /// member, and give the keyboard to the window (unless `focus-new-windows` is off and the
+    /// keyboard is somewhere else, see `focus_mapped_window`).
     fn finish_join(&mut self, id: ContainerId, window: &Window) {
         self.auto_apply_layout(id, window);
         self.retile_container(id);
         self.autosave_container_layout(id);
-        self.focus_window(window);
+        self.focus_mapped_window(window);
     }
 
     /// Applies the `container-rule` `layout` that fits `window`, which just joined container `id`, if there is one.

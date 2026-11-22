@@ -63,6 +63,12 @@ no-client-decorations #true
 // button is held (a drag).
 focus-follows-mouse #true
 
+// Strict focus stealing prevention (on by default, so new windows take the keyboard). With
+// `focus-new-windows #false` a window that opens while another one has the keyboard leaves it
+// alone and is marked urgent instead, you pick it yourself (click, binding, switcher, taskbar).
+// A window that opens on an empty workspace still takes the keyboard.
+// focus-new-windows #false
+
 // Edge warp (off by default): the pointer only crosses between two monitors along the part of the
 // edge they share, so with a tall (vertical) monitor next to a shorter one, the rest of the tall
 // monitor's edge is a wall. With `edge-warp`, pushing the pointer into such a wall sends it to the

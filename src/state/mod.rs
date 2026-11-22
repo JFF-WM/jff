@@ -1404,7 +1404,13 @@ impl XdgShellHandler for JffState {
         // open that can't happen (the overview owns the keyboard), so a helper window such as
         // wl-clipboard's would wait for focus forever and block the client that spawned it
         // (nvim). Close the overview in favour of the new window instead.
-        if self.overview_active() {
+        //
+        // With `focus-new-windows` off the keyboard stays where it is, as long as somebody has
+        // it on the monitor in use. The new window asks for attention instead.
+        if !self.config.focus_new_windows() && self.keeps_focus_from_new_window() {
+            self.set_urgent(&window, true);
+            tracing::debug!("new toplevel left unfocused (focus-new-windows off)");
+        } else if self.overview_active() {
             self.end_overview(Some(window.clone()));
         } else {
             self.focus_window(&window);
