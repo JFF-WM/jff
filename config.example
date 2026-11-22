@@ -217,6 +217,16 @@ overview {
     animation-ms 320          // 0 to 2000, how long the overview takes to open and close, 0 = no
                               // animation, 320 by default
     blur                      // (off by default) for the frames and the search box
+    container-background-color "#0d0f1a66" // "#rrggbbaa", the fill of a tiling container's cell, over the
+                              // blur when `blur` is on. "#00000000" shows the blur alone. The default is about
+                              // this dark translucent colour
+    container-border-width 2  // px, 0 to 64, the border of a tiling container's cell, 0 for none,
+                              // 2 by default
+    container-border-color "#bfc7e099" // "#rrggbbaa", the colour of that border
+    container-font-color "#f2f2f7" // "#rrggbbaa", the colour of the name written on a tiling container's
+                              // cell. Light grey by default
+    container-radius 8        // px, 0 to 256, the corner radius of the cell: its border, fill and
+                              // blur. Left out: half of the windows' `radius`
 }
 
 // Window switcher (the `switch-window` binds): a row of thumbnails, most recently used first.

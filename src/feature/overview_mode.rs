@@ -348,11 +348,6 @@ struct CellPlan {
     blur_id: Id,
 }
 
-/// Fill of a container's cell (premultiplied) and the colour of its outline (straight alpha).
-const CELL_FILL: [f32; 4] = [0.05, 0.06, 0.10, 0.40];
-const CELL_OUTLINE: [f32; 4] = [0.75, 0.78, 0.88, 0.60];
-/// Width of the outline of a cell.
-const CELL_OUTLINE_WIDTH: i32 = 2;
 /// Most names remembered painted.
 const MAX_CELL_LABELS: usize = 32;
 
@@ -431,6 +426,9 @@ pub struct Overview {
     pan: Option<(Instant, f64)>,
     /// The black pixel that darkens the workspaces' wallpaper, made when first needed.
     stage_dim: Option<MemoryRenderBuffer>,
+    /// A pixel of the containers' fill colour (without its alpha) and that colour, made when
+    /// first needed, for cells with rounded corners.
+    cell_fill_pixel: Option<([f32; 3], MemoryRenderBuffer)>,
     /// Stable ids of the blur behind each square of the shown workspace and its neighbours.
     stage_blur_ids: Vec<Id>,
     /// Stable id of the blur behind the search box.
@@ -533,6 +531,14 @@ pub struct OverviewPlan {
     cells: Vec<CellPlan>,
     /// How far the cells are shown, 0.0 to 1.0, with the open and close animation.
     cell_alpha: f32,
+    /// The fill of a cell, straight alpha (`container-background-color`).
+    cell_fill: [f32; 4],
+    /// A pixel of the fill's colour, for a fill with rounded corners (`None`: square corners).
+    cell_fill_pixel: Option<MemoryRenderBuffer>,
+    /// The border of a cell: width and straight-alpha colour (`container-border-*`).
+    cell_border: (i32, [f32; 4]),
+    /// Corner radius of a cell (`container-radius`).
+    cell_radius: i32,
     /// Corner radius of windows (the `radius` setting), thumbnails get it shrunk with them.
     pub radius: i32,
     /// Which windows get blur (`blur { ignore-window / only-window }`).
@@ -1031,7 +1037,7 @@ fn cell_elements(
         return;
     }
     let alpha = plan.cell_alpha.clamp(0.0, 1.0);
-    let radius = plan.radius / 2;
+    let radius = plan.cell_radius;
     for cell in &plan.cells {
         let local = Rectangle::<i32, Logical>::new(
             (cell.rect.0 - origin.x, cell.rect.1 - origin.y).into(),
@@ -1053,29 +1059,50 @@ fn cell_elements(
                 Err(err) => tracing::warn!("error drawing a container's name: {err:?}"),
             }
         }
-        let [r, g, b, a] = CELL_OUTLINE;
-        if let Some(ring) = ring_element(
-            renderer,
-            local,
-            CELL_OUTLINE_WIDTH,
-            radius,
-            [r, g, b, a * alpha],
-        ) {
-            out.push(JffElement::Ring(ring));
+        let (border_width, [r, g, b, a]) = plan.cell_border;
+        if border_width > 0 {
+            if let Some(ring) =
+                ring_element(renderer, local, border_width, radius, [r, g, b, a * alpha])
+            {
+                out.push(JffElement::Ring(ring));
+            }
         }
-        let [r, g, b, a] = CELL_FILL;
+        let [r, g, b, a] = plan.cell_fill;
         let a = a * alpha;
-        out.push(JffElement::Solid(SolidColorRenderElement::new(
-            cell.id.clone(),
-            Rectangle::<i32, Physical>::new(
-                (cell.rect.0 - origin.x, cell.rect.1 - origin.y).into(),
-                (cell.rect.2, cell.rect.3).into(),
-            ),
-            CommitCounter::default(),
-            // Solid colours are premultiplied.
-            [r * a, g * a, b * a, a],
-            Kind::Unspecified,
-        )));
+        // A fully transparent fill adds nothing to draw, the blur behind it still shows.
+        if a <= 0.0 {
+        } else if let Some(pixel) = plan.cell_fill_pixel.as_ref().filter(|_| radius > 0) {
+            // Rounded corners: the fill is a pixel of its colour stretched over the cell and
+            // masked like the blur, so it doesn't poke out of the border's corners.
+            let loc: Point<f64, Physical> = (f64::from(local.loc.x), f64::from(local.loc.y)).into();
+            match MemoryRenderBufferRenderElement::from_buffer(
+                &mut *renderer,
+                loc,
+                pixel,
+                Some(a),
+                None,
+                Some((cell.rect.2, cell.rect.3).into()),
+                Kind::Unspecified,
+            ) {
+                Ok(element) => out.push(match Rounding::new(renderer, local, radius) {
+                    Some(mask) => mask.wrap_memory(element),
+                    None => JffElement::Memory(element),
+                }),
+                Err(err) => tracing::warn!("error drawing a container's fill: {err:?}"),
+            }
+        } else {
+            out.push(JffElement::Solid(SolidColorRenderElement::new(
+                cell.id.clone(),
+                Rectangle::<i32, Physical>::new(
+                    (cell.rect.0 - origin.x, cell.rect.1 - origin.y).into(),
+                    (cell.rect.2, cell.rect.3).into(),
+                ),
+                CommitCounter::default(),
+                // Solid colours are premultiplied.
+                [r * a, g * a, b * a, a],
+                Kind::Unspecified,
+            )));
+        }
         // The blur goes right behind the fill: after it in the list, so it is drawn first and
         // the tinted fill sits on top, like frosted glass. It follows the cell's rounded
         // corners and fades with it. The windows in the cell are in front of it.
@@ -1760,6 +1787,7 @@ impl JffState {
         carried: Option<(ContainerId, Thumb)>,
     ) -> Vec<CellPlan> {
         let fonts = self.osd.fonts();
+        let font_color = self.config.overview().container_font_color;
         let Some(ov) = self.overview.as_mut() else {
             return Vec::new();
         };
@@ -1787,7 +1815,7 @@ impl JffState {
                 }
                 let key = (text, px);
                 if !ov.cell_labels.contains_key(&key) {
-                    let picture = paint_text(fonts, &key.0, px as f32);
+                    let picture = paint_text(fonts, &key.0, px as f32, font_color);
                     let size = (picture.width, picture.height);
                     ov.cell_labels
                         .insert(key.clone(), (buffer_of(&picture), size));
@@ -2041,6 +2069,7 @@ impl JffState {
             carry: Carry::new(),
             pan: None,
             stage_dim: None,
+            cell_fill_pixel: None,
             stage_blur_ids: Vec::new(),
             search_blur: Id::new(),
             search: Search::new(entries, version),
@@ -2970,6 +2999,33 @@ impl JffState {
                 at.x += pan;
             }
         }
+        let style = *self.config.overview();
+        let cell_radius = style.container_radius.unwrap_or(self.config.radius() / 2);
+        // Rounded cells draw their fill through the corner mask, from a pixel of its colour.
+        let cell_fill_pixel = if cell_radius > 0 && style.container_background_color[3] > 0.0 {
+            let [r, g, b, _] = style.container_background_color;
+            let rgb = [r, g, b];
+            let ov = self.overview.as_mut()?;
+            if ov.cell_fill_pixel.as_ref().map(|(color, _)| *color) != Some(rgb) {
+                let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+                ov.cell_fill_pixel = Some((
+                    rgb,
+                    MemoryRenderBuffer::from_slice(
+                        &[byte(r), byte(g), byte(b), 255],
+                        Fourcc::Abgr8888,
+                        (1, 1),
+                        1,
+                        Transform::Normal,
+                        None,
+                    ),
+                ));
+            }
+            ov.cell_fill_pixel
+                .as_ref()
+                .map(|(_, buffer)| buffer.clone())
+        } else {
+            None
+        };
         let ov = self.overview.as_ref()?;
         let t = ov.progress();
         let at = pointer_at;
@@ -3167,6 +3223,10 @@ impl JffState {
             dragged_with,
             cells: cell_plans,
             cell_alpha: t as f32,
+            cell_fill: style.container_background_color,
+            cell_fill_pixel,
+            cell_border: (style.container_border_width, style.container_border_color),
+            cell_radius,
             radius,
             blur_windows: self.config.blur_windows().clone(),
             blur_layers: self.config.blur_layers().clone(),
@@ -3348,7 +3408,8 @@ impl JffState {
 
 /// The number `n` of a workspace, `px` tall, on a transparent canvas just big enough for it.
 fn paint_number(fonts: &Fonts, n: usize, px: f32) -> Picture {
-    paint_text(fonts, &n.to_string(), px)
+    let [r, g, b] = WALL_NUMBER;
+    paint_text(fonts, &n.to_string(), px, [r, g, b, 1.0])
 }
 
 /// `text` shortened with an ellipsis until it is at most `max_width` px wide at `px`.
@@ -3375,7 +3436,7 @@ fn fit_text(fonts: &Fonts, text: &str, px: f32, max_width: f32) -> String {
 }
 
 /// `text`, `px` tall, on a transparent canvas just big enough for it.
-fn paint_text(fonts: &Fonts, text: &str, px: f32) -> Picture {
+fn paint_text(fonts: &Fonts, text: &str, px: f32, color: [f32; 4]) -> Picture {
     let text = text.to_owned();
     let width = text_width(&fonts.medium, &text, px).ceil() as i32 + 4;
     let height = (px * 1.4).ceil() as i32;
@@ -3390,8 +3451,15 @@ fn paint_text(fonts: &Fonts, text: &str, px: f32) -> Picture {
         px,
         2.0,
         baseline,
-        WALL_NUMBER,
+        [color[0], color[1], color[2]],
     );
+    if color[3] < 1.0 {
+        for pixel in &mut canvas {
+            for channel in pixel.iter_mut() {
+                *channel *= color[3];
+            }
+        }
+    }
     let mut rgba = Vec::with_capacity(canvas.len() * 4);
     for pixel in &canvas {
         for channel in pixel {
