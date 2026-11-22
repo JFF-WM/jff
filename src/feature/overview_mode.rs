@@ -3192,6 +3192,21 @@ impl JffState {
             None
         };
 
+        // While a thumbnail is carried the other thumbnails are hidden (see `overview_elements`),
+        // so the squares of the containers must go too: only what is being dragged stays, the
+        // carried container's own cell when a whole container is.
+        if ov.drag.is_some() {
+            let carried_id = group_drag.map(|(id, ..)| id);
+            let mut n = 0;
+            cell_plans.retain(|_| {
+                let keep = cells
+                    .get(n)
+                    .is_some_and(|(g, _)| Some(groups[*g].id) == carried_id);
+                n += 1;
+                keep
+            });
+        }
+
         let thumbs: Vec<(Window, Thumb)> = self
             .overview_slots()
             .into_iter()
