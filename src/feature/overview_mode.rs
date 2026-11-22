@@ -3237,11 +3237,22 @@ impl JffState {
                                 // dragged by its title: a maximized one is half the monitor
                                 // (it maximizes again when dropped), a snapped or fullscreen
                                 // one the size it floats at, any other its own.
+                                // Over another monitor nothing keeps a thumbnail from
+                                // collapsing (the minimum height below is only for the overview's
+                                // own monitor), so a window that fills a monitor is carried at
+                                // half the monitor it is over, as a maximized one is. Its floating
+                                // size is no use there: it can be tiny or none at all, and the
+                                // window fills the monitor again when dropped.
+                                let half = ((monitor.2 / 2).max(1), (monitor.3 / 2).max(1));
+                                let elsewhere = monitor != overview_rect;
                                 let carried = self.desk.find_by(|w| *w == window).map_or(
                                     real.size,
                                     |entry| match entry.mode {
-                                        WindowMode::Maximized => {
-                                            ((monitor.2 / 2).max(1), (monitor.3 / 2).max(1))
+                                        WindowMode::Maximized => half,
+                                        WindowMode::Snapped(_) | WindowMode::Fullscreen
+                                            if elsewhere =>
+                                        {
+                                            half
                                         }
                                         WindowMode::Snapped(_) | WindowMode::Fullscreen => {
                                             entry.restore.map_or(real.size, |(_, size)| size)
