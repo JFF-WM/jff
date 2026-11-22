@@ -392,6 +392,16 @@ cursor {
 // sh-autostart "wbg /path/to/wallpaper.jpg"
 // sh-autostart "waybar"
 // autostart "gnome-keyring-daemon" "--start" "--components=secrets"
+//
+// Clipboard. jff keeps no clipboard contents itself: the app that copied serves them, so
+// what you copied is gone once that app closes (copy in a terminal, close it, paste elsewhere
+// fails). jff offers wlr-data-control and ext-data-control, so outside tools can do it:
+// sh-autostart "wl-clip-persist --clipboard regular"   // keeps the clipboard after its app closes
+// A history you can pick from (needs cliphist and a picker like fuzzel, see the binds below):
+// sh-autostart "wl-paste --type text --watch cliphist store"
+// sh-autostart "wl-paste --type image --watch cliphist store"
+// Anything copied is stored, passwords from a password manager included: leave out the
+// `cliphist` lines if that bothers you, `wl-clip-persist` alone is enough to keep the clipboard.
 
 // ---------------------------------------------------------------------------------------------
 // Monitors. Optional: without this block monitors use their preferred mode.
@@ -410,7 +420,7 @@ cursor {
 //         // give its neighbours a `position` that touches it (a 1920x1080 panel turned 90 is 1080 wide: the
 //         // next monitor goes at x 1080). The pointer only crosses along the part of the edge two monitors
 //         // share. `split "vertical"` needs `tiling-containers`.
-//         split "vertical"                   // a window that joins a tiling container here is split off "horizontal" (side by side) or "vertical" (one above the other, for a portrait monitor); "auto" (default) cuts the leaf along its longer side
+//         split "vertical"                   // a window that joins a tiling container here is split off "horizontal" (side by side) or "vertical" (one above the other, for a portrait monitor), "auto" (default) cuts the leaf along its longer side
 //         adaptive-sync "fullscreen"         // "off", "fullscreen" (default) or "always" (quoted)
 //         content-type-hint                  // tell the monitor what is on screen: a fullscreen window that says photo, video or game switches its picture mode
 //         icc-profile "~/.local/share/icc/panel.icc" // the monitor's colors, see color-management
@@ -617,11 +627,11 @@ window-rule { match app-id="kitty"; opacity 0.9; }
 // light above it follows). `sdr` reads the window as plain sRGB whatever its client tagged it
 // with. Both are set when the window opens, and a rule with only these does not use up the one
 // rule a window gets for its placement.
-// window-rule { match app-id="mpv", sdr-white 350, }
-// window-rule { match app-id="steam_app_1091500", sdr, sdr-white 160, }
+// window-rule { match app-id="mpv"; sdr-white 350; }
+// window-rule { match app-id="steam_app_1091500"; sdr; sdr-white 160; }
 
 // Keep a window above the others, e.g. a picture-in-picture player.
-// window-rule { match title="Picture-in-Picture", always-on-top, sticky, }
+// window-rule { match title="Picture-in-Picture"; always-on-top; sticky; }
 
 // ---------------------------------------------------------------------------------------------
 // Container rules (need `tiling-containers`). Any number of blocks.
@@ -675,7 +685,7 @@ window-rule { match app-id="kitty"; opacity 0.9; }
 // }
 
 // ---------------------------------------------------------------------------------------------
-// Key bindings: "Mod+Mod+Key" { action, }
+// Key bindings: "Mod+Mod+Key" { action; }
 //
 // Modifiers: Ctrl, Alt, Shift, Super (also Logo, Mod4). The key is an XKB keysym name (Return,
 // Tab, 1, F5, Print...), or MouseBack / MouseForward for the side buttons of a mouse.
@@ -718,8 +728,9 @@ window-rule { match app-id="kitty"; opacity 0.9; }
 binds {
     // Programs
     Alt+Return { terminal; }
-    // Alt+D { spawn "fuzzel", }              // app launcher, needs fuzzel installed
-    // Super+L { spawn-sh "swaylock", }       // lock screen, needs swaylock installed
+    // Alt+D { spawn "fuzzel"; }              // app launcher, needs fuzzel installed
+    // Super+V { spawn-sh "cliphist list | fuzzel --dmenu | cliphist decode | wl-copy"; }  // clipboard history, see autostart
+    // Super+L { spawn-sh "swaylock"; }       // lock screen, needs swaylock installed
 
     // global hotkeys for OBS Studio
     Ctrl+Shift+g { forward-key "com.obsproject.Studio"; }
@@ -732,22 +743,22 @@ binds {
     Alt+O { overview; }
     Alt+Tab { switch-window; }
     Alt+Shift+Tab { switch-window-back; }
-    // MouseBack { overview, }                // mouse side button
-    // Alt+Left { snap-left, }
-    // Alt+Right { snap-right, }
-    // Alt+Up { snap-top, }
-    // Alt+Down { snap-bottom, }
-    // Super+Escape { toggle-shortcuts-inhibit, }
-    // Super+Shift+S { toggle-stats, }
+    // MouseBack { overview; }                // mouse side button
+    // Alt+Left { snap-left; }
+    // Alt+Right { snap-right; }
+    // Alt+Up { snap-top; }
+    // Alt+Down { snap-bottom; }
+    // Super+Escape { toggle-shortcuts-inhibit; }
+    // Super+Shift+S { toggle-stats; }
 
     // Tiling containers (need `tiling-containers`)
-    // Super+T { focus-container "Terminals", }
-    // Super+J { container-next, }
-    // Super+K { container-prev, }
-    // Super+D { container-drag, }
-    // Super+E { container-eject, }
-    // Super+S { save-container-layout "Dev", }
-    // Super+A { apply-container-layout "Dev", }
+    // Super+T { focus-container "Terminals"; }
+    // Super+J { container-next; }
+    // Super+K { container-prev; }
+    // Super+D { container-drag; }
+    // Super+E { container-eject; }
+    // Super+S { save-container-layout "Dev"; }
+    // Super+A { apply-container-layout "Dev"; }
     // Super+B { spawn-container "dev"; }     // see container-template above
 
     // Session
