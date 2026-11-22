@@ -1,6 +1,8 @@
 //! `cursor { … }` in the config.
 
-use jff_wm::config::{Config, CursorConfig, MAX_CURSOR_HIDE_AFTER_MS, MAX_CURSOR_SIZE};
+use jff_wm::config::{
+    Config, CursorConfig, MAX_CURSOR_HIDE_AFTER_IDLE, MAX_CURSOR_HIDE_AFTER_MS, MAX_CURSOR_SIZE,
+};
 
 #[test]
 fn no_block_changes_nothing() {
@@ -9,6 +11,7 @@ fn no_block_changes_nothing() {
     assert_eq!(Config::default().cursor(), config.cursor());
     assert!(!config.cursor().hide_when_typing);
     assert_eq!(config.cursor().hide_after_ms, 0);
+    assert_eq!(config.cursor().hide_after_idle, 0);
 }
 
 #[test]
@@ -19,6 +22,7 @@ fn every_setting_is_read() {
             size 32
             hide-when-typing
             hide-after-ms 3000
+            hide-after-idle 5
         }"#,
     )
     .unwrap();
@@ -27,6 +31,7 @@ fn every_setting_is_read() {
     assert_eq!(c.size, Some(32));
     assert!(c.hide_when_typing);
     assert_eq!(c.hide_after_ms, 3000);
+    assert_eq!(c.hide_after_idle, 5);
 }
 
 #[test]
@@ -51,6 +56,17 @@ fn limits_are_enforced() {
     ))
     .is_err());
     assert!(Config::parse("cursor { hide-after-ms 0; }").is_ok());
+    assert!(Config::parse(&format!(
+        "cursor {{ hide-after-idle {MAX_CURSOR_HIDE_AFTER_IDLE}; }}"
+    ))
+    .is_ok());
+    assert!(Config::parse(&format!(
+        "cursor {{ hide-after-idle {}; }}",
+        MAX_CURSOR_HIDE_AFTER_IDLE + 1
+    ))
+    .is_err());
+    assert!(Config::parse("cursor { hide-after-idle -1; }").is_err());
+    assert!(Config::parse("cursor { hide-after-idle 0; }").is_ok());
 }
 
 #[test]
@@ -61,6 +77,8 @@ fn mistakes_are_errors() {
         "cursor { theme 3; }",
         "cursor { size \"big\"; }",
         "cursor { hide-when-typing \"sometimes\"; }",
+        "cursor { hide-after-idle; }",
+        "cursor { hide-after-idle \"soon\"; }",
         "cursor { shape \"arrow\"; }",
     ] {
         assert!(Config::parse(bad).is_err(), "accepted {bad:?}");

@@ -22,8 +22,10 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{IsAlive, Logical, Point, Serial, SERIAL_COUNTER};
+use smithay::wayland::pointer_constraints::with_pointer_constraint;
 use smithay::wayland::shell::wlr_layer::KeyboardInteractivity;
 
+use crate::desk::WindowMode;
 use crate::protocol::layer_shell::{is_mapped, Under};
 use crate::state::JffState;
 
@@ -148,6 +150,75 @@ impl JffState {
         self.update_keyboard_focus();
     }
 
+    /// `hide-after-idle` may hide the cursor only while the window that has the keyboard is
+    /// fullscreen and jff has no use for the cursor itself. Derived like the focus, every pass,
+    /// with the setting off it costs one check. The cursor comes back the moment this turns
+    /// false (and hides at once when it turns true after the pointer already rested long enough).
+    fn update_cursor_gate(&mut self, focus: &KeyboardFocus) {
+        if !self.cursor.fullscreen_hide_enabled() {
+            self.cursor.set_fullscreen_gate(false);
+            return;
+        }
+        let gate = self.cursor_may_hide_fullscreen(focus);
+        let was_hidden = self.cursor.is_hidden();
+        if !self.cursor.set_fullscreen_gate(gate) {
+            return;
+        }
+        if gate {
+            // The pointer may have rested long enough before the window went fullscreen, with
+            // no timer running to say so (nothing moved since the start, or since a reload).
+            if self.cursor.idle_remaining().is_some() {
+                self.arm_cursor_idle_timer();
+            }
+        }
+        if self.cursor.is_hidden() != was_hidden {
+            self.queue_redraw_all();
+        }
+    }
+
+    fn cursor_may_hide_fullscreen(&self, focus: &KeyboardFocus) -> bool {
+        let KeyboardFocus::Window(_) = focus else {
+            return false;
+        };
+        let Some(window) = &self.focused_window else {
+            return false;
+        };
+        if self.desk.mode_of(|w| w == window) != WindowMode::Fullscreen {
+            return false;
+        }
+        // Everything jff itself draws or drags with the pointer needs the cursor. The move,
+        // resize, tile and overview drags and the screenshot selection are all pointer grabs,
+        // a client's popup or drag-and-drop grab shows the cursor too, which is what a menu
+        // over a video wants.
+        if self.overview_active()
+            || self.session_locked()
+            || self.screenshot.is_some()
+            || self.resize.is_some()
+            || self.dragging_window.is_some()
+            || self.tile_carry.is_some()
+        {
+            return false;
+        }
+        let Some(pointer) = self.seat.get_pointer() else {
+            return false;
+        };
+        if pointer.is_grabbed() {
+            return false;
+        }
+        // A client that locked or confined the pointer and drew its own cursor wants it seen.
+        if self.cursor.client_surface().is_some() {
+            if let Some(surface) = pointer.current_focus() {
+                let constrained = with_pointer_constraint(&surface, &pointer, |constraint| {
+                    constraint.is_some_and(|c| c.is_active())
+                });
+                if constrained {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Work out who should have the keyboard and make it so. Cheap when nothing changed.
     pub fn update_keyboard_focus(&mut self) {
         self.refresh_popup_grab();
@@ -173,6 +244,7 @@ impl JffState {
             layout.as_ref()
         };
         self.refresh_window_states(shown_active);
+        self.update_cursor_gate(&focus);
         self.warp_mouse_to_focus(shown_active.cloned());
 
         let Some(keyboard) = self.seat.get_keyboard() else {

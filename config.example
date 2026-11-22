@@ -370,6 +370,8 @@ cursor {
     size 32                  // px, 1 to 512
     //hide-when-typing       // hide on a key press, back when the pointer moves, off by default
     //hide-after-ms 3000     // hide after the pointer rests this long, 0 = never (default)
+    //hide-after-idle 5      // seconds: hide after the pointer rests, but only while the focused
+                             // window is fullscreen. Any pointer use brings it back. 0 = never (default)
 }
 
 // ---------------------------------------------------------------------------------------------

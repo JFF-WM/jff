@@ -86,3 +86,66 @@ fn a_clock_that_runs_backwards_does_not_panic() {
     hide.configure(false, Some(ms(100)));
     assert_eq!(hide.remaining(t0), Some(ms(100)));
 }
+
+#[test]
+fn resting_under_a_fullscreen_window_hides_it_only_there() {
+    let t0 = Instant::now();
+    let mut hide = CursorHide::new(t0);
+    hide.set_fullscreen_after(Some(ms(5000)));
+    assert_eq!(hide.after(), Some(ms(5000)));
+    assert_eq!(hide.remaining(t0 + ms(2000)), Some(ms(3000)));
+    assert!(!hide.hidden_in(true));
+    assert_eq!(hide.remaining(t0 + ms(5000)), None);
+    // not fullscreen (or the compositor needs the cursor): still drawn
+    assert!(!hide.hidden_in(false));
+    assert!(!hide.hidden());
+    assert!(hide.hidden_in(true));
+}
+
+#[test]
+fn any_pointer_activity_shows_it_and_restarts_the_time() {
+    let t0 = Instant::now();
+    let mut hide = CursorHide::new(t0);
+    hide.set_fullscreen_after(Some(ms(1000)));
+    hide.remaining(t0 + ms(1500));
+    assert!(hide.hidden_in(true));
+    hide.pointer_activity(t0 + ms(1600));
+    assert!(!hide.hidden_in(true));
+    assert_eq!(hide.remaining(t0 + ms(2000)), Some(ms(600)));
+}
+
+#[test]
+fn both_rest_times_fire_in_order() {
+    let t0 = Instant::now();
+    let mut hide = CursorHide::new(t0);
+    hide.configure(false, Some(ms(3000)));
+    hide.set_fullscreen_after(Some(ms(1000)));
+    // the shorter one arms the timer, the longer one is found out when it fires
+    assert_eq!(hide.after(), Some(ms(1000)));
+    assert_eq!(hide.remaining(t0 + ms(1000)), Some(ms(2000)));
+    assert!(hide.hidden_in(true));
+    assert!(!hide.hidden_in(false));
+    assert_eq!(hide.remaining(t0 + ms(3000)), None);
+    assert!(hide.hidden_in(false));
+}
+
+#[test]
+fn turning_the_fullscreen_time_off_shows_the_cursor() {
+    let t0 = Instant::now();
+    let mut hide = CursorHide::new(t0);
+    hide.set_fullscreen_after(Some(ms(100)));
+    hide.remaining(t0 + ms(200));
+    assert!(hide.hidden_in(true));
+    hide.set_fullscreen_after(None);
+    assert!(!hide.hidden_in(true));
+    assert_eq!(hide.fullscreen_after(), None);
+}
+
+#[test]
+fn the_fullscreen_time_is_off_by_default() {
+    let t0 = Instant::now();
+    let mut hide = CursorHide::new(t0);
+    assert_eq!(hide.after(), None);
+    assert_eq!(hide.remaining(t0 + ms(60_000)), None);
+    assert!(!hide.hidden_in(true));
+}

@@ -93,10 +93,22 @@ pub const BTN_RIGHT: u32 = 0x111;
 pub const BTN_MIDDLE: u32 = 0x112;
 
 impl JffState {
-    /// The pointer was used: a hidden cursor comes back, and with `hide-after-ms` a timer waits
-    /// for it to rest.
-    fn cursor_pointer_activity(&mut self) {
+    /// The pointer was used: a hidden cursor comes back at once, and with `hide-after-ms` or
+    /// `hide-after-idle` a timer waits for it to rest.
+    pub(crate) fn cursor_pointer_activity(&mut self) {
+        let was_hidden = self.cursor.is_hidden();
         self.cursor.pointer_activity();
+        if was_hidden {
+            // a button or a scroll draws nothing by itself
+            self.queue_redraw_all();
+        }
+        self.arm_cursor_idle_timer();
+    }
+
+    /// Wake up once when the shortest rest time is up (and again for a longer one), not on every
+    /// frame. A pointer that moves meanwhile only pushes the time back: the wake-up asks how long
+    /// is left and sleeps on, so activity costs nothing. Does nothing while a timer runs.
+    pub(crate) fn arm_cursor_idle_timer(&mut self) {
         let Some(after) = self.cursor.hide_after() else {
             return;
         };
@@ -107,11 +119,15 @@ impl JffState {
         let armed = self
             .loop_handle
             .insert_source(Timer::from_duration(after), |_, _, state| {
-                match state.cursor.idle_remaining() {
+                let was_hidden = state.cursor.is_hidden();
+                let left = state.cursor.idle_remaining();
+                if state.cursor.is_hidden() != was_hidden {
+                    state.queue_redraw_all();
+                }
+                match left {
                     Some(left) => TimeoutAction::ToDuration(left),
                     None => {
                         state.cursor.idle_timer_armed = false;
-                        state.queue_redraw_all();
                         TimeoutAction::Drop
                     }
                 }
@@ -145,7 +161,14 @@ impl JffState {
             | InputEvent::PointerButton { .. }
             | InputEvent::PointerAxis { .. }
             | InputEvent::TabletToolAxis { .. }
-            | InputEvent::TabletToolProximity { .. } => {
+            | InputEvent::TabletToolProximity { .. }
+            | InputEvent::TabletToolTip { .. }
+            | InputEvent::TabletToolButton { .. }
+            | InputEvent::GestureSwipeBegin { .. }
+            | InputEvent::GestureSwipeUpdate { .. }
+            | InputEvent::GesturePinchBegin { .. }
+            | InputEvent::GesturePinchUpdate { .. }
+            | InputEvent::GestureHoldBegin { .. } => {
                 self.cursor.set_touch_hidden(false);
                 self.cursor_pointer_activity();
             }
@@ -578,6 +601,7 @@ impl JffState {
         delta_unaccel: Point<f64, Logical>,
         time: InputTime,
     ) {
+        self.cursor_pointer_activity();
         let pointer = self.seat.get_pointer().unwrap();
 
         // Locked to the surface that already has the pointer: the cursor can't move, so skip
@@ -709,6 +733,7 @@ impl JffState {
     /// The pointer is at `pos` in the shared desktop space (winit, `zwlr_virtual_pointer_v1`
     /// absolute motion). Kept on a monitor.
     pub(crate) fn pointer_motion_to(&mut self, pos: Point<f64, Logical>, time: InputTime) {
+        self.cursor_pointer_activity();
         let pos: Point<f64, Logical> =
             layout::clamp_to_rects((pos.x, pos.y), &self.pointer_bounds()).into();
         self.check_hot_corner(pos);
@@ -747,6 +772,7 @@ impl JffState {
         time: InputTime,
         serial: Serial,
     ) {
+        self.cursor_pointer_activity();
         self.hotkey_input_seen(None);
         // Mouse bindings (MouseBack, MouseForward): the press runs the action, and both
         // press and release are kept from clients so none sees half a click.
@@ -1174,7 +1200,12 @@ impl JffState {
                     self.apply_input_config();
                 }
                 if *self.config.cursor() != old_cursor {
+                    let was_hidden = self.cursor.is_hidden();
                     self.cursor.configure(self.config.cursor());
+                    if was_hidden != self.cursor.is_hidden() {
+                        self.queue_redraw_all();
+                    }
+                    self.arm_cursor_idle_timer();
                 }
                 self.apply_workspace_count();
                 self.reconcile_outputs();

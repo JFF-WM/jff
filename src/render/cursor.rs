@@ -80,6 +80,9 @@ pub struct CursorManager {
     hide: CursorHide,
     /// The timer that hides the cursor after the pointer rests is running.
     pub idle_timer_armed: bool,
+    /// A fullscreen window has the focus and nothing of jff's own needs the cursor, so
+    /// `hide-after-idle` may hide it (derived each loop pass, see `focus/mod.rs`).
+    fullscreen_gate: bool,
     status: CursorImageStatus,
     /// A finger is the input device in use: there is no cursor to look at (see `input/touch.rs`).
     hidden_for_touch: bool,
@@ -101,6 +104,7 @@ impl CursorManager {
 
         let mut hide = CursorHide::new(Instant::now());
         hide.configure(config.hide_when_typing, hide_after(config));
+        hide.set_fullscreen_after(hide_after_idle(config));
         Self {
             theme: CursorTheme::load(&theme_name),
             theme_name,
@@ -109,6 +113,7 @@ impl CursorManager {
             env_size,
             hide,
             idle_timer_armed: false,
+            fullscreen_gate: false,
             status: CursorImageStatus::default_named(),
             hidden_for_touch: false,
             cache: HashMap::new(),
@@ -128,6 +133,7 @@ impl CursorManager {
         }
         self.hide
             .configure(config.hide_when_typing, hide_after(config));
+        self.hide.set_fullscreen_after(hide_after_idle(config));
     }
 
     /// A key went down: with `hide-when-typing` the cursor hides.
@@ -138,6 +144,23 @@ impl CursorManager {
     /// The pointer moved, clicked or scrolled: a hidden cursor comes back.
     pub fn pointer_activity(&mut self) {
         self.hide.pointer_activity(Instant::now());
+    }
+
+    /// `hide-after-idle` is set: the focus has to be checked for a fullscreen window.
+    pub fn fullscreen_hide_enabled(&self) -> bool {
+        self.hide.fullscreen_after().is_some()
+    }
+
+    /// Say whether the cursor may hide for resting now (a fullscreen window has the focus and
+    /// jff itself has no use for the cursor). `true` when that changed.
+    pub fn set_fullscreen_gate(&mut self, gate: bool) -> bool {
+        std::mem::replace(&mut self.fullscreen_gate, gate) != gate
+    }
+
+    /// The cursor is not drawn because of typing or resting (a client's own `Hidden` or the
+    /// touch rule don't count).
+    pub fn is_hidden(&self) -> bool {
+        self.hide.hidden_in(self.fullscreen_gate)
     }
 
     /// How long the pointer may rest before the cursor hides, `None` when it never does.
@@ -177,7 +200,7 @@ impl CursorManager {
     }
 
     pub fn render_cursor(&mut self) -> RenderCursor {
-        if self.hidden_for_touch || self.hide.hidden() {
+        if self.hidden_for_touch || self.is_hidden() {
             return RenderCursor::Hidden;
         }
         // A client that set a cursor surface and then went away leaves a dead surface behind.
@@ -236,6 +259,11 @@ fn export_theme(theme: &str, size: i32) {
 /// `hide-after-ms` as a duration, `None` for 0.
 fn hide_after(config: &CursorConfig) -> Option<Duration> {
     (config.hide_after_ms > 0).then(|| Duration::from_millis(u64::from(config.hide_after_ms)))
+}
+
+/// `hide-after-idle` as a duration, `None` for 0.
+fn hide_after_idle(config: &CursorConfig) -> Option<Duration> {
+    (config.hide_after_idle > 0).then(|| Duration::from_secs(u64::from(config.hide_after_idle)))
 }
 
 /// Read `name` from the theme, using the image size closest to `size`.

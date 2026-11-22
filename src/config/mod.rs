@@ -21,7 +21,7 @@
 //!
 //! `input { … }` sets up pointer devices: `touchpad { … }` and `mouse { … }` for every device of that kind, and `device "NAME" { … }` for the one with that libinput name (jff logs the name of every device it sees, at info level), which wins over the two. Inside: `tap`, `tap-button-map "left-right-middle"|"left-middle-right"`, `drag`, `natural-scroll`, `accel-speed N` (-1 to 1), `accel-profile "flat"|"adaptive"`, `scroll-method "none"|"two-finger"|"edge"|"on-button-down"`, `scroll-button "middle"|CODE`, `disable-while-typing`, `click-method "button-areas"|"clickfinger"`, `middle-emulation`, `left-handed`, `off` and `disable-on-external-mouse`. A setting that is not there stays at the device's own default, except `tap` on a touchpad, which is on. Applied when a device is plugged in and on reload, only on the TTY backend. A setting a device doesn't support is skipped. `touchscreen { map-to-output "DP-1" }` makes every touchscreen cover that monitor (`jff msg outputs` lists the names), `touchscreen "NAME" { map-to-output "DP-1" }` only the touchscreen with that libinput name (jff logs touchscreens at info level too), which wins. Without a mapping, or when the monitor is not connected, a touchscreen covers the built-in panel, else the first monitor. Three fingers on a touchscreen are jff's own, like on a touchpad: sideways switches workspace, up opens the overview and down closes it, and the client under the fingers gets a `wl_touch` cancel. A client that never bound `wl_touch` gets a touch with one finger as pointer events (move, left button).
 //!
-//! `cursor { … }` sets the pointer image: `theme "NAME"` (an XCursor theme, else `$XCURSOR_THEME`, else `default`), `size N` (1 to 512, else `$XCURSOR_SIZE`, else 24), `hide-when-typing` (the cursor hides on a key press and comes back when the pointer moves, off by default) and `hide-after-ms N` (it hides after the pointer rests that long, 0 is off, off by default). The theme and size are exported to the apps jff starts, and apply to a running session on reload.
+//! `cursor { … }` sets the pointer image: `theme "NAME"` (an XCursor theme, else `$XCURSOR_THEME`, else `default`), `size N` (1 to 512, else `$XCURSOR_SIZE`, else 24), `hide-when-typing` (the cursor hides on a key press and comes back when the pointer moves, off by default) and `hide-after-ms N` (it hides after the pointer rests that long, 0 is off, off by default) and `hide-after-idle N` (like `hide-after-ms`, in seconds, but only while the focused window is fullscreen and nothing of jff's own, like the overview or a window drag, needs the cursor, 0 is off, off by default). The theme and size are exported to the apps jff starts, and apply to a running session on reload.
 //!
 //! `focus-follows-mouse` gives the keyboard to the window under the pointer as soon as the pointer moves onto it, without a click and without raising it. The keyboard stays where it is while the overview, the screenshot selection or the lock screen is up, a panel or launcher has the keyboard, a menu is open, or a button is held. Off by default.
 //!
@@ -1524,6 +1524,8 @@ pub struct ContainerTemplate {
 pub const MAX_CURSOR_SIZE: i32 = 512;
 /// Longest `hide-after-ms`.
 pub const MAX_CURSOR_HIDE_AFTER_MS: i32 = 600_000;
+/// Longest `hide-after-idle`, in seconds.
+pub const MAX_CURSOR_HIDE_AFTER_IDLE: i32 = 3_600;
 /// Cursor size when nothing says another.
 pub const DEFAULT_CURSOR_SIZE: i32 = 24;
 /// Cursor theme when nothing says another.
@@ -1540,6 +1542,9 @@ pub struct CursorConfig {
     pub hide_when_typing: bool,
     /// Hide after the pointer rests this many ms, 0 = never.
     pub hide_after_ms: u32,
+    /// Hide after the pointer rests this many seconds while the focused window is fullscreen,
+    /// 0 = never.
+    pub hide_after_idle: u32,
 }
 
 impl CursorConfig {
@@ -2935,6 +2940,9 @@ fn parse_cursor(node: &KdlNode) -> anyhow::Result<CursorConfig> {
             "hide-when-typing" => config.hide_when_typing = flag_value(child)?,
             "hide-after-ms" => {
                 config.hide_after_ms = int_arg(child, MAX_CURSOR_HIDE_AFTER_MS)? as u32;
+            }
+            "hide-after-idle" => {
+                config.hide_after_idle = int_arg(child, MAX_CURSOR_HIDE_AFTER_IDLE)? as u32;
             }
             other => bail!("unknown cursor setting {other:?}"),
         }

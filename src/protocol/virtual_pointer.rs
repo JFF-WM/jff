@@ -265,6 +265,7 @@ impl Dispatch<ZwlrVirtualPointerV1, PointerData> for JffState {
                     }
                 }
                 if any {
+                    state.cursor_pointer_activity();
                     pointer.axis(state, frame);
                 }
                 pointer.frame(state);
