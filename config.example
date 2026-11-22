@@ -212,7 +212,7 @@ blur {
 overview {
     selection-color "#333567" // "#rrggbbaa", a translucent blue by default
     selection-width 3         // px, 0 for no outline, 4 by default
-    auto-open true            // open the overview when the monitor in use has no windows, so you
+    auto-open #true           // open the overview when the monitor in use has no windows, so you
                               // can type an app's name and start it. On by default, false: off
     animation-ms 320          // 0 to 2000, how long the overview takes to open and close, 0 = no
                               // animation, 320 by default
