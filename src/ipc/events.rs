@@ -254,6 +254,9 @@ pub struct OutputInfo {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    /// The workspace this monitor shows, counting from 1. With `workspaces { per-output }` every
+    /// monitor has its own, otherwise they all show the shared one.
+    pub workspace: usize,
     /// The monitor's primary plane is showing a client's buffer directly (direct scanout), not
     /// a frame jff composited. Always false on winit.
     pub scanout: bool,
@@ -269,12 +272,13 @@ pub struct OutputInfo {
 impl OutputInfo {
     fn members(&self) -> String {
         format!(
-            "\"name\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"scanout\":{},\"adaptive_sync\":{},\"color\":{},\"hdr\":{}",
+            "\"name\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"workspace\":{},\"scanout\":{},\"adaptive_sync\":{},\"color\":{},\"hdr\":{}",
             json_str(&self.name),
             self.x,
             self.y,
             self.width,
             self.height,
+            self.workspace,
             self.scanout,
             self.adaptive_sync,
             self.color.to_json(),

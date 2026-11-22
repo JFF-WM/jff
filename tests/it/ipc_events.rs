@@ -38,6 +38,7 @@ fn output(name: &str, x: i32) -> OutputInfo {
         y: 0,
         width: 1920,
         height: 1080,
+        workspace: 1,
         scanout: false,
         adaptive_sync: false,
         color: OutputColor::default(),
@@ -550,6 +551,7 @@ fn outputs_added_removed_and_changed() {
             y: 0,
             width: 2560,
             height: 1080,
+            workspace: 1,
             scanout: false,
             adaptive_sync: false,
             color: OutputColor::default(),
@@ -573,7 +575,7 @@ fn adaptive_sync_changes_are_output_changes() {
     assert_eq!(
         diff(&old, &new)[0].to_json(),
         "{\"event\":\"output-changed\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-             \"height\":1080,\"scanout\":false,\"adaptive_sync\":true,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false},\"hdr\":{\"requested\":false,\"active\":false,\"reason\":null,\"eotf\":null,\"peak\":null,\"peak_source\":null,\"sdr_white\":203,\"bits\":null,\"night_light\":false,\"content_light\":null,\"scanout\":{\"active\":false,\"reason\":null}}}"
+             \"height\":1080,\"workspace\":1,\"scanout\":false,\"adaptive_sync\":true,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false},\"hdr\":{\"requested\":false,\"active\":false,\"reason\":null,\"eotf\":null,\"peak\":null,\"peak_source\":null,\"sdr_white\":203,\"bits\":null,\"night_light\":false,\"content_light\":null,\"scanout\":{\"active\":false,\"reason\":null}}}"
     );
     assert_eq!(
         diff(&new, &old),
@@ -679,7 +681,7 @@ fn scanout_changes_are_output_changes() {
     assert_eq!(
         diff(&old, &new)[0].to_json(),
         "{\"event\":\"output-changed\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-             \"height\":1080,\"scanout\":true,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false},\"hdr\":{\"requested\":false,\"active\":false,\"reason\":null,\"eotf\":null,\"peak\":null,\"peak_source\":null,\"sdr_white\":203,\"bits\":null,\"night_light\":false,\"content_light\":null,\"scanout\":{\"active\":false,\"reason\":null}}}"
+             \"height\":1080,\"workspace\":1,\"scanout\":true,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false},\"hdr\":{\"requested\":false,\"active\":false,\"reason\":null,\"eotf\":null,\"peak\":null,\"peak_source\":null,\"sdr_white\":203,\"bits\":null,\"night_light\":false,\"content_light\":null,\"scanout\":{\"active\":false,\"reason\":null}}}"
     );
     assert_eq!(
         diff(&new, &old),
@@ -718,10 +720,7 @@ fn groups_are_parsed_and_collected() {
     assert_eq!(Group::parse("modes"), Some(Group::Modes));
     assert_eq!(Group::parse("popups"), Some(Group::Popups));
     assert_eq!(Group::parse("layers"), Some(Group::Layers));
-    assert_eq!(
-        Group::parse("dbus-annotation"),
-        Some(Group::DbusAnnotation)
-    );
+    assert_eq!(Group::parse("dbus-annotation"), Some(Group::DbusAnnotation));
     assert_eq!(Group::parse("window"), None);
     assert_eq!(Group::parse("Windows"), None);
 
@@ -1034,7 +1033,7 @@ fn events_are_written_as_one_json_line_each() {
         (
             Event::OutputAdded(output("DP-1", 0)),
             "{\"event\":\"output-added\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-                 \"height\":1080,\"scanout\":false,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false},\
+                 \"height\":1080,\"workspace\":1,\"scanout\":false,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false},\
                  \"hdr\":{\"requested\":false,\"active\":false,\"reason\":null,\"eotf\":null,\"peak\":null,\"peak_source\":null,\"sdr_white\":203,\"bits\":null,\"night_light\":false,\"content_light\":null,\"scanout\":{\"active\":false,\"reason\":null}}}",
         ),
         (
@@ -1046,7 +1045,7 @@ fn events_are_written_as_one_json_line_each() {
         (
             Event::OutputChanged(output("DP-1", 0)),
             "{\"event\":\"output-changed\",\"name\":\"DP-1\",\"x\":0,\"y\":0,\"width\":1920,\
-                 \"height\":1080,\"scanout\":false,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false},\
+                 \"height\":1080,\"workspace\":1,\"scanout\":false,\"adaptive_sync\":false,\"color\":{\"profile\":null,\"primaries\":\"srgb\",\"transfer\":\"srgb\",\"white\":\"d65\",\"gamut\":\"unknown\",\"icc_readable\":false},\
                  \"hdr\":{\"requested\":false,\"active\":false,\"reason\":null,\"eotf\":null,\"peak\":null,\"peak_source\":null,\"sdr_white\":203,\"bits\":null,\"night_light\":false,\"content_light\":null,\"scanout\":{\"active\":false,\"reason\":null}}}",
         ),
         (
@@ -1483,4 +1482,40 @@ fn the_snapshot_has_dbus_annotations_only_for_their_group() {
     assert!(!s
         .to_json(GroupSet::from_groups(&[Group::Windows]))
         .contains("dbus_annotations"));
+}
+
+#[test]
+fn a_monitor_showing_another_workspace_is_an_output_changed_event() {
+    let old = snapshot(vec![]);
+    let mut new = old.clone();
+    new.outputs[0].workspace = 3;
+    let events = diff(&old, &new);
+    assert_eq!(
+        events,
+        vec![Event::OutputChanged(OutputInfo {
+            workspace: 3,
+            ..output("DP-1", 0)
+        })]
+    );
+    assert!(events[0].to_json().contains("\"workspace\":3"));
+    assert_eq!(
+        diff(&new, &old),
+        vec![Event::OutputChanged(output("DP-1", 0))]
+    );
+    assert!(diff(&new, &new.clone()).is_empty());
+}
+
+#[test]
+fn per_output_workspaces_only_report_the_monitor_that_changed() {
+    let mut old = snapshot(vec![]);
+    old.outputs.push(output("HDMI-A-1", 1920));
+    let mut new = old.clone();
+    new.outputs[1].workspace = 4;
+    assert_eq!(
+        diff(&old, &new),
+        vec![Event::OutputChanged(OutputInfo {
+            workspace: 4,
+            ..output("HDMI-A-1", 1920)
+        })]
+    );
 }

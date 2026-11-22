@@ -119,7 +119,7 @@
 //! `layout-save` replies `{"ok":true,"name":"Dev","layout":"h0.7(_,@browser)","slots":[null,"browser"]}`, `layout-apply` replies `{"ok":true,"name":"Dev","slots":2,"empty":0,"extra":0}`, `layout-list` replies `{"ok":true,"layouts":[{"name":..,"layout":..,"slots":[..]}]}`, a tagged window goes to the slot with its tag, layouts are in `$XDG_STATE_HOME/jff-wm/container-layouts`.
 //!
 //! `outputs` replies `{"ok":true,"outputs":[OUTPUT,...]}`, each OUTPUT what `watch` describes
-//! below (`name`, `x`, `y`, `width`, `height`, `scanout`, `adaptive_sync`, `color`, `hdr`), as it is
+//! below (`name`, `x`, `y`, `width`, `height`, `workspace`, `scanout`, `adaptive_sync`, `color`, `hdr`), as it is
 //! now, plus `focused`: true on the monitor the user is working on (the one the pointer is on), false on the others, and only here, not in `watch` or the snapshot. A script that wants one answer gets it here, a panel that wants to follow the changes
 //! uses `watch outputs`.
 //!
@@ -181,8 +181,8 @@
 //! window-container   id, container (see `container` above)     windows
 //! focus            id, previous (window ids, or null)          focus
 //! workspace        workspace, count                          workspaces
-//! output-added     name, x, y, width, height, scanout, adaptive_sync, color, hdr   outputs
-//! output-changed   name, x, y, width, height, scanout, adaptive_sync, color, hdr   outputs
+//! output-added     name, x, y, width, height, workspace, scanout, adaptive_sync, color, hdr   outputs
+//! output-changed   name, x, y, width, height, workspace, scanout, adaptive_sync, color, hdr   outputs
 //! output-removed   name                                      outputs
 //! overview         open                                      modes
 //! screenshot       open (the area selection)                 modes
@@ -209,6 +209,12 @@
 //! on a menu of that panel) or null for the empty desktop. `namespace` is what
 //! `blur { ignore-layer "…" }` matches. A popup also carries `layer_namespace`, the namespace
 //! of the panel it belongs to.
+//!
+//! `workspace` is the workspace the monitor shows now, counting from 1. With `workspaces { per-output }`
+//! every monitor has its own, so a bar on each monitor can follow `watch outputs` and show the right
+//! one (the top-level `workspace` of the snapshot and of the `workspace` event is only that of the
+//! monitor the pointer is on). Without `per-output` all monitors report the shared workspace, and
+//! switching it is an `output-changed` event for each of them as well as a `workspace` event.
 //!
 //! `scanout` is true while the monitor's primary plane shows a client's buffer directly (direct
 //! scanout, no copy), false while it shows a frame jff composited. It changes with an
@@ -1482,6 +1488,7 @@ impl JffState {
                     y,
                     width,
                     height,
+                    workspace: self.desk.current_on(&output.name()) + 1,
                     scanout: match &self.backend {
                         Backend::Tty(tty) => tty.scanning_out(output),
                         _ => false,
