@@ -22,6 +22,8 @@ fn window(id: u64) -> WindowInfo {
         urgent: false,
         always_on_top: false,
         sticky: false,
+        scratchpad: false,
+        hidden: false,
         output: Some("DP-1".to_string()),
         workspace: 1,
         pid: Some(4242),
@@ -829,7 +831,7 @@ fn a_window_is_written_like_the_documented_example() {
         v.to_json(),
         "{\"id\":1,\"app_id\":\"foot\",\"title\":\"~\",\"x\":40,\"y\":40,\"width\":800,\
              \"height\":600,\"maximized\":false,\"minimized\":false,\"fullscreen\":false,\"focused\":true,\"urgent\":false,\"always_on_top\":false,\"sticky\":false,\
-             \"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\"container\":null,\"tag\":null,\"icon\":null}"
+             \"scratchpad\":false,\"hidden\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\"container\":null,\"tag\":null,\"icon\":null}"
     );
     v.app_id = None;
     v.title = None;
@@ -950,7 +952,7 @@ fn events_are_written_as_one_json_line_each() {
             Event::WindowOpened(window(5)),
             "{\"event\":\"window-opened\",\"id\":5,\"app_id\":\"foot\",\"title\":\"~\",\
                  \"x\":40,\"y\":40,\"width\":800,\"height\":600,\"maximized\":false,\
-                 \"minimized\":false,\"fullscreen\":false,\"focused\":false,\"urgent\":false,\"always_on_top\":false,\"sticky\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\
+                 \"minimized\":false,\"fullscreen\":false,\"focused\":false,\"urgent\":false,\"always_on_top\":false,\"sticky\":false,\"scratchpad\":false,\"hidden\":false,\"output\":\"DP-1\",\"workspace\":1,\"pid\":4242,\
                  \"container\":null,\"tag\":null,\"icon\":null}",
         ),
         (
@@ -1614,4 +1616,47 @@ fn the_snapshot_has_the_keyboard_group() {
     assert!(!s
         .to_json(GroupSet::from_groups(&[Group::Windows]))
         .contains("keyboard"));
+}
+
+#[test]
+fn the_scratchpad_is_a_member_and_an_event() {
+    let old = snapshot(vec![window(3)]);
+    let mut away = old.clone();
+    away.windows[0].scratchpad = true;
+    away.windows[0].hidden = true;
+    let events = diff(&old, &away);
+    assert_eq!(
+        events,
+        vec![
+            Event::Scratchpad { id: 3, on: true },
+            Event::Hidden { id: 3, on: true },
+        ]
+    );
+    assert_eq!(
+        events[0].to_json(),
+        "{\"event\":\"scratchpad\",\"id\":3,\"on\":true}"
+    );
+    assert_eq!(
+        events[1].to_json(),
+        "{\"event\":\"hidden\",\"id\":3,\"on\":true}"
+    );
+    assert!(away.windows[0]
+        .to_json()
+        .contains("\"scratchpad\":true,\"hidden\":true"));
+
+    let mut shown = away.clone();
+    shown.windows[0].hidden = false;
+    assert_eq!(
+        diff(&away, &shown),
+        vec![Event::Hidden { id: 3, on: false }]
+    );
+}
+
+#[test]
+fn minimizing_is_hidden_without_the_scratchpad() {
+    let old = snapshot(vec![window(3)]);
+    let mut new = old.clone();
+    new.windows[0].minimized = true;
+    new.windows[0].hidden = true;
+    assert_eq!(names(&diff(&old, &new)), ["minimized", "hidden"]);
 }

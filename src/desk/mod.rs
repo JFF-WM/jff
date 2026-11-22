@@ -609,6 +609,16 @@ impl<W> Desk<W> {
             .is_some_and(|e| e.hidden.is_some() && !e.scratch)
     }
 
+    /// Whether the window belongs to the scratchpad, shown or away.
+    pub fn is_scratch(&self, pred: impl Fn(&W) -> bool) -> bool {
+        self.find_by(pred).is_some_and(|e| e.scratch)
+    }
+
+    /// Whether the window is out of sight on purpose: minimized, or away in the scratchpad.
+    pub fn is_hidden(&self, pred: impl Fn(&W) -> bool) -> bool {
+        self.find_by(pred).is_some_and(|e| e.hidden.is_some())
+    }
+
     /// Whether the window is maximized: in that mode, or the maximized member of a container
     /// (see [`Desk::zoom_in_container`]).
     pub fn is_maximized(&self, pred: impl Fn(&W) -> bool) -> bool {

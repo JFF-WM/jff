@@ -118,10 +118,42 @@ impl JffState {
     /// `move-to-scratchpad`: the focused window goes into the scratchpad, out of sight.
     pub fn move_to_scratchpad_focused(&mut self) {
         if let Some(window) = self.focused_window() {
-            if self.hide_window(&window, true) {
-                tracing::info!("window put in the scratchpad");
-            }
+            self.move_to_scratchpad_window(&window);
         }
+    }
+
+    /// Put `window` into the scratchpad, out of sight. Returns false, having changed nothing,
+    /// when it could not be hidden (see [`JffState::hide_window`]).
+    pub fn move_to_scratchpad_window(&mut self, window: &Window) -> bool {
+        let done = self.hide_window(window, true);
+        if done {
+            tracing::info!("window put in the scratchpad");
+        }
+        done
+    }
+
+    /// Whether any window belongs to the scratchpad, shown or away.
+    pub fn scratchpad_has_windows(&self) -> bool {
+        self.desk.all_top_down().any(|entry| entry.scratch)
+    }
+
+    /// `scratchpad` for one window: an away window of the scratchpad comes to the monitor in
+    /// use, a shown one goes away. Returns false, having changed nothing, when `window` is not
+    /// in the scratchpad.
+    pub fn toggle_scratchpad_window(&mut self, window: &Window) -> bool {
+        let away = self
+            .desk
+            .find_by(|w| w == window)
+            .filter(|entry| entry.scratch)
+            .map(|entry| entry.hidden.is_some());
+        match away {
+            Some(true) => self.summon_to_active_monitor(window),
+            Some(false) => {
+                self.hide_window(window, true);
+            }
+            None => return false,
+        }
+        true
     }
 
     /// `scratchpad`: a scratchpad window that has the keyboard goes away. Otherwise the one

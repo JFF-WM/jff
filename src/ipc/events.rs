@@ -111,6 +111,10 @@ pub struct WindowInfo {
     pub always_on_top: bool,
     /// The window is shown on every workspace of its monitor (`sticky`), `workspace` then follows the shown one.
     pub sticky: bool,
+    /// The window belongs to the scratchpad, shown or away (`move-to-scratchpad`).
+    pub scratchpad: bool,
+    /// The window is out of sight on purpose: minimized, or away in the scratchpad.
+    pub hidden: bool,
     pub output: Option<String>,
     /// The workspace the window lives on, counting from 1.
     pub workspace: usize,
@@ -218,7 +222,7 @@ impl WindowInfo {
     fn members(&self) -> String {
         format!(
             "\"id\":{},\"app_id\":{},\"title\":{},\"x\":{},\"y\":{},\"width\":{},\"height\":{},\
-             \"maximized\":{},\"minimized\":{},\"fullscreen\":{},\"focused\":{},\"urgent\":{},\"always_on_top\":{},\"sticky\":{},\"output\":{},\"workspace\":{},\"pid\":{},\"container\":{},\"tag\":{},\"icon\":{}",
+             \"maximized\":{},\"minimized\":{},\"fullscreen\":{},\"focused\":{},\"urgent\":{},\"always_on_top\":{},\"sticky\":{},\"scratchpad\":{},\"hidden\":{},\"output\":{},\"workspace\":{},\"pid\":{},\"container\":{},\"tag\":{},\"icon\":{}",
             self.id,
             json_opt(self.app_id.as_deref()),
             json_opt(self.title.as_deref()),
@@ -233,6 +237,8 @@ impl WindowInfo {
             self.urgent,
             self.always_on_top,
             self.sticky,
+            self.scratchpad,
+            self.hidden,
             json_opt(self.output.as_deref()),
             self.workspace,
             self.pid.map_or_else(|| "null".to_string(), |pid| pid.to_string()),
@@ -853,6 +859,17 @@ pub enum Event {
         id: u64,
         on: bool,
     },
+    /// The window joined the scratchpad (`on`), or is an ordinary window again.
+    Scratchpad {
+        id: u64,
+        on: bool,
+    },
+    /// The window went out of sight on purpose (`on`: minimized, or away in the scratchpad), or
+    /// came back.
+    Hidden {
+        id: u64,
+        on: bool,
+    },
     WindowWorkspace {
         id: u64,
         workspace: usize,
@@ -922,6 +939,8 @@ impl Event {
             | Event::Urgent { .. }
             | Event::AlwaysOnTop { .. }
             | Event::Sticky { .. }
+            | Event::Scratchpad { .. }
+            | Event::Hidden { .. }
             | Event::WindowWorkspace { .. }
             | Event::WindowContainer { .. } => Group::Windows,
             Event::Focus { .. } => Group::Focus,
@@ -998,6 +1017,12 @@ impl Event {
             Event::Sticky { id, on } => {
                 format!("{{\"event\":\"sticky\",\"id\":{id},\"on\":{on}}}")
             }
+            Event::Scratchpad { id, on } => {
+                format!("{{\"event\":\"scratchpad\",\"id\":{id},\"on\":{on}}}")
+            }
+            Event::Hidden { id, on } => {
+                format!("{{\"event\":\"hidden\",\"id\":{id},\"on\":{on}}}")
+            }
             Event::WindowWorkspace { id, workspace } => {
                 format!("{{\"event\":\"window-workspace\",\"id\":{id},\"workspace\":{workspace}}}")
             }
@@ -1050,7 +1075,7 @@ impl Event {
 /// The events that turn `old` into `new`, in the order a client should see them. Monitors are
 /// added or changed first, then panels open, then windows open (ascending id), then menus open,
 /// then changes on windows already there (ascending id, and per window: title, app id,
-/// drag start, geometry, maximized, minimized, fullscreen, urgent, always on top, sticky, workspace, container, drag end), then the shown workspace, then focus, then
+/// drag start, geometry, maximized, minimized, fullscreen, urgent, always on top, sticky, scratchpad, hidden, workspace, container, drag end), then the shown workspace, then focus, then
 /// menus close, windows close (ascending id, after the focus event that moved away from them),
 /// panels close, then monitors removed, overview, screenshot, lock, keyboard layout. A menu always opens after
 /// and closes before what it belongs to.
@@ -1200,6 +1225,18 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
             events.push(Event::Sticky {
                 id,
                 on: after.sticky,
+            });
+        }
+        if before.scratchpad != after.scratchpad {
+            events.push(Event::Scratchpad {
+                id,
+                on: after.scratchpad,
+            });
+        }
+        if before.hidden != after.hidden {
+            events.push(Event::Hidden {
+                id,
+                on: after.hidden,
             });
         }
         if before.workspace != after.workspace {

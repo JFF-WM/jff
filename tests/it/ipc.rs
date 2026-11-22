@@ -134,6 +134,27 @@ fn keyboard_layout_commands_are_parsed() {
 }
 
 #[test]
+fn scratchpad_commands_are_parsed() {
+    assert_eq!(
+        parse_request("move-to-scratchpad"),
+        Ok(Request::MoveToScratchpad(None))
+    );
+    assert_eq!(
+        parse_request("move-to-scratchpad 4"),
+        Ok(Request::MoveToScratchpad(Some(4)))
+    );
+    assert_eq!(parse_request("scratchpad"), Ok(Request::Scratchpad(None)));
+    assert_eq!(
+        parse_request("scratchpad 4"),
+        Ok(Request::Scratchpad(Some(4)))
+    );
+    assert!(parse_request("scratchpad x").is_err());
+    assert!(parse_request("scratchpad 1 2").is_err());
+    assert!(COMMANDS.contains("move-to-scratchpad"));
+    assert!(COMMANDS.contains("scratchpad,"));
+}
+
+#[test]
 fn watch_is_parsed() {
     assert_eq!(parse_request("watch"), Ok(Request::Watch(vec![])));
     assert_eq!(parse_request("  watch \n"), Ok(Request::Watch(vec![])));

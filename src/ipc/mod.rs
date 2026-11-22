@@ -16,6 +16,8 @@
 //! toggle-maximize [ID]       maximize, or put back when it already is
 //! minimize [ID]              put a window out of sight (the focused one without an ID)
 //! unminimize [ID]            bring a minimized window back (the one minimized last without an ID)
+//! move-to-scratchpad [ID]    put a window (the focused one without an ID) into the scratchpad, out of sight
+//! scratchpad [ID]            bring an away scratchpad window to the monitor in use, or put a shown one away (without an ID: as the `scratchpad` bind does)
 //! fullscreen [ID]            make a window fullscreen
 //! unfullscreen [ID]          leave fullscreen
 //! focus ID                   raise a window and give it the keyboard (switches workspace if needed)
@@ -102,6 +104,20 @@
 //! other window. `tag` is the tag that `window-rule { match tag=".." }` sees: the one given with the
 //! `tag` command or a rule's `tag` line, else the one the app set itself with xdg-toplevel-tag, null
 //! when there is none, the `tag` event tells when it changes. It is in `windows`, `focused`, `window-info`, `status` and the `watch` snapshot.
+//!
+//! `scratchpad` is true for a window that belongs to the scratchpad, whether it is shown or away,
+//! and `hidden` for a window that is out of sight on purpose: minimized, or away in the scratchpad.
+//! So `scratchpad && hidden` is an away scratchpad window, `scratchpad && !hidden` one that is
+//! shown, and `hidden && !scratchpad` a minimized one (`minimized` is that last case, and still
+//! has its own event). The `scratchpad` and `hidden` events tell when they change. They are in the
+//! same places as the rest of a window. `move-to-scratchpad` puts a window away into the
+//! scratchpad, `scratchpad ID` brings that window to the monitor in use when it is away and puts
+//! it away when it is shown, `scratchpad` alone does what the bind does (the one away longest
+//! comes, or the focused scratchpad window goes). Both reply `{"ok":true,"window":{...}}`, except
+//! `scratchpad` alone, `{"ok":true}`. A window that is not in the scratchpad, an empty scratchpad
+//! and a window that cannot be hidden (it is hidden already, or a fullscreen member of a
+//! container) are error replies. Sending a window to another workspace takes it out of the
+//! scratchpad.
 //!
 //! `icon` of a window is what the app set with xdg-toplevel-icon, `{"name":"org.example.App",
 //! "path":"/usr/share/icons/.../app.png"}`, null when it set none. `name` is the theme name it gave
@@ -194,6 +210,8 @@
 //! fullscreen       id, on                                    windows
 //! window-workspace   id, workspace                             windows
 //! window-container   id, container (see `container` above)     windows
+//! scratchpad       id, on                                    windows
+//! hidden           id, on                                    windows
 //! focus            id, previous (window ids, or null)          focus
 //! workspace        workspace, count                          workspaces
 //! output-added     name, x, y, width, height, workspace, scanout, adaptive_sync, color, hdr   outputs
@@ -518,6 +536,10 @@ pub enum Request {
     Maximize(Option<u64>, Maximize),
     /// `minimize` (true) and `unminimize` (false): put a window out of sight, or bring one back.
     Minimize(Option<u64>, bool),
+    /// `move-to-scratchpad [ID]`: put a window into the scratchpad, out of sight.
+    MoveToScratchpad(Option<u64>),
+    /// `scratchpad [ID]`: show an away scratchpad window, or put a shown one away.
+    Scratchpad(Option<u64>),
     Fullscreen(Option<u64>, bool),
     /// `always-on-top`, `not-always-on-top` and `toggle-always-on-top`: keep a window above the others, or not.
     AlwaysOnTop(Option<u64>, OnTop),
@@ -584,7 +606,7 @@ pub enum Request {
 
 pub const COMMANDS: &str =
     "windows, status, outputs, focused, window-info, close, maximize, unmaximize, toggle-maximize, \
-     minimize, unminimize, fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, sticky, unsticky, toggle-sticky, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
+     minimize, unminimize, move-to-scratchpad, scratchpad, fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, sticky, unsticky, toggle-sticky, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
      screenshot-area, screenshot-fullscreen, screenshot-window, window-thumbnail, move-cursor, click, toggle-overview, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, hotkeys, keyboard-layouts, switch-layout, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
@@ -886,6 +908,8 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         "toggle-maximize" => Ok(Request::Maximize(id, Maximize::Toggle)),
         "minimize" => Ok(Request::Minimize(id, true)),
         "unminimize" => Ok(Request::Minimize(id, false)),
+        "move-to-scratchpad" => Ok(Request::MoveToScratchpad(id)),
+        "scratchpad" => Ok(Request::Scratchpad(id)),
         "fullscreen" => Ok(Request::Fullscreen(id, true)),
         "unfullscreen" => Ok(Request::Fullscreen(id, false)),
         "always-on-top" => Ok(Request::AlwaysOnTop(id, OnTop::On)),
@@ -1108,6 +1132,37 @@ impl JffState {
                 Ok(format!(
                     "{{\"ok\":true,\"window\":{}}}\n",
                     self.window_json(&last)
+                ))
+            }
+            Request::MoveToScratchpad(id) => {
+                let window = self.target_window(id)?;
+                if !self.move_to_scratchpad_window(&window) {
+                    return Err(
+                        "the window cannot go into the scratchpad (it is hidden already, or a fullscreen member of a container)"
+                            .to_string(),
+                    );
+                }
+                Ok(format!(
+                    "{{\"ok\":true,\"window\":{}}}\n",
+                    self.window_json(&window)
+                ))
+            }
+            // Without an ID: what the `scratchpad` bind does.
+            Request::Scratchpad(None) => {
+                if !self.scratchpad_has_windows() {
+                    return Err("the scratchpad is empty".to_string());
+                }
+                self.toggle_scratchpad();
+                Ok("{\"ok\":true}\n".to_string())
+            }
+            Request::Scratchpad(Some(id)) => {
+                let window = self.target_window(Some(id))?;
+                if !self.toggle_scratchpad_window(&window) {
+                    return Err(format!("window {id} is not in the scratchpad"));
+                }
+                Ok(format!(
+                    "{{\"ok\":true,\"window\":{}}}\n",
+                    self.window_json(&window)
                 ))
             }
             Request::Fullscreen(id, want) => {
@@ -1512,6 +1567,8 @@ impl JffState {
             urgent: self.is_urgent(window),
             always_on_top: self.desk.is_above(|w| w == window),
             sticky: self.desk.is_sticky(|w| w == window),
+            scratchpad: self.desk.is_scratch(|w| w == window),
+            hidden: self.desk.is_hidden(|w| w == window),
             output,
             workspace,
             pid: self.window_pid(window),
@@ -2318,6 +2375,11 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("toggle-maximize [ID]", "toggle maximize"),
             ("minimize [ID]", "put a window out of sight"),
             ("unminimize [ID]", "bring a minimized window back"),
+            (
+                "move-to-scratchpad [ID]",
+                "put a window into the scratchpad",
+            ),
+            ("scratchpad [ID]", "show or hide a scratchpad window"),
             ("fullscreen [ID]", "make a window fullscreen"),
             ("unfullscreen [ID]", "leave fullscreen"),
             ("always-on-top [ID]", "keep a window above the others"),
