@@ -41,8 +41,8 @@ signal-hook = "0.3"
 libc = "0.2"
 
 [dependencies.smithay]
-git = "https://github.com/alexparlett/smithay.git"
-branch = "isle"
+git = "https://github.com/killown/smithay"
+branch = "jff"
 default-features = false
 features = [
   "backend_egl",

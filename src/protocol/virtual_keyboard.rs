@@ -10,9 +10,8 @@
 //!
 //! The global is hidden from sandboxed clients, see `JffState::new`.
 
-use std::sync::Arc;
-
 use smithay::backend::input::{Event, InputEvent, KeyboardKeyEvent};
+use smithay::input::keyboard::KeymapFile;
 use smithay::wayland::virtual_keyboard::{VirtualKeyboardBackend, VirtualKeyboardHandler};
 
 use crate::state::JffState;
@@ -47,19 +46,20 @@ impl VirtualKeyboardHandler for JffState {
 impl JffState {
     /// Make the seat read keycodes with `keymap`, a virtual keyboard's own. `None` is a keyboard
     /// that uses the seat's keymap, so the configured one is put back.
-    fn activate_virtual_keymap(&mut self, keymap: Option<Arc<str>>) {
+    fn activate_virtual_keymap(&mut self, keymap: Option<KeymapFile>) {
         let Some(keymap) = keymap else {
             self.restore_seat_keymap();
             return;
         };
-        if self.active_virtual_keymap.as_deref() == Some(&*keymap) {
+        if self.active_virtual_keymap == Some(keymap.id()) {
             return;
         }
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
         };
-        match keyboard.set_keymap_from_string(self, keymap.to_string()) {
-            Ok(()) => self.active_virtual_keymap = Some(keymap),
+        let id = keymap.id();
+        match keyboard.set_keymap_from_keymap_file(self, keymap) {
+            Ok(()) => self.active_virtual_keymap = Some(id),
             Err(err) => tracing::warn!("virtual keyboard keymap not applied: {err:?}"),
         }
     }

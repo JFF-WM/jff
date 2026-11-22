@@ -414,7 +414,7 @@ pub struct JffState {
     pub forwarded_keys: HashMap<Keycode, WlSurface>,
     /// The keymap of a virtual keyboard that is on the seat right now, `None` while the seat
     /// has the configured one (`protocol/virtual_keyboard.rs`).
-    pub active_virtual_keymap: Option<Arc<str>>,
+    pub active_virtual_keymap: Option<smithay::input::keyboard::KeymapFileId>,
     /// Who the seat's keyboard was given to last (see `focus.rs`).
     pub keyboard_focus: KeyboardFocus,
     /// The window the user works in, as picked by a click, a new window, or a request. The
@@ -1330,6 +1330,9 @@ impl XdgDecorationHandler for JffState {
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
         self.send_decoration_mode(&toplevel);
     }
+
+    // The client dropped its decoration object, so the window is back to client-side decorations.
+    fn decoration_destroyed(&mut self, _toplevel: ToplevelSurface) {}
 }
 
 // ---- xdg-shell -------------------------------------------------------------------------------
