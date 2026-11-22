@@ -971,11 +971,14 @@ pub const MAX_SWITCHER_SLIDE_MS: i32 = 2000;
 /// The `switcher { … }` block, the Alt+Tab window switcher. `thumbnail-height` is the height in
 /// pixels of every thumbnail (a window smaller than that keeps its real size), without it, a
 /// third of the monitor's height. `slide-ms` is how long the row takes to slide to the selected
-/// window, 0 to jump.
+/// window, 0 to jump. `group-containers` (on by default) shows a tiling container as one cell
+/// with all its windows in it, like the overview does, and steps over it as one stop, the
+/// switcher then picks the window that is focused in it. Off, every window is a stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SwitcherConfig {
     pub thumbnail_height: Option<i32>,
     pub slide_ms: u32,
+    pub group_containers: bool,
 }
 
 impl Default for SwitcherConfig {
@@ -983,6 +986,7 @@ impl Default for SwitcherConfig {
         Self {
             thumbnail_height: None,
             slide_ms: DEFAULT_SWITCHER_SLIDE_MS,
+            group_containers: true,
         }
     }
 }
@@ -3479,6 +3483,7 @@ fn parse_switcher(node: &KdlNode) -> anyhow::Result<SwitcherConfig> {
                 config.thumbnail_height = Some(height);
             }
             "slide-ms" => config.slide_ms = u32::try_from(int_arg(child, MAX_SWITCHER_SLIDE_MS)?)?,
+            "group-containers" => config.group_containers = flag_value(child)?,
             other => bail!("unknown switcher setting {other:?}"),
         }
     }

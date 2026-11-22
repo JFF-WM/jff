@@ -328,3 +328,14 @@ fn overview_search_colors_are_off_by_default_and_take_a_colour() {
         assert!(Config::parse(&text).is_err(), "{line}");
     }
 }
+
+#[test]
+fn switcher_shows_containers_whole_unless_told_not_to() {
+    assert!(Config::parse("").unwrap().switcher().group_containers);
+    let config = Config::parse("switcher { group-containers #false; }").unwrap();
+    assert!(!config.switcher().group_containers);
+    let config = Config::parse("switcher { group-containers; slide-ms 50; }").unwrap();
+    assert!(config.switcher().group_containers);
+    assert_eq!(config.switcher().slide_ms, 50);
+    assert!(Config::parse("switcher { group-containers \"maybe\"; }").is_err());
+}

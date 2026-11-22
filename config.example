@@ -244,6 +244,9 @@ overview {
 switcher {
     thumbnail-height 640   // px, 32 to 4096. Leave out for the default size
     slide-ms 150           // 0 to 2000, 0 = jump instead of slide, 120 by default
+    group-containers #true // a tiling container is one cell with all its windows in it, like in the
+                           // overview, and one stop of the switcher that picks the window focused in
+                           // it. On by default, #false: every window is a stop
 }
 
 // On-screen display: toasts for volume-like changes, errors, and so on.

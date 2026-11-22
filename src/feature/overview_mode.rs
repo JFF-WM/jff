@@ -531,6 +531,8 @@ pub struct OverviewPlan {
     dragged_with: Vec<usize>,
     /// The cells of the containers, behind their windows.
     cells: Vec<CellPlan>,
+    /// The cell of the container that is selected, in the switcher: it gets the outline.
+    selected_cell: Option<Rect>,
     /// How far the cells are shown, 0.0 to 1.0, with the open and close animation.
     cell_alpha: f32,
     /// The fill of a cell, straight alpha (`container-background-color`).
@@ -980,7 +982,21 @@ pub fn overview_elements(
     // outline following the thumbnail's corners (`radius` shrunk with the thumbnail, fullscreen
     // windows are square), hollow so a translucent window shows no tint behind it.
     let (outline_width, outline_color) = plan.outline;
-    if let Some((window, thumb)) = plan
+    if let Some(cell) = plan.selected_cell.filter(|_| outline_width > 0) {
+        let local = Rectangle::<i32, Logical>::new(
+            (cell.0 - origin.x, cell.1 - origin.y).into(),
+            (cell.2, cell.3).into(),
+        );
+        if let Some(ring) = ring_element(
+            renderer,
+            local,
+            outline_width,
+            plan.cell_radius,
+            outline_color,
+        ) {
+            out.push(JffElement::Ring(ring));
+        }
+    } else if let Some((window, thumb)) = plan
         .selected
         .filter(|i| !carrying || front.contains(i))
         .and_then(|i| plan.thumbs.get(i))
@@ -1784,10 +1800,11 @@ impl JffState {
     /// among the windows it shows. None in the switcher, which is a row of windows, nor while
     /// something is typed, which picks windows and not containers.
     fn overview_groups(&self) -> Vec<Group> {
+        let grouped = self.config.switcher().group_containers;
         let Some(ov) = self
             .overview
             .as_ref()
-            .filter(|ov| ov.switcher.is_none() && !ov.search.active())
+            .filter(|ov| (ov.switcher.is_none() || grouped) && !ov.search.active())
         else {
             return Vec::new();
         };
@@ -1833,7 +1850,16 @@ impl JffState {
         let Some(ov) = self.overview.as_ref() else {
             return Vec::new();
         };
-        overview_arrangement(ov, self.config.switcher().thumbnail_height, groups).1
+        let cells = overview_arrangement(ov, self.config.switcher().thumbnail_height, groups).1;
+        if ov.switcher.is_none() {
+            return cells;
+        }
+        // In the switcher the row slides, and the cells with it.
+        let dx = ov.slide.now().round() as i32;
+        cells
+            .into_iter()
+            .map(|(g, cell)| (g, overview::shifted(cell, dx)))
+            .collect()
     }
 
     /// The cells to draw, the carried container's one where `carried` puts it: the
@@ -2262,11 +2288,12 @@ impl JffState {
     /// Aim the switcher's row at the selected window. Does nothing while it is already headed
     /// there, otherwise it slides on from wherever it is now, or jumps with `snap`.
     fn switcher_retarget(&mut self, snap: bool) {
+        let groups = self.overview_groups();
         let Some(ov) = self.overview.as_mut().filter(|ov| ov.switcher.is_some()) else {
             return;
         };
         let settings = *self.config.switcher();
-        let target = switcher_target(ov, settings.thumbnail_height);
+        let target = switcher_target(ov, settings.thumbnail_height, &groups);
         if snap {
             ov.slide = Slide::still(target);
         } else if ov.slide.to != target {
@@ -2813,7 +2840,11 @@ impl JffState {
             .filter(|ov| ov.search.active())
             .map(|ov| (current_pick(ov), ov.visible.len(), ov.search.apps.len()));
         match search {
-            None => self.select_with(|thumbs, i| Some(overview::cycle(thumbs.len(), i, backwards))),
+            None => {
+                if !self.switcher_step(backwards) {
+                    self.select_with(|thumbs, i| Some(overview::cycle(thumbs.len(), i, backwards)));
+                }
+            }
             Some((current, windows, apps_len)) => {
                 if let Some(pick) = apps::step_pick(current, windows, apps_len, !backwards) {
                     self.set_pick(pick);
@@ -2822,12 +2853,58 @@ impl JffState {
         }
     }
 
+    /// In the switcher with containers shown whole: select the next stop (the previous one with
+    /// `backwards`). A stop is a window that is in no container, or a container, which counts
+    /// once, at the place of its most recently used window, and selects the window that is
+    /// focused in it. False when this is not that, and nothing was done.
+    fn switcher_step(&mut self, backwards: bool) -> bool {
+        let groups = self.overview_groups();
+        if groups.is_empty() {
+            return false;
+        }
+        let Some(ov) = self.overview.as_mut().filter(|ov| ov.switcher.is_some()) else {
+            return false;
+        };
+        let owner = |window: &Window| {
+            groups
+                .iter()
+                .position(|group| group.leaves.iter().any(|(leaf, _)| leaf == window))
+        };
+        // Each stop: the window it selects and its container, if it is one.
+        let mut stops: Vec<(Window, Option<usize>)> = Vec::new();
+        for window in &ov.visible {
+            let group = owner(window);
+            if group.is_some() && stops.iter().any(|(_, seen)| *seen == group) {
+                continue;
+            }
+            let selects = group.map_or_else(|| window.clone(), |g| groups[g].focused.clone());
+            stops.push((selects, group));
+        }
+        if stops.is_empty() {
+            return false;
+        }
+        let current = ov.selected.as_ref().and_then(|selected| {
+            let group = owner(selected);
+            stops.iter().position(|(window, seen)| match group {
+                Some(_) => *seen == group,
+                None => window == selected,
+            })
+        });
+        let next = current.map_or(0, |i| overview::cycle(stops.len(), i, backwards));
+        ov.selected = Some(stops[next].0.clone());
+        true
+    }
+
     /// An arrow key. Without a search it moves between thumbnails. With one it moves between
     /// thumbnails too, and down from the bottom row goes on into the app list, where up and
     /// down walk the rows.
     fn move_selection(&mut self, dir: Dir) {
         let searching = self.overview.as_ref().is_some_and(|ov| ov.search.active());
         if !searching {
+            // In the switcher a container is one stop, left and right step over it.
+            if matches!(dir, Dir::Left | Dir::Right) && self.switcher_step(dir == Dir::Left) {
+                return;
+            }
             self.select_with(|thumbs, i| overview::neighbor(thumbs, i, dir));
             return;
         }
@@ -3089,6 +3166,21 @@ impl JffState {
         let ov = self.overview.as_ref()?;
         let t = ov.progress();
         let at = pointer_at;
+        // In the switcher a container is selected as a whole: its cell gets the outline.
+        let selected_cell = if ov.switcher.is_some() {
+            ov.selected
+                .as_ref()
+                .and_then(|window| {
+                    groups
+                        .iter()
+                        .position(|group| group.leaves.iter().any(|(leaf, _)| leaf == window))
+                })
+                .and_then(|g| cells.iter().position(|(index, _)| *index == g))
+                .and_then(|n| cell_plans.get(n))
+                .map(|cell| cell.rect)
+        } else {
+            None
+        };
 
         let thumbs: Vec<(Window, Thumb)> = self
             .overview_slots()
@@ -3282,6 +3374,7 @@ impl JffState {
             dragged,
             dragged_with,
             cells: cell_plans,
+            selected_cell,
             cell_alpha: t as f32,
             cell_fill: style.container_background_color,
             cell_fill_pixel,
@@ -3691,13 +3784,7 @@ fn overview_arrangement(
         let size = w.geometry().size;
         (size.w, size.h)
     };
-    if ov.switcher.is_some() {
-        let sizes: Vec<Size> = ov.visible.iter().map(window_size).collect();
-        let thumbs = overview::strip(&sizes, area, GAP, thumbnail_height.unwrap_or(area.3 / 3));
-        return (thumbs, Vec::new());
-    }
-
-    // The grid holds items: a window, or a container with all its windows in one cell.
+    // The grid, or the switcher's row, holds items: a window, or a container with all its windows in one cell.
     enum Item {
         Window(usize),
         Group(usize),
@@ -3727,7 +3814,11 @@ fn overview_arrangement(
             }
         })
         .collect();
-    let slots = overview::arrange(&sizes, area, GAP);
+    let slots = if ov.switcher.is_some() {
+        overview::strip(&sizes, area, GAP, thumbnail_height.unwrap_or(area.3 / 3))
+    } else {
+        overview::arrange(&sizes, area, GAP)
+    };
 
     let nowhere = Thumb {
         pos: (0, 0),
@@ -3835,14 +3926,28 @@ fn search_layout(ov: &Overview) -> SearchLayout {
 }
 
 /// The slide that puts the switcher's selected window in the middle of the screen.
-fn switcher_target(ov: &Overview, thumbnail_height: Option<i32>) -> i32 {
+fn switcher_target(ov: &Overview, thumbnail_height: Option<i32>, groups: &[Group]) -> i32 {
     let area = layout::grow(output_rect(&ov.output), -MARGIN);
     let selected = ov
         .selected
         .as_ref()
         .and_then(|s| ov.visible.iter().position(|w| w == s))
         .unwrap_or(0);
-    overview::strip_offset(&overview_layout(ov, thumbnail_height, &[]), selected, area)
+    let (mut thumbs, cells) = overview_arrangement(ov, thumbnail_height, groups);
+    // A container is one stop: its cell goes in the middle, not the window of it selected.
+    let cell = ov
+        .selected
+        .as_ref()
+        .and_then(|s| {
+            groups
+                .iter()
+                .position(|group| group.leaves.iter().any(|(leaf, _)| leaf == s))
+        })
+        .and_then(|g| cells.iter().find(|(index, _)| *index == g));
+    if let (Some((_, cell)), Some(thumb)) = (cell, thumbs.get_mut(selected)) {
+        *thumb = *cell;
+    }
+    overview::strip_offset(&thumbs, selected, area)
 }
 
 /// Owns the pointer while the overview is open: windows see nothing, layer surfaces (panels,
