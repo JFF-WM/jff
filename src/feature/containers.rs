@@ -371,6 +371,7 @@ impl JffState {
                 self.tile_and_configure(id, area);
             }
             self.finish_join(id, window);
+            self.template_layout_sync(id, name);
             tracing::info!(
                 "window rule: window joined container {name:?} ({})",
                 id.get()
@@ -390,6 +391,7 @@ impl JffState {
         let monitor = self.rect_for_window(pos, (size.w, size.h));
         let area = self.snapped_area(monitor);
         self.tile_and_configure(id, area);
+        self.template_layout_sync(id, name);
         tracing::info!("window rule: container {name:?} ({}) started", id.get());
         true
     }
@@ -409,7 +411,10 @@ impl JffState {
             .with_facts(window, |facts| {
                 self.config.container_layout_for(facts).map(str::to_owned)
             })
-            .flatten();
+            .flatten()
+            // No `container-rule` layout: the container of a `container-template` has the layout
+            // saved under the template's name, when there is one.
+            .or_else(|| self.template_layout_name(id));
         let Some(layout) = layout else {
             return false;
         };

@@ -5,6 +5,7 @@ pub mod app_index;
 pub mod app_restore;
 pub mod close_watch;
 pub mod container_layouts;
+pub mod container_templates;
 pub mod containers;
 pub mod dnd;
 pub mod hdr_control;

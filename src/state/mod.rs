@@ -212,6 +212,8 @@ pub struct JffState {
     pub app_index: crate::feature::app_index::AppIndex,
     /// `restore-apps`: the apps of the last session and the ones open now.
     pub app_restore: crate::feature::app_restore::AppRestore,
+    /// `container-template`: the windows a `spawn-container` launch still waits for.
+    pub template_claims: crate::feature::container_templates::TemplateClaims,
     /// xdg-foreign: lets a portal dialog say which window it belongs to.
     #[allow(dead_code)]
     pub xdg_foreign_state: XdgForeignState,
@@ -680,6 +682,7 @@ impl JffState {
             stats: crate::feature::stats::StatsOverlay::new(),
             app_index: crate::feature::app_index::AppIndex::new(),
             app_restore: crate::feature::app_restore::AppRestore::default(),
+            template_claims: crate::feature::container_templates::TemplateClaims::default(),
             xdg_foreign_state,
             xdg_activation_state,
             xdg_system_bell_state,
@@ -1750,6 +1753,12 @@ impl JffState {
                     .find_by(|w| is_window_for(w, root))
                     .map(|entry| entry.window.clone());
                 if let Some(window) = window {
+                    // A window a `container-template` started goes to its container first.
+                    if let Some((rule, name)) = self.template_claim(root) {
+                        if self.open_in_named_container(&window, &rule, &name) {
+                            return;
+                        }
+                    }
                     self.join_container_on_map(&window);
                 }
             }
@@ -1818,6 +1827,14 @@ impl JffState {
         let named = match (rule.as_ref(), restored.is_none() && !zoned) {
             (Some(rule), true) => rule.container.clone().map(|name| (rule.clone(), name)),
             _ => None,
+        };
+        // `container-template`: a window a `spawn-container` bind started joins the template's
+        // container, ahead of the container a rule names, on the workspace the bind was
+        // pressed on. Not a dialog, a restored window or one a client placed in a zone.
+        let named = if restored.is_none() && !dialog && !zoned {
+            self.template_claim(root).or(named)
+        } else {
+            named
         };
         if let Some(name) = rule.as_ref().and_then(|rule| rule.container.as_deref()) {
             if named.is_none() {

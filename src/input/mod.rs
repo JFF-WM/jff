@@ -954,6 +954,7 @@ impl JffState {
             Action::FocusContainer(name) => {
                 self.focus_container_named(&name);
             }
+            Action::SpawnContainer(name) => self.spawn_container(&name),
             Action::ContainerStep { backwards } => self.focus_container_step(backwards),
             Action::ContainerDrag => self.start_focused_tile_move(),
             Action::ContainerEject => self.eject_focused(),

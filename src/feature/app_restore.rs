@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::IsAlive;
 
 use crate::config::Action;
 use crate::feature::app_index::AppIndex;
@@ -60,6 +61,9 @@ pub struct AppRestore {
     starting: Vec<(String, Instant)>,
     /// The session is ending: the file is not touched any more.
     frozen: bool,
+    /// Windows that were put in a saved place, so `container-template` can tell a window the
+    /// restore brought back from one the user opened.
+    placed: Vec<WlSurface>,
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -155,7 +159,31 @@ impl JffState {
         if places.is_empty() {
             self.app_restore.places.remove(key);
         }
+        if place.is_some() {
+            self.app_restore.placed.push(root.clone());
+        }
         place
+    }
+
+    /// The windows `restore-apps` put back that are still open, oldest first.
+    pub(crate) fn app_restore_placed(&mut self) -> Vec<WlSurface> {
+        self.app_restore.placed.retain(|surface| surface.alive());
+        self.app_restore.placed.clone()
+    }
+
+    /// Whether the restore is starting the app with this app id and its window has not shown
+    /// yet: waiting for the list of installed apps, or started and not seen. An app that
+    /// `autostart` starts counts, the restore notes those too. Compared without regard to case.
+    pub(crate) fn app_restore_expects(&self, app_id: &str) -> bool {
+        if !self.config.restore_apps() {
+            return false;
+        }
+        let same = |id: &str| id.trim().eq_ignore_ascii_case(app_id.trim());
+        self.app_restore
+            .pending
+            .as_ref()
+            .is_some_and(|apps| apps.iter().any(|id| same(id)))
+            || self.app_restore.starting.iter().any(|(id, _)| same(id))
     }
 
     /// Whether [`JffState::app_restore_poll`] still has something to do. Lets `app::run` skip

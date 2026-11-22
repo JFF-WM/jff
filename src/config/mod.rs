@@ -31,6 +31,8 @@
 //! `container-rule { match app-id="…", title="…", tag="…", name "…" }` (any number, the `match` lines all have to hold, the first rule that fits a window gives the container its name): a rule does not create a container, it names the one the user creates, from the first window that fits. `name` and `layout "NAME"` are its actions (`layout` applies the saved container layout NAME, see `save-container-layout`, every time a window that fits the rule joins a container, so tagged windows find their slot as they open), `jff check-config` warns about a rule with neither, and any other key inside it is an error.
 //! `binds` has five actions for containers: `focus-container "NAME"` focuses the first container with that name on the current workspace (an error toast when there is none), `container-next` and `container-prev` move the focus to the next or previous window of the focused window's container in tree order, wrapping, and do nothing for a window that is in no container. `maximize` on a window of a container makes it fill the container's rectangle, the others stay under it, and `maximize` again (or the window closing) shows the tree again. A window that closes leaves the tree, and the others take its room. `container-drag` picks up the focused window of a container with the pointer: the next left click puts it down (a right click cancels), over another window of a container the middle swaps the two places and an edge puts it beside that window, at the edge of the monitor or off every container it leaves the container and snaps, maximizes or floats as any dropped window does. Dragging a window of a container by its titlebar or with `drag-modifier` does the same. `container-eject` takes the focused window out of its container and floats it. Both do nothing for a window that is in no container. `save-container-layout "NAME"` saves the shape of the focused window's container (its splits and ratios, one slot per window, the slot of a tagged window keeps the tag, see `window-rule` `tag`) and `apply-container-layout "NAME"` puts the container in that shape again: each window goes to the slot with its tag, the others fill the free slots in their current order, a slot with no window closes up and a window with no slot is split off the last one. Both show an error toast when they cannot. The layouts are kept in `$XDG_STATE_HOME/jff-wm/container-layouts` (see `jff msg layout-list`).
 //!
+//! `container-template "NAME" { run "prog" "arg" … app-id="ID" }` (any number, needs `tiling-containers`) is a named group of apps, and the bind `spawn-container "NAME"` starts it: every `run` is started and the windows they open tile together in one container called NAME, on the workspace and monitor the bind was pressed on. The name is the container's identity, so a second press while that container exists shows it and focuses it instead of starting the apps again, like a scratchpad. `app-id` is the app id the window opens with and defaults to the file name of the program (`run "kitty"` expects `kitty`), it is how the window is told apart from others, so an app whose id differs from its program (a Flatpak, a wrapper script) needs it. An app that `restore-apps` has put back is taken into the container instead of being started a second time, and one it is starting at this moment is waited for, not started again. `jff check-config` warns about a `spawn-container` with no such template, a name used twice, and templates without `tiling-containers`.
+//!
 //! `color-management { … }` (`off`: jff does not offer wp-color-management and draws every
 //! surface as it always did, `convert-srgb`: surfaces with no color description, which are sRGB,
 //! are converted to the monitor's colors too, which is what stops them looking oversaturated on a
@@ -205,6 +207,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "tiling-containers",
     "remember-container-layouts",
     "container-rule",
+    "container-template",
     "color-representation",
     "color-management",
     "binds",
@@ -277,6 +280,10 @@ pub enum Action {
     /// Focus the first tiling container with this name on the current workspace, or show an
     /// error toast when there is none (`focus-container "Terminals"`).
     FocusContainer(String),
+    /// Start the apps of the `container-template` with this name in one tiling container of that
+    /// name, or, when a container with that name exists already, focus it instead
+    /// (`spawn-container "dev"`). Works like a scratchpad: the name is the container's identity.
+    SpawnContainer(String),
     /// Focus the next (or previous) window of the focused window's tiling container, in tree
     /// order, wrapping. Does nothing for a window that is in no container.
     ContainerStep { backwards: bool },
@@ -1429,6 +1436,26 @@ impl ContainerRule {
     }
 }
 
+/// One `run` line of a `container-template`: a program to start, and the app id its window
+/// will have.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplateRun {
+    /// The program and its arguments, run without a shell.
+    pub argv: Vec<String>,
+    /// The app id the window opens with. It is how the window is found again: it joins the
+    /// template's container, and an app that `restore-apps` is bringing back is not started a
+    /// second time. `app-id=` on the line, else the file name of the program.
+    pub app_id: String,
+}
+
+/// A `container-template "NAME" { run … }` block: a named group of apps that start together in
+/// one tiling container called NAME (see the `spawn-container` bind).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContainerTemplate {
+    pub name: String,
+    pub runs: Vec<TemplateRun>,
+}
+
 /// Biggest cursor `size`.
 pub const MAX_CURSOR_SIZE: i32 = 512;
 /// Longest `hide-after-ms`.
@@ -1578,6 +1605,8 @@ pub struct Config {
     remember_container_layouts: bool,
     /// `container-rule` blocks, in file order.
     container_rules: Vec<ContainerRule>,
+    /// `container-template` blocks, in file order. The first one with a name is the one used.
+    container_templates: Vec<ContainerTemplate>,
     /// `color-representation { yuv }`: draw YUV buffers with the matrix and range the client
     /// declared (wp-color-representation). On by default.
     color_representation_yuv: bool,
@@ -1642,6 +1671,7 @@ impl Default for Config {
                 tiling_containers: false,
                 remember_container_layouts: false,
                 container_rules: Vec::new(),
+                container_templates: Vec::new(),
                 color_representation_yuv: true,
                 color_management: ColorManagementConfig::default(),
                 skipped: Vec::new(),
@@ -1795,6 +1825,39 @@ impl Config {
                     i + 1
                 ));
             }
+        }
+        for (i, template) in config.container_templates().iter().enumerate() {
+            if config
+                .container_templates()
+                .iter()
+                .take(i)
+                .any(|earlier| earlier.name == template.name)
+            {
+                warnings.push(format!(
+                    "container-template {:?} is defined twice, only the first is used",
+                    template.name
+                ));
+            }
+        }
+        for binding in &config.binds {
+            if let Action::SpawnContainer(name) = &binding.action {
+                if config.container_template(name).is_none() {
+                    warnings.push(format!(
+                        "spawn-container {name:?}: there is no container-template with that name"
+                    ));
+                }
+            }
+        }
+        let uses_templates = !config.container_templates().is_empty()
+            || config
+                .binds
+                .iter()
+                .any(|binding| matches!(binding.action, Action::SpawnContainer(_)));
+        if uses_templates && !config.tiling_containers() {
+            warnings.push(
+                "container-template and spawn-container do nothing without `tiling-containers`"
+                    .to_string(),
+            );
         }
         Ok(warnings)
     }
@@ -2024,6 +2087,17 @@ impl Config {
             }
         }
 
+        let mut container_templates = Vec::new();
+        for node in doc.nodes() {
+            if node.name().value() == "container-template" {
+                let n = container_templates.len() + 1;
+                container_templates.push(
+                    parse_container_template(node)
+                        .with_context(|| format!("in container-template {n}"))?,
+                );
+            }
+        }
+
         Ok(Self {
             keyboard,
             input,
@@ -2063,6 +2137,7 @@ impl Config {
             tiling_containers,
             remember_container_layouts,
             container_rules,
+            container_templates,
             color_representation_yuv,
             color_management,
             skipped: Vec::new(),
@@ -2095,7 +2170,9 @@ impl Config {
                     Ok(_) => kept.push_str(&format!("{node}\n")),
                     Err(err) => {
                         let label = match name {
-                            "window-rule" | "container-rule" => format!("{name} {number}"),
+                            "window-rule" | "container-rule" | "container-template" => {
+                                format!("{name} {number}")
+                            }
                             _ => name.to_string(),
                         };
                         skipped.push(format!("{label}: {}", err.root_cause()));
@@ -2334,6 +2411,16 @@ impl Config {
     /// The `container-rule` blocks, in file order.
     pub fn container_rules(&self) -> &[ContainerRule] {
         &self.container_rules
+    }
+
+    /// The `container-template` blocks, in file order.
+    pub fn container_templates(&self) -> &[ContainerTemplate] {
+        &self.container_templates
+    }
+
+    /// The `container-template` called `name`. When two have the same name, the first.
+    pub fn container_template(&self, name: &str) -> Option<&ContainerTemplate> {
+        self.container_templates.iter().find(|t| t.name == name)
     }
 
     /// The name a container gets for `window`, the first one it fits: the first rule whose
@@ -3221,6 +3308,64 @@ fn parse_container_rule(node: &KdlNode) -> anyhow::Result<ContainerRule> {
     Ok(rule)
 }
 
+/// A `container-template "NAME" { run "prog" "arg" … app-id="ID" }` block.
+fn parse_container_template(node: &KdlNode) -> anyhow::Result<ContainerTemplate> {
+    let name = match positional(node).as_slice() {
+        [value] => value.as_string().map(str::to_owned),
+        _ => None,
+    }
+    .filter(|name| !name.trim().is_empty())
+    .context("container-template takes one name, like container-template \"dev\" { … }")?;
+    if node.entries().iter().any(|entry| entry.name().is_some()) {
+        bail!("container-template takes a name and a block, not properties");
+    }
+    let mut runs = Vec::new();
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "run" => {
+                let mut argv = Vec::new();
+                let mut app_id = None;
+                for entry in child.entries() {
+                    let value = entry
+                        .value()
+                        .as_string()
+                        .map(str::to_owned)
+                        .context("run takes strings")?;
+                    match entry.name().map(|key| key.value()) {
+                        None => argv.push(value),
+                        Some("app-id") => {
+                            if value.trim().is_empty() {
+                                bail!("app-id takes the app id of the window, not an empty string");
+                            }
+                            app_id = Some(value);
+                        }
+                        Some(other) => bail!("unknown run property {other:?}, only app-id"),
+                    }
+                }
+                if argv.first().is_none_or(|program| program.trim().is_empty()) {
+                    bail!("run needs a program, like run \"kitty\"");
+                }
+                if child.children().is_some() {
+                    bail!("run takes no block");
+                }
+                // Most apps use their program's file name as their app id (kitty, foot, firefox).
+                // The ones that do not say so with `app-id=`.
+                let app_id = app_id.unwrap_or_else(|| {
+                    std::path::Path::new(&argv[0])
+                        .file_name()
+                        .map_or_else(|| argv[0].clone(), |f| f.to_string_lossy().into_owned())
+                });
+                runs.push(TemplateRun { argv, app_id });
+            }
+            other => bail!("unknown container-template setting {other:?}, only run"),
+        }
+    }
+    if runs.is_empty() {
+        bail!("container-template {name:?} has no run, it does nothing");
+    }
+    Ok(ContainerTemplate { name, runs })
+}
+
 /// One `match` line: `key=value` pairs, all of which have to hold.
 fn parse_window_match(node: &KdlNode, out: &mut Vec<WindowMatch>) -> anyhow::Result<()> {
     if !positional(node).is_empty() {
@@ -3792,6 +3937,12 @@ fn parse_action(node: &KdlNode) -> anyhow::Result<Action> {
             Ok([name]) if !name.is_empty() => Ok(Action::FocusContainer(name)),
             _ => bail!(
                 "focus-container takes one container name, like focus-container \"Terminals\""
+            ),
+        },
+        "spawn-container" => match <[String; 1]>::try_from(args) {
+            Ok([name]) if !name.trim().is_empty() => Ok(Action::SpawnContainer(name)),
+            _ => bail!(
+                "spawn-container takes one container-template name, like spawn-container \"dev\""
             ),
         },
         "container-next" => no_args(Action::ContainerStep { backwards: false }),

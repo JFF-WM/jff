@@ -600,6 +600,34 @@ window-rule { match app-id="kitty"; opacity 0.9; }
 // }
 
 // ---------------------------------------------------------------------------------------------
+// Container templates (need `tiling-containers`). Any number of blocks.
+//
+// A named group of apps that start together in one container. The bind `spawn-container "NAME"`
+// starts every `run` and tiles their windows in a container called NAME, on the workspace and
+// monitor the bind was pressed on.
+//   run "prog" "arg" ...   a program to start, without a shell
+//   app-id="ID"            on a `run`: the app id its window opens with. Default: the file name of
+//                          the program. Needed when they differ (a Flatpak, a wrapper script).
+//
+// The arrangement is remembered: it is saved as the container layout NAME (see `jff msg layout-list`)
+// and saved again whenever you move a divider or put a window elsewhere, and the next
+// `spawn-container` lays the windows out that way. A `container-rule` `layout` wins over it.
+//
+// The name is the container's identity. While a container with that name exists, on any
+// workspace or monitor, `spawn-container` shows it and focuses it and starts nothing, so it
+// works like a scratchpad for the whole group. When its last window closes the container is
+// gone and the next press starts the apps again.
+//
+// With `restore-apps`: an app the restore already put back is taken into the container instead of
+// being started a second time, and one the restore is starting right now is waited for.
+// ---------------------------------------------------------------------------------------------
+
+// container-template "dev" {
+//     run "kitty"
+//     run "firefox" app-id="firefox"
+// }
+
+// ---------------------------------------------------------------------------------------------
 // Key bindings: "Mod+Mod+Key" { action, }
 //
 // Modifiers: Ctrl, Alt, Shift, Super (also Logo, Mod4). The key is an XKB keysym name (Return,
@@ -630,6 +658,8 @@ window-rule { match app-id="kitty"; opacity 0.9; }
 //                                 same numbers without drawing anything.
 //   forward-key "APP-ID"          hand the key to that app's window without focusing it, for its own global hotkeys
 //   Needing `tiling-containers`:
+//   spawn-container "NAME"        start the `container-template` NAME in a container of that name, or, when that
+//                                 container exists (on any workspace), show and focus it instead
 //   focus-container "NAME"        focus the first container with that name on this workspace
 //   container-next / container-prev   move the focus through the focused window's container
 //   container-drag                pick up the focused window of a container with the pointer (click to drop, right click cancels)
@@ -671,6 +701,7 @@ binds {
     // Super+E { container-eject, }
     // Super+S { save-container-layout "Dev", }
     // Super+A { apply-container-layout "Dev", }
+    // Super+B { spawn-container "dev"; }     // see container-template above
 
     // Session
     Alt+Shift+R { reload-config; }
