@@ -981,8 +981,18 @@ impl JffState {
                     &mut elements,
                 );
             }
+            let mut backdrop = crate::feature::containers::Backdrop::of_focused(
+                &self.config,
+                &self.desk,
+                self.focused_window.as_ref(),
+            );
             for entry in self.desk.top_down() {
                 let geo = entry.window.geometry();
+                if let Some(backdrop) = backdrop.as_mut() {
+                    if backdrop.hides(entry, entry.pos, (geo.size.w, geo.size.h)) {
+                        continue;
+                    }
+                }
                 let window_origin: Point<i32, Logical> = Point::from(entry.pos) - geo.loc;
                 let bbox = entry.window.bbox();
                 let area = (

@@ -339,3 +339,14 @@ fn switcher_shows_containers_whole_unless_told_not_to() {
     assert_eq!(config.switcher().slide_ms, 50);
     assert!(Config::parse("switcher { group-containers \"maybe\"; }").is_err());
 }
+
+#[test]
+fn hide_behind_containers_is_on_unless_told_not_to() {
+    assert!(Config::parse("").unwrap().hide_behind_containers());
+    let config = Config::parse("hide-behind-containers #false").unwrap();
+    assert!(!config.hide_behind_containers());
+    assert!(Config::parse("hide-behind-containers")
+        .unwrap()
+        .hide_behind_containers());
+    assert!(Config::parse("hide-behind-containers \"maybe\"").is_err());
+}

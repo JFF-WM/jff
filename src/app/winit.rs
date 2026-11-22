@@ -425,9 +425,19 @@ impl JffState {
                         now,
                         &mut elements,
                     );
+                    let mut backdrop = crate::feature::containers::Backdrop::of_focused(
+                        &self.config,
+                        &self.desk,
+                        self.focused_window.as_ref(),
+                    );
                     for entry in self.desk.top_down() {
                         let geo = entry.window.geometry();
                         let drawn = crate::feature::containers::drawn_pos(&self.desk, entry);
+                        if let Some(backdrop) = backdrop.as_mut() {
+                            if backdrop.hides(entry, drawn, (geo.size.w, geo.size.h)) {
+                                continue;
+                            }
+                        }
                         let pos: Point<i32, Logical> = Point::from(drawn) - geo.loc;
                         // Popups and the window, each with its blur right behind it.
                         window_elements(

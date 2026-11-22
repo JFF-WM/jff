@@ -100,6 +100,11 @@ warp-mouse-to-focus #true
 // arrangement it had instead of the default split. A `container-rule` `layout` wins over it.
 // remember-container-layouts #true
 
+// While a container has the keyboard, the windows behind it are not drawn, so the gaps between
+// its tiles show the wallpaper and not what is underneath. On by default.
+// A window above the container, or one only partly behind it, stays.
+// hide-behind-containers #false
+
 // Hold this key and drag with the mouse to move/resize windows. Alt (the default), Super, Ctrl
 // or Shift.
 drag-modifier "Super"

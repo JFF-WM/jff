@@ -67,6 +67,58 @@ const CARRY_PERIOD_MS: u64 = 2600;
 const CARRY_COLOR: [f32; 4] = [0.22, 0.86, 1.0, 1.0];
 const CARRY_COLOR_2: [f32; 4] = [0.66, 0.42, 1.0, 1.0];
 
+/// The focused container as a backdrop for one frame: the windows below it that lie inside its
+/// area are not drawn, so the gaps between its tiles show the wallpaper and not them. Walk the
+/// windows top down and ask [`Backdrop::hides`] of each.
+pub struct Backdrop {
+    container: ContainerId,
+    area: Rect,
+    /// Set once the container's own windows have been passed, everything after is below it.
+    below: bool,
+}
+
+impl Backdrop {
+    /// Whether `entry`, drawn at `drawn` with `size`, is left out. A member of the container
+    /// never is, nor a window above it, nor one that sticks out of its area (it would pop in
+    /// and out as the container is focused).
+    pub fn hides(&mut self, entry: &Entry<Window>, drawn: Pos, size: (i32, i32)) -> bool {
+        if entry.container == Some(self.container) {
+            self.below = true;
+            return false;
+        }
+        if !self.below {
+            return false;
+        }
+        let (x, y, w, h) = self.area;
+        drawn.0 >= x && drawn.1 >= y && drawn.0 + size.0 <= x + w && drawn.1 + size.1 <= y + h
+    }
+}
+
+impl Backdrop {
+    /// The backdrop of the container that has the keyboard, `None` when `hide-behind-containers`
+    /// is off, when no container is focused, or when it is not laid out. Takes the parts of the
+    /// state it reads, not the state, so a frame can ask for it while the backend is borrowed.
+    pub fn of_focused(
+        config: &Config,
+        desk: &Desk<Window>,
+        focused: Option<&Window>,
+    ) -> Option<Self> {
+        if !config.hide_behind_containers() {
+            return None;
+        }
+        let focused = focused?;
+        let container = desk.container_of(|w| w == focused)?;
+        let area = desk.container(container)?.area()?;
+        // A little room around, for the border and the rounding of the area.
+        let area = layout::grow(area, config.snap_gap().max(DEFAULT_BORDER_WIDTH));
+        Some(Self {
+            container,
+            area,
+            below: false,
+        })
+    }
+}
+
 /// A window of a tiling container on its way to another place: what the frame needs to draw it
 /// at the pointer. The window itself stays in the tree, and in its tile, until it is put down.
 #[derive(Clone)]
