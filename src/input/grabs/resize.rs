@@ -7,7 +7,9 @@
 //! Pointer events (hundreds per second) only record the size the user wants. Once per event-loop
 //! pass, `JffState::update_resize` sends it, and only when the client has committed the previous
 //! size we sent. Clients like terminals resize a whole grid (and signal a shell that redraws its
-//! prompt) on every configure, so flooding them leaves garbled output behind.
+//! prompt) on every configure, so flooding them leaves garbled output behind. A second configure
+//! may go out before the first is answered (`MAX_IN_FLIGHT`), so a client whose commit arrives
+//! late still has the newest size waiting when it draws its next frame.
 
 use smithay::input::pointer::{
     AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
@@ -251,6 +253,10 @@ impl PointerGrab<JffState> for ResizeGrab {
     }
 }
 
+/// Number of size configures that may be waiting for the client's answer at once. One means a
+/// strict send, commit, send cycle, where any late commit costs a whole frame of the resize.
+const MAX_IN_FLIGHT: usize = 2;
+
 /// Where the client is with the size we last asked of it.
 struct Progress {
     /// A configure is waiting to be sent and the client is ready for it.
@@ -286,13 +292,14 @@ fn progress(toplevel: &ToplevelSurface) -> Progress {
                 settled: caught_up,
             };
         }
-        // When only the size changed, wait until the client caught up with the last one.
-        // Anything else (a state flag, bounds, ...) goes out right away.
+        // When only the size changed, wait until the client has answered all but the last
+        // `MAX_IN_FLIGHT - 1` configures. Anything else (a state flag, bounds, ...) goes out
+        // right away.
         let mut same_size = sent.clone();
         same_size.size = pending.size;
         let only_size = same_size == *pending;
         Progress {
-            can_send: !only_size || caught_up,
+            can_send: !only_size || role.pending_configures().len() < MAX_IN_FLIGHT,
             settled: false,
         }
     })
