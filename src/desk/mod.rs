@@ -119,6 +119,9 @@ pub struct Desk<W> {
     /// not in here shows `current`. Kept for monitors that are unplugged, they pick up where
     /// they were when plugged back in.
     shown: HashMap<String, usize>,
+    /// The way a window that joins a container on a monitor is split off, by monitor name (the
+    /// `split` of the config). A monitor that's not in here splits along the longer side.
+    splits: HashMap<String, Axis>,
     /// The tiling containers, oldest first. Every member of one is an entry of `entries`, and
     /// every entry with a `container` is a member of one of these.
     containers: Vec<Container>,
@@ -136,6 +139,7 @@ impl<W> Default for Desk<W> {
             current: 0,
             per_output: false,
             shown: HashMap::new(),
+            splits: HashMap::new(),
             containers: Vec::new(),
             next_window: 0,
             next_container: 0,
@@ -145,6 +149,14 @@ impl<W> Default for Desk<W> {
 }
 
 impl<W> Desk<W> {
+    /// Say how a window that joins a container is split off, by monitor name (the `split` of
+    /// the config): a monitor in `splits` always gets that axis, any other one is cut along the
+    /// longer side of the leaf. Replaces what was set before. A drop on an edge of a leaf
+    /// still splits that way.
+    pub fn set_output_splits(&mut self, splits: HashMap<String, Axis>) {
+        self.splits = splits;
+    }
+
     /// Add a window on top of the current workspace, cascading so new windows don't hide each
     /// other. Returns the position it was given.
     pub fn add(&mut self, window: W) -> Pos {
@@ -1177,16 +1189,17 @@ impl<W> Desk<W> {
         // The rectangle the member has now, not the maximized one: the tree is what gets cut.
         let axis = match beside {
             Some(side) => axis_for(side),
-            None => c
-                .area
-                .and_then(|area| {
-                    c.tree
-                        .layout(area, gap)
-                        .into_iter()
-                        .find(|(window, _)| *window == at)
-                        .map(|(_, rect)| split_axis(rect))
-                })
-                .unwrap_or(Axis::Horizontal),
+            None => self.splits.get(&c.output).copied().unwrap_or_else(|| {
+                c.area
+                    .and_then(|area| {
+                        c.tree
+                            .layout(area, gap)
+                            .into_iter()
+                            .find(|(window, _)| *window == at)
+                            .map(|(_, rect)| split_axis(rect))
+                    })
+                    .unwrap_or(Axis::Horizontal)
+            }),
         };
         self.split_ids(container, at, axis, new)?;
         if let Some(c) = self.containers.iter_mut().find(|c| c.id == container) {
@@ -1258,19 +1271,25 @@ impl<W> Desk<W> {
         let Some(fill) = template.fill(&windows) else {
             return Err(ContainerError::NoSuchWindow);
         };
+        let forced = self
+            .containers
+            .get(ci)
+            .and_then(|c| self.splits.get(&c.output))
+            .copied();
         let mut tree = TileTree::from_root(fill.root);
         for window in &fill.extra {
             let Some(at) = tree.leaves().last().copied() else {
                 break;
             };
-            let axis = area
-                .and_then(|area| {
+            let axis = forced.unwrap_or_else(|| {
+                area.and_then(|area| {
                     tree.layout(area, gap)
                         .into_iter()
                         .find(|(leaf, _)| *leaf == at)
                         .map(|(_, rect)| split_axis(rect))
                 })
-                .unwrap_or(Axis::Horizontal);
+                .unwrap_or(Axis::Horizontal)
+            });
             // A window is never a leaf twice, so this cannot fail.
             let _ = tree.split(at, axis, *window);
         }

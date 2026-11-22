@@ -446,6 +446,8 @@ impl JffState {
         config: Config,
     ) -> Self {
         let compositor_state = CompositorState::new_v6::<Self>(&display_handle);
+        let mut desk = Desk::default();
+        desk.set_output_splits(config.output_splits());
         // Only advertise what jff really does: maximize, minimize and fullscreen. No window
         // menu, so clients don't show a button that would do nothing.
         let xdg_shell_state = XdgShellState::new_with_capabilities::<Self>(
@@ -750,7 +752,7 @@ impl JffState {
             last_snapshot: None,
             pending_events: Vec::new(),
             dragging_window: None,
-            desk: Desk::default(),
+            desk,
             popups: PopupManager::default(),
             resize: None,
             overview: None,

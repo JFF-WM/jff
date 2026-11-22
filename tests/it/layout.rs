@@ -1,7 +1,7 @@
 //! Tests for `jff_wm::primitives::layout`.
 
 use jff_wm::primitives::layout::{
-    arrange, bounds, carry_pos, center_in, clamp_to_rects, cycle, dialog_pos, fit_into,
+    arrange, bounds, carry_pos, center_in, clamp_to_rects, cycle, dialog_pos, edge_warp, fit_into,
     hot_corner_barrier, hot_corner_rect, inside_any_corner, intersects, nearest, neighbor,
     reachable, Direction, MonitorTarget, Rect,
 };
@@ -376,4 +376,47 @@ fn a_window_is_centered_in_a_monitor() {
     );
     // One bigger than the monitor hangs over evenly.
     assert_eq!(center_in((2000, 1200), A), (-40, -60));
+}
+
+#[test]
+fn edge_warp_keeps_the_relative_height() {
+    // A turned monitor 1080 wide and 2560 tall, a 1080p one to its right.
+    let tall: Rect = (0, 0, 1080, 2560);
+    let short: Rect = (1080, 0, 1920, 1080);
+    let rects = [tall, short];
+    // 70% of the way down the tall one, pushed into the wall below the short one.
+    let from = (1079.0, 1791.0);
+    let (x, y) = edge_warp(from, (1081.0, 1791.0), &rects).expect("warps");
+    assert_eq!(x, 1080.0);
+    assert!((y - 0.7 * 1079.0).abs() < 1.0, "{y}");
+    // Where the monitors face each other the pointer crosses as usual.
+    assert_eq!(edge_warp((1079.0, 500.0), (1081.0, 500.0), &rects), None);
+    // Coming back from the short one lands in front of the tall one: normal crossing.
+    assert_eq!(edge_warp((1080.0, 500.0), (1078.0, 500.0), &rects), None);
+}
+
+#[test]
+fn edge_warp_goes_back_to_the_tall_monitor_below_the_short_one() {
+    let tall: Rect = (0, 0, 1080, 2560);
+    let short: Rect = (1080, 1480, 1920, 1080);
+    let rects = [tall, short];
+    // Above the short monitor: a wall at the top of its left edge's neighbour.
+    let (x, y) = edge_warp((1079.0, 100.0), (1081.0, 100.0), &rects).expect("warps");
+    assert_eq!(x, 1080.0);
+    assert!(y >= 1480.0 && y < 1480.0 + 1080.0);
+}
+
+#[test]
+fn edge_warp_does_nothing_at_the_edge_of_the_desktop_or_inside_a_monitor() {
+    let a: Rect = (0, 0, 1000, 1000);
+    let b: Rect = (1000, 0, 1000, 500);
+    let rects = [a, b];
+    // Nothing to the left of the first monitor.
+    assert_eq!(edge_warp((0.0, 600.0), (-5.0, 600.0), &rects), None);
+    // Nothing below the tall one.
+    assert_eq!(edge_warp((500.0, 999.0), (500.0, 1005.0), &rects), None);
+    // A move that stays on the monitor.
+    assert_eq!(edge_warp((10.0, 10.0), (20.0, 20.0), &rects), None);
+    // Pushing into the wall under the short monitor, which lies to the right.
+    assert!(edge_warp((999.0, 800.0), (1001.0, 800.0), &rects).is_some());
 }

@@ -211,6 +211,62 @@ pub fn hot_corner_barrier(
     }
 }
 
+/// Edge warp: the pointer moving `from` -> `to` (not clamped) runs into the edge of its monitor
+/// where no monitor lies in front of it, so it would stay put. When a monitor lies beyond that
+/// edge, return where the pointer goes instead: the edge of that monitor facing it, at the same
+/// relative position along the edge (70% of the way down this monitor is 70% of the way down
+/// that one). `None` when the move stays on a monitor or ends on another one, when a monitor
+/// faces the pointer across the edge (it crosses as usual), and at the edge of the desktop.
+pub fn edge_warp(from: (f64, f64), to: (f64, f64), rects: &[Rect]) -> Option<(f64, f64)> {
+    if rects.iter().any(|rect| contains(*rect, to)) {
+        return None;
+    }
+    let index = rects.iter().position(|rect| contains(*rect, from))?;
+    let f = rects[index];
+    let direction = if to.0 >= f64::from(f.0 + f.2) {
+        Direction::Right
+    } else if to.0 < f64::from(f.0) {
+        Direction::Left
+    } else if to.1 >= f64::from(f.1 + f.3) {
+        Direction::Down
+    } else {
+        Direction::Up
+    };
+    let t = rects[neighbor(rects, index, direction)?];
+    let ratio =
+        |at: f64, start: i32, len: i32| (at - f64::from(start)) / f64::from((len - 1).max(1));
+    let place = |ratio: f64, start: i32, len: i32| {
+        f64::from(start) + ratio.clamp(0.0, 1.0) * f64::from((len - 1).max(0))
+    };
+    match direction {
+        Direction::Left | Direction::Right => {
+            // A monitor in front of the pointer at this height: the normal crossing.
+            if from.1 >= f64::from(t.1) && from.1 < f64::from(t.1 + t.3) {
+                return None;
+            }
+            let y = place(ratio(from.1, f.1, f.3), t.1, t.3);
+            let x = if direction == Direction::Right {
+                t.0
+            } else {
+                t.0 + t.2 - 1
+            };
+            Some((f64::from(x), y))
+        }
+        Direction::Up | Direction::Down => {
+            if from.0 >= f64::from(t.0) && from.0 < f64::from(t.0 + t.2) {
+                return None;
+            }
+            let x = place(ratio(from.0, f.0, f.2), t.0, t.2);
+            let y = if direction == Direction::Down {
+                t.1
+            } else {
+                t.1 + t.3 - 1
+            };
+            Some((x, f64::from(y)))
+        }
+    }
+}
+
 /// A way across the shared desktop, from one monitor to the next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {

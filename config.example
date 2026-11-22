@@ -63,6 +63,14 @@ no-client-decorations #true
 // button is held (a drag).
 focus-follows-mouse #true
 
+// Edge warp (off by default): the pointer only crosses between two monitors along the part of the
+// edge they share, so with a tall (vertical) monitor next to a shorter one, the rest of the tall
+// monitor's edge is a wall. With `edge-warp`, pushing the pointer into such a wall sends it to the
+// neighbouring monitor at the same relative position (70% down the tall one lands 70% down the
+// short one). Where the monitors do face each other the pointer crosses as usual, and it is not
+// used while a game has locked the pointer.
+// edge-warp #true
+
 // The mouse follows the focus (off by default): when a window gets the keyboard by something
 // other than the pointer (Alt+Tab, the overview, a new window, a workspace switch, a taskbar),
 // the pointer jumps to the center of that window, also when it is over it already. A click never
@@ -398,6 +406,11 @@ cursor {
 //         mode "1920x1080@60"                // WIDTHxHEIGHT or WIDTHxHEIGHT@REFRESH
 //         scale 1.5                          // draw the desktop 1.5 times larger, 0.25 to 10, 1 by default (fractional scale, clients that know wp_fractional_scale draw sharp)
 //         transform "90"                     // turn the picture onto the panel: "normal" (default), "90", "180", "270", "flipped", "flipped-90", "flipped-180" or "flipped-270". Named as wl_output names them, 90 is a quarter turn counter-clockwise
+//         // Portrait monitor: `transform "90"` (or "270") swaps its width and height in the shared desktop, so
+//         // give its neighbours a `position` that touches it (a 1920x1080 panel turned 90 is 1080 wide: the
+//         // next monitor goes at x 1080). The pointer only crosses along the part of the edge two monitors
+//         // share. `split "vertical"` needs `tiling-containers`.
+//         split "vertical"                   // a window that joins a tiling container here is split off "horizontal" (side by side) or "vertical" (one above the other, for a portrait monitor); "auto" (default) cuts the leaf along its longer side
 //         adaptive-sync "fullscreen"         // "off", "fullscreen" (default) or "always" (quoted)
 //         content-type-hint                  // tell the monitor what is on screen: a fullscreen window that says photo, video or game switches its picture mode
 //         icc-profile "~/.local/share/icc/panel.icc" // the monitor's colors, see color-management

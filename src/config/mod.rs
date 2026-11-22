@@ -60,6 +60,9 @@
 //! Two things that bite when editing the file by hand:
 //! - `adaptive-sync` takes a quoted string (`"off"` / `"fullscreen"` / `"always"`), not a
 //!   bare flag.
+//! - `split` (in `output`) takes a quoted string (`"auto"` / `"horizontal"` / `"vertical"`): how a
+//!   window that joins a tiling container on that monitor is split off, `"vertical"` for a portrait
+//!   monitor (one above the other). `"auto"`, the default, cuts the leaf along its longer side.
 //! - `maximize-new-windows`, `warp-mouse-to-focus`, `focus-follows-mouse`, `no-client-decorations`, `numlock`, `include-cursor`,
 //!   `copy-to-clipboard` and `enable` (in `log`) accept a bare name (`numlock`), `true` / `false`, `"true"` /
 //!   `"false"`, `"yes"` / `"no"`, or `"on"` / `"off"`.
@@ -88,6 +91,7 @@ pub use crate::primitives::input_settings::{
     AccelProfile, ClickMethod, DeviceKind, DeviceSettings, ScrollMethod, TapButtonMap,
 };
 use crate::primitives::layout::MonitorTarget;
+use crate::primitives::tile_tree::Axis;
 
 /// Default number of workspaces.
 pub const DEFAULT_WORKSPACES: usize = 9;
@@ -177,6 +181,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "maximize-new-windows",
     "warp-mouse-to-focus",
     "focus-follows-mouse",
+    "edge-warp",
     "allow-tearing",
     "power-key",
     "global-hotkeys",
@@ -514,6 +519,10 @@ pub struct OutputConfig {
     pub mode: Option<ModeRequest>,
     /// How the picture is turned onto the panel.
     pub transform: OutputTransform,
+    /// How a window that joins a tiling container on this monitor is split off: `Horizontal`
+    /// side by side, `Vertical` one above the other. `None` (`split "auto"`) cuts the leaf along
+    /// its longer side.
+    pub split: Option<Axis>,
     /// How many times larger than a logical pixel the monitor's pixels are, in 1/120 (the unit of wp_fractional_scale). 1 when not set.
     pub scale: Option<u32>,
     /// ICC profile whose calibration curves (`vcgt`) are applied to the monitor.
@@ -1628,6 +1637,10 @@ pub struct Config {
     warp_mouse_to_focus: bool,
     /// `focus-follows-mouse`: the window under the pointer gets the keyboard. Off by default.
     focus_follows_mouse: bool,
+    /// `edge-warp`: a pointer pushed against a monitor edge that has no monitor in front of it
+    /// at that height jumps to the neighbouring monitor, at the same relative position. Off by
+    /// default.
+    edge_warp: bool,
     /// `allow-tearing`: a fullscreen window that asked for it (wp_tearing_control_v1) is shown
     /// with async page flips. Off by default.
     allow_tearing: bool,
@@ -1715,6 +1728,7 @@ impl Default for Config {
                 maximize_new_windows: true,
                 warp_mouse_to_focus: false,
                 focus_follows_mouse: false,
+                edge_warp: false,
                 allow_tearing: false,
                 global_hotkeys: false,
                 power_key: PowerKey::default(),
@@ -1831,6 +1845,14 @@ impl Config {
             warnings.push(
                 "remember-container-layouts does nothing without `tiling-containers`".to_string(),
             );
+        }
+        if !config.tiling_containers() {
+            for output in config.outputs.iter().filter(|o| o.split.is_some()) {
+                warnings.push(format!(
+                    "output {:?} has `split`, which does nothing without `tiling-containers`",
+                    output.name
+                ));
+            }
         }
         let border = config.border();
         if border.animate != BorderAnimation::None && !border.animated() {
@@ -1982,6 +2004,7 @@ impl Config {
         let maximize_new_windows = parse_flag(&doc, "maximize-new-windows", true)?;
         let warp_mouse_to_focus = parse_flag(&doc, "warp-mouse-to-focus", false)?;
         let focus_follows_mouse = parse_flag(&doc, "focus-follows-mouse", false)?;
+        let edge_warp = parse_flag(&doc, "edge-warp", false)?;
         let allow_tearing = parse_flag(&doc, "allow-tearing", false)?;
         let global_hotkeys = parse_flag(&doc, "global-hotkeys", false)?;
         let power_key = match doc.get("power-key") {
@@ -2183,6 +2206,7 @@ impl Config {
             maximize_new_windows,
             warp_mouse_to_focus,
             focus_follows_mouse,
+            edge_warp,
             allow_tearing,
             global_hotkeys,
             power_key,
@@ -2588,6 +2612,12 @@ impl Config {
         self.focus_follows_mouse
     }
 
+    /// Whether a pointer pushed against a monitor edge with no monitor in front of it jumps to
+    /// the neighbouring monitor at the same relative position (`edge-warp`, off by default).
+    pub fn edge_warp(&self) -> bool {
+        self.edge_warp
+    }
+
     /// Whether windows fade in and out (`window-animations`, on by default).
     pub fn window_animations(&self) -> bool {
         self.window_animations.on
@@ -2631,6 +2661,14 @@ impl Config {
     /// all of them showing the same one. Off by default.
     pub fn workspaces_per_output(&self) -> bool {
         self.workspaces_per_output
+    }
+
+    /// The `split` every monitor with one asks for, by connector name.
+    pub fn output_splits(&self) -> HashMap<String, Axis> {
+        self.outputs
+            .iter()
+            .filter_map(|o| o.split.map(|axis| (o.name.clone(), axis)))
+            .collect()
     }
 
     /// What the config says about `name`, if anything.
@@ -3733,6 +3771,17 @@ fn parse_output(node: &KdlNode) -> anyhow::Result<OutputConfig> {
                             .map(|n| format!("\"{n}\""))
                             .join(", ")
                     ),
+                };
+            }
+            "split" => {
+                config.split = match args.as_slice() {
+                    [value] => match value.as_string() {
+                        Some("auto") => None,
+                        Some("horizontal") => Some(Axis::Horizontal),
+                        Some("vertical") => Some(Axis::Vertical),
+                        _ => bail!("split takes \"auto\", \"horizontal\" or \"vertical\""),
+                    },
+                    _ => bail!("split takes one value: split \"vertical\""),
                 };
             }
             "scale" => {

@@ -1,9 +1,10 @@
 //! Tests for `jff_wm::feature::outputs`.
 
-use jff_wm::config::{ModeRequest, OutputTransform};
+use jff_wm::config::{Config, ModeRequest, OutputTransform};
 use jff_wm::feature::outputs::{
     mhz_to_hz, upright_point, Monitor, MonitorMode, Retirement, GLOBAL_GRACE,
 };
+use jff_wm::primitives::tile_tree::Axis;
 use smithay::utils::{Logical, Point, Size, Transform};
 use std::collections::HashSet;
 use std::time::Instant;
@@ -140,4 +141,37 @@ fn nobody_connected_means_nothing_to_wait_for() {
     let start = Instant::now();
     let mut retirement = Retirement::new(start, clients(&[]), clients(&[]));
     assert!(retirement.ready(start, &clients(&[])));
+}
+
+#[test]
+fn split_is_read_per_output() {
+    let config = Config::parse(
+        r#"outputs {
+            output "DP-1" { split "vertical"; }
+            output "DP-2" { split "horizontal"; }
+            output "DP-3" { split "auto"; }
+            output "DP-4" { transform "90"; }
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(config.output("DP-1").unwrap().split, Some(Axis::Vertical));
+    assert_eq!(config.output("DP-2").unwrap().split, Some(Axis::Horizontal));
+    assert_eq!(config.output("DP-3").unwrap().split, None);
+    assert_eq!(config.output("DP-4").unwrap().split, None);
+    let splits = config.output_splits();
+    assert_eq!(splits.len(), 2);
+    assert_eq!(splits["DP-1"], Axis::Vertical);
+    assert_eq!(splits["DP-2"], Axis::Horizontal);
+}
+
+#[test]
+fn split_takes_one_known_name() {
+    for bad in [
+        r#"outputs { output "DP-1" { split; } }"#,
+        r#"outputs { output "DP-1" { split "diagonal"; } }"#,
+        r#"outputs { output "DP-1" { split 1; } }"#,
+        r#"outputs { output "DP-1" { split "vertical" "auto"; } }"#,
+    ] {
+        assert!(Config::parse(bad).is_err(), "{bad}");
+    }
 }

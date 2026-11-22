@@ -3,6 +3,7 @@
 use jff_wm::desk::{ContainerError, ContainerId, Desk, Side, WindowId, WindowMode};
 use jff_wm::primitives::container_drop::LeafDrop;
 use jff_wm::primitives::tile_tree::{Axis, Edge};
+use std::collections::HashMap;
 
 type TestDesk = Desk<&'static str>;
 
@@ -2090,4 +2091,34 @@ fn a_window_in_a_container_cannot_be_sticky_and_joining_one_ends_it() {
     d.split_container(c, |w| *w == "b", Axis::Horizontal, |w| *w == "c")
         .expect("c joins");
     assert!(!d.is_sticky(|w| *w == "c"));
+}
+
+#[test]
+fn a_monitor_can_force_the_way_a_joining_window_is_split() {
+    // One wide leaf would be cut side by side, but the monitor asks for one above the other.
+    let wide = (0, 0, 1000, 400);
+    let (mut d, c) = laid_out(&["a"], &["n"], Axis::Horizontal, wide);
+    d.set_output_splits(HashMap::from([(String::new(), Axis::Vertical)]));
+    d.join_container(c, None, |w| *w == "n", 0).expect("joins");
+    assert_eq!(rect_of(&mut d, c, wide, "a"), (0, 0, 1000, 200));
+    assert_eq!(rect_of(&mut d, c, wide, "n"), (0, 200, 1000, 200));
+
+    // And the other way round on a tall leaf.
+    let tall = (0, 0, 400, 1000);
+    let (mut d, c) = laid_out(&["a"], &["n"], Axis::Horizontal, tall);
+    d.set_output_splits(HashMap::from([(String::new(), Axis::Horizontal)]));
+    d.join_container(c, None, |w| *w == "n", 0).expect("joins");
+    assert_eq!(rect_of(&mut d, c, tall, "a"), (0, 0, 200, 1000));
+    assert_eq!(rect_of(&mut d, c, tall, "n"), (200, 0, 200, 1000));
+}
+
+#[test]
+fn a_monitor_without_a_split_keeps_cutting_along_the_longer_side() {
+    let wide = (0, 0, 1000, 400);
+    let (mut d, c) = laid_out(&["a"], &["n"], Axis::Horizontal, wide);
+    // Another monitor's split does not touch this one, and clearing them all is back to auto.
+    d.set_output_splits(HashMap::from([("DP-2".to_string(), Axis::Vertical)]));
+    d.set_output_splits(HashMap::new());
+    d.join_container(c, None, |w| *w == "n", 0).expect("joins");
+    assert_eq!(rect_of(&mut d, c, wide, "n"), (500, 0, 500, 400));
 }

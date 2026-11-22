@@ -682,8 +682,19 @@ impl JffState {
 
         let rects = self.pointer_bounds();
         let pos = cur + delta;
-        let pos: Point<f64, Logical> = layout::clamp_to_rects((pos.x, pos.y), &rects).into();
-        let pos = self.hot_corner_barrier(cur, pos);
+        let warped = self
+            .config
+            .edge_warp()
+            .then(|| layout::edge_warp((cur.x, cur.y), (pos.x, pos.y), &rects))
+            .flatten();
+        let pos: Point<f64, Logical> = match warped {
+            Some(target) => target.into(),
+            None => {
+                let pos: Point<f64, Logical> =
+                    layout::clamp_to_rects((pos.x, pos.y), &rects).into();
+                self.hot_corner_barrier(cur, pos)
+            }
+        };
         let new_under = self.pointer_focus_under(pos);
 
         // Confined: never leave the surface (or the confine region).
@@ -1207,6 +1218,7 @@ impl JffState {
                     }
                     self.arm_cursor_idle_timer();
                 }
+                self.desk.set_output_splits(self.config.output_splits());
                 self.apply_workspace_count();
                 self.reconcile_outputs();
                 crate::protocol::color_management::sync_output_color(self);
