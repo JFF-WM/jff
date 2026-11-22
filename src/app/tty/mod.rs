@@ -2793,7 +2793,8 @@ impl JffState {
                 );
                 for entry in self.desk.top_down() {
                     let geo = entry.window.geometry();
-                    let window_origin: Point<i32, Logical> = Point::from(entry.pos) - geo.loc;
+                    let drawn = crate::feature::containers::drawn_pos(&self.desk, entry);
+                    let window_origin: Point<i32, Logical> = Point::from(drawn) - geo.loc;
                     let bbox = entry.window.bbox();
                     let area = (
                         window_origin.x + bbox.loc.x,
@@ -2806,7 +2807,7 @@ impl JffState {
                         continue;
                     }
                     let size = entry.window.geometry().size;
-                    let is_covering = (entry.pos.0, entry.pos.1, size.w, size.h) == rect;
+                    let is_covering = (drawn.0, drawn.1, size.w, size.h) == rect;
                     // Popups and the window, each with its blur right behind it. A window tried on
                     // the primary plane is not converted: its buffer goes to the panel as it is.
                     window_elements(

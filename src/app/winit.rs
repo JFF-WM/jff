@@ -427,7 +427,8 @@ impl JffState {
                     );
                     for entry in self.desk.top_down() {
                         let geo = entry.window.geometry();
-                        let pos: Point<i32, Logical> = Point::from(entry.pos) - geo.loc;
+                        let drawn = crate::feature::containers::drawn_pos(&self.desk, entry);
+                        let pos: Point<i32, Logical> = Point::from(drawn) - geo.loc;
                         // Popups and the window, each with its blur right behind it.
                         window_elements(
                             &mut *renderer,

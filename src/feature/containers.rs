@@ -23,7 +23,7 @@ use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
 use crate::config::{Border, Config, WindowFacts, WindowRule};
-use crate::desk::{ContainerId, Side, WindowMode};
+use crate::desk::{ContainerId, Desk, Entry, Pos, Side, WindowMode};
 use crate::feature::osd::toplevel_names;
 use crate::feature::outputs::output_rect;
 use crate::feature::overview_mode::thumb_elements;
@@ -1483,4 +1483,23 @@ fn drop_elements(
 /// Where the animation of a carry's borders is in its turn of `period_ms`, `since` its start.
 fn border_phase(since: Instant, period_ms: u64) -> f32 {
     border_phase_ms(since.elapsed(), period_ms)
+}
+
+/// Where the window of `entry` is drawn. A member's tile moves as soon as the container is laid
+/// out again, but its buffer only changes size when the client commits, so a member still too
+/// big for its tile would stick out of the container, onto the next monitor. It is kept inside
+/// the container's area instead, and every other window is drawn at `entry.pos`. Takes the desk
+/// rather than the state, so it can be called while the backend is borrowed.
+pub fn drawn_pos(desk: &Desk<Window>, entry: &Entry<Window>) -> Pos {
+    let area = entry
+        .container
+        .and_then(|id| desk.container(id))
+        .and_then(|container| container.area());
+    match area {
+        Some(area) if entry.mode != WindowMode::Fullscreen => {
+            let size = entry.window.geometry().size;
+            layout::fit_into(entry.pos, (size.w, size.h), area)
+        }
+        _ => entry.pos,
+    }
 }
