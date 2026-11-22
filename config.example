@@ -224,6 +224,10 @@ overview {
     backdrop-color "#101018"  // "#rrggbbaa", a colour over the whole monitor behind the stage's frames, over
                               // the wallpaper and its blur. Without alpha it is a plain static colour, with
                               // alpha the wallpaper shows through. Left out: none
+    search-background-color "#1c1c23" // "#rrggbbaa", the fill of the search box and of the grid of apps
+                              // under it. With alpha, what is behind shows through. Left out: dark
+    search-font-color "#f2f2f7" // "#rrggbbaa", the colour of what is typed, the hint and the app names.
+                              // With alpha it fades into the fill. Left out: light grey
     container-background-color "#0d0f1a66" // "#rrggbbaa", the fill of a tiling container's cell, over the
                               // blur when `blur` is on. "#00000000" shows the blur alone. The default is about
                               // this dark translucent colour

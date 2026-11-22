@@ -54,6 +54,55 @@ const BADGES: [[f32; 3]; 6] = [
     [0.24, 0.62, 0.68],
 ];
 
+/// The colours the user chose for the search box and the app list (`search-background-color`
+/// and `search-font-color` in `overview { … }`). `None` keeps the built-in one.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Colors {
+    /// Fill of the box and of the list, straight alpha.
+    pub background: Option<[f32; 4]>,
+    /// Colour of the text, the caret and the app names. Its alpha mixes it with the fill.
+    pub font: Option<[f32; 4]>,
+}
+
+impl Colors {
+    /// The fill's colour and opacity. Built in, the box lets what is behind show through when
+    /// `translucent` and the list is opaque, a colour of the user's is as opaque as its alpha.
+    fn fill(self, translucent: bool) -> ([f32; 3], f32) {
+        match self.background {
+            Some([r, g, b, a]) => ([r, g, b], a),
+            None => (FILL, if translucent { TRANSLUCENT_FILL } else { 1.0 }),
+        }
+    }
+
+    /// The colour of the text, mixed with the fill by its alpha.
+    fn text(self) -> [f32; 3] {
+        match self.font {
+            Some([r, g, b, a]) => mix(self.fill(false).0, [r, g, b], a),
+            None => TEXT,
+        }
+    }
+
+    /// The hint, the placeholder and the magnifier: the text's colour, half faded into the fill.
+    fn hint(self) -> [f32; 3] {
+        match self.font {
+            Some(_) => mix(self.fill(false).0, self.text(), 0.55),
+            None => HINT,
+        }
+    }
+
+    /// What goes into the key of a painted picture, so a change of colour paints it again.
+    pub fn key(self) -> [u32; 8] {
+        let [a, b, c, d] = self.background.unwrap_or([-1.0; 4]);
+        let [e, f, g, h] = self.font.unwrap_or([-1.0; 4]);
+        [a, b, c, d, e, f, g, h].map(f32::to_bits)
+    }
+}
+
+/// `from` moved `t` of the way to `to`.
+fn mix(from: [f32; 3], to: [f32; 3], t: f32) -> [f32; 3] {
+    [0, 1, 2].map(|i| from[i] + (to[i] - from[i]) * t.clamp(0.0, 1.0))
+}
+
 /// Width of the picture for something `width` wide: room for the shadow on both sides.
 pub fn picture_width(width: i32) -> i32 {
     width + 2 * SHADOW
@@ -124,6 +173,7 @@ fn into_picture(canvas: Vec<Pixel>, width: i32, height: i32) -> Picture {
 /// A rounded panel `width` x `height` with a soft shadow and a faint rim, at the canvas's
 /// shadow margin. `translucent` lets what is behind show through the fill, and keeps the
 /// shadow outside the panel.
+#[allow(clippy::too_many_arguments)]
 fn panel(
     canvas: &mut [Pixel],
     cw: i32,
@@ -132,7 +182,11 @@ fn panel(
     height: i32,
     radius: i32,
     translucent: bool,
+    colors: Colors,
 ) {
+    let (fill, fill_alpha) = colors.fill(translucent);
+    // A fill that lets the background through must not show the shadow under it.
+    let see_through = translucent || fill_alpha < 1.0;
     let (half_w, half_h, radius) = (width as f32 / 2.0, height as f32 / 2.0, radius as f32);
     for py in 0..ch {
         for px in 0..cw {
@@ -142,18 +196,14 @@ fn panel(
             let shadow = sd_round_box(fx, fy - 4.0, half_w, half_h, half_w, half_h, radius);
             let d = sd_round_box(fx, fy, half_w, half_h, half_w, half_h, radius);
             let cover = (0.5 - d).clamp(0.0, 1.0);
-            let hidden = if translucent { cover } else { 0.0 };
+            let hidden = if see_through { cover } else { 0.0 };
             over(
                 pixel,
                 [0.0; 3],
                 0.5 * (1.0 - smoothstep(-6.0, 18.0, shadow)) * (1.0 - hidden),
             );
             if cover > 0.0 {
-                over(
-                    pixel,
-                    FILL,
-                    cover * if translucent { TRANSLUCENT_FILL } else { 1.0 },
-                );
+                over(pixel, fill, cover * fill_alpha);
                 let inner = (0.5 - (d + 1.0)).clamp(0.0, 1.0);
                 over(pixel, [1.0; 3], (cover - inner).max(0.0) * 0.08);
             }
@@ -287,7 +337,14 @@ fn keep_tail(text: &str, max: f32, width: impl Fn(&str) -> f32) -> String {
 
 /// The search box with `query` in it, or a hint when it's empty. `width` is the box itself,
 /// the picture is wider by the shadow.
-pub fn paint_box(fonts: Option<&Fonts>, query: &str, width: i32, translucent: bool) -> Picture {
+pub fn paint_box(
+    fonts: Option<&Fonts>,
+    query: &str,
+    width: i32,
+    translucent: bool,
+    colors: Colors,
+) -> Picture {
+    let (text, hint) = (colors.text(), colors.hint());
     let (mut canvas, cw, ch) = new_canvas(width, BOX_HEIGHT);
     panel(
         &mut canvas,
@@ -297,11 +354,12 @@ pub fn paint_box(fonts: Option<&Fonts>, query: &str, width: i32, translucent: bo
         BOX_HEIGHT,
         BOX_RADIUS,
         translucent,
+        colors,
     );
 
     let middle = SHADOW as f32 + BOX_HEIGHT as f32 / 2.0;
     let glass_x = (SHADOW + 26) as f32;
-    magnifier(&mut canvas, cw, ch, glass_x, middle, HINT);
+    magnifier(&mut canvas, cw, ch, glass_x, middle, hint);
 
     if let Some(f) = fonts {
         let left = glass_x + 22.0;
@@ -317,7 +375,7 @@ pub fn paint_box(fonts: Option<&Fonts>, query: &str, width: i32, translucent: bo
                 QUERY_PX,
                 left + 4.0,
                 base,
-                HINT,
+                hint,
             );
             round_rect(
                 &mut canvas,
@@ -328,7 +386,7 @@ pub fn paint_box(fonts: Option<&Fonts>, query: &str, width: i32, translucent: bo
                 2,
                 20,
                 1,
-                TEXT,
+                text,
                 0.9,
             );
         } else {
@@ -342,7 +400,7 @@ pub fn paint_box(fonts: Option<&Fonts>, query: &str, width: i32, translucent: bo
                 QUERY_PX,
                 left,
                 base,
-                TEXT,
+                text,
             );
             let end = left + text_width(&f.regular, &shown, QUERY_PX);
             round_rect(
@@ -354,7 +412,7 @@ pub fn paint_box(fonts: Option<&Fonts>, query: &str, width: i32, translucent: bo
                 2,
                 20,
                 1,
-                TEXT,
+                text,
                 0.9,
             );
         }
@@ -369,7 +427,9 @@ pub fn paint_list(
     rows: &[Row],
     selected: Option<usize>,
     width: i32,
+    colors: Colors,
 ) -> Picture {
+    let text = colors.text();
     let cols = columns_for_width(width) as usize;
     let lines = rows.len().div_ceil(cols.max(1)) as i32;
     let height = if rows.is_empty() {
@@ -378,7 +438,16 @@ pub fn paint_list(
         lines * TILE_H + 2 * LIST_PAD
     };
     let (mut canvas, cw, ch) = new_canvas(width, height);
-    panel(&mut canvas, cw, ch, width, height, LIST_RADIUS, false);
+    panel(
+        &mut canvas,
+        cw,
+        ch,
+        width,
+        height,
+        LIST_RADIUS,
+        false,
+        colors,
+    );
 
     for (i, row) in rows.iter().enumerate() {
         let left = SHADOW + LIST_PAD + (i % cols) as i32 * TILE_W;
@@ -456,7 +525,7 @@ pub fn paint_list(
             NAME_PX,
             center_x - w / 2.0,
             label_middle + half_line(&f.medium, NAME_PX),
-            TEXT,
+            text,
         );
     }
     into_picture(canvas, cw, ch)

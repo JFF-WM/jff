@@ -305,3 +305,26 @@ fn overview_backdrop_is_off_by_default_and_takes_a_colour() {
     assert!(Config::parse("overview { backdrop-color \"black\"; }").is_err());
     assert!(Config::parse("overview { backdrop-color; }").is_err());
 }
+
+#[test]
+fn overview_search_colors_are_off_by_default_and_take_a_colour() {
+    let overview = *Config::parse("").unwrap().overview();
+    assert_eq!(overview.search_background_color, None);
+    assert_eq!(overview.search_font_color, None);
+    let config = Config::parse(
+        "overview { search-background-color \"#00000080\"; search-font-color \"#fff\"; }",
+    )
+    .unwrap();
+    let [_, _, _, a] = config.overview().search_background_color.unwrap();
+    assert!((a - 128.0 / 255.0).abs() < 1e-6);
+    assert_eq!(config.overview().search_font_color, Some([1.0; 4]));
+    for line in [
+        "search-background-color \"red\"",
+        "search-background-color",
+        "search-font-color \"red\"",
+        "search-font-color",
+    ] {
+        let text = format!("overview {{ {line}; }}");
+        assert!(Config::parse(&text).is_err(), "{line}");
+    }
+}

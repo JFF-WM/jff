@@ -3418,6 +3418,11 @@ impl JffState {
     /// The search box and the app list, painted again only when what they show changed.
     fn search_plan(&mut self) -> Option<SearchPlan> {
         let translucent = self.config.overview().blur && !self.config.blur().off;
+        let style = *self.config.overview();
+        let colors = search_ui::Colors {
+            background: style.search_background_color,
+            font: style.search_font_color,
+        };
         let ov = self.overview.as_mut().filter(|ov| ov.switcher.is_none())?;
         let alpha = ov.progress() as f32;
         let layout = search_layout(ov);
@@ -3427,9 +3432,16 @@ impl JffState {
         let has_fonts = fonts.is_some();
 
         let (x, y, width, _) = layout.box_rect;
-        let key = hash_of((ov.search.query.as_str(), width, has_fonts, translucent));
+        let key = hash_of((
+            ov.search.query.as_str(),
+            width,
+            has_fonts,
+            translucent,
+            colors.key(),
+        ));
         if ov.search.box_paint.as_ref().map(|(k, _)| *k) != Some(key) {
-            let picture = search_ui::paint_box(fonts, ov.search.query.as_str(), width, translucent);
+            let picture =
+                search_ui::paint_box(fonts, ov.search.query.as_str(), width, translucent, colors);
             ov.search.box_paint = Some((key, buffer_of(&picture)));
         }
         let box_buffer = ov.search.box_paint.as_ref().map(|(_, b)| b.clone())?;
@@ -3448,9 +3460,9 @@ impl JffState {
                     })
                     .collect();
                 let selected = ov.search.app_selected;
-                let key = hash_of((&rows, selected, lw, has_fonts));
+                let key = hash_of((&rows, selected, lw, has_fonts, colors.key()));
                 if ov.search.list_paint.as_ref().map(|(k, _)| *k) != Some(key) {
-                    let picture = search_ui::paint_list(fonts, &rows, selected, lw);
+                    let picture = search_ui::paint_list(fonts, &rows, selected, lw, colors);
                     ov.search.list_paint = Some((key, buffer_of(&picture)));
                 }
                 ov.search
