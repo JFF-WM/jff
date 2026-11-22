@@ -6,7 +6,7 @@
 //! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9, per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
-//! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `only-layer \"NS\"`: blur only those layer namespaces, whole surface, on any layer, `layer-radius N` / `layer-radius \"NS\" N`: corner radius of the blur behind layer surfaces, all of them or one namespace, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `close-kill { … }` (`enable`, `seconds N`: a window that is still open `N` seconds (5 by default, 1 to 3600, fractions are fine) after it was asked to close, by a bind, the overview, a taskbar or `jff msg close`, has its process killed with SIGKILL and a toast says why, off by default, the process is that of the window's Wayland client, so every window of that process goes with it, X11 windows are never killed, they all share the process of xwayland-satellite), `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none, `border N` / `border-color \"#RRGGBBAA\"`: the border around the workspace squares (the stage's frames and the workspace wall's squares), width 0 for none, `backdrop-color \"#RRGGBBAA\"`: a colour over the whole monitor behind the stage's frames, over the wallpaper and its blur, without alpha it is a static colour, `search-background-color \"#RRGGBBAA\"` / `search-font-color \"#RRGGBBAA\"`: the fill and the text colour of the search box and the app grid, `container-background-color "#RRGGBBAA"`: the fill of a tiling container's cell, over the blur when `blur` is on, `#00000000` for the blur alone, `container-border-width N` / `container-border-color "#RRGGBBAA"`: the border of that cell, width 0 for none, `container-font-color \"#RRGGBBAA\"`: the colour of the name written on that cell, `container-radius N`: its corner radius, fill, border and blur, half of `radius` by default), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
+//! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `only-layer \"NS\"`: blur only those layer namespaces, whole surface, on any layer, `layer-radius N` / `layer-radius \"NS\" N`: corner radius of the blur behind layer surfaces, all of them or one namespace, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `close-kill { … }` (`enable`, `seconds N`: a window that is still open `N` seconds (5 by default, 1 to 3600, fractions are fine) after it was asked to close, by a bind, the overview, a taskbar or `jff msg close`, has its process killed with SIGKILL and a toast says why, off by default, the process is that of the window's Wayland client, so every window of that process goes with it, X11 windows are never killed, they all share the process of xwayland-satellite), `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none, `border N` / `border-color \"#RRGGBBAA\"`: the border around the workspace squares (the stage's frames and the workspace wall's squares), width 0 for none, `backdrop-color \"#RRGGBBAA\"`: a colour over the whole monitor behind the stage's frames, over the wallpaper and its blur, without alpha it is a static colour, `search-background-color \"#RRGGBBAA\"` / `search-font-color \"#RRGGBBAA\"`: the fill and the text colour of the search box and the app grid, `container-background-color "#RRGGBBAA"`: the fill of a tiling container's cell, over the blur when `blur` is on, `#00000000` for the blur alone, `container-border-width N` / `container-border-color "#RRGGBBAA"`: the border of that cell, width 0 for none, `container-font-color \"#RRGGBBAA\"`: the colour of the name written on that cell, `container-radius N`: its corner radius, fill, border and blur, half of `radius` by default), `workspace-wall` (`workspace-wall`, or a block with `height N`, `thumbnails`, `follow-window`: dragging a thumbnail in the overview shows a square per workspace to drop it on, and by default the workspace it was dropped on is shown and the window focused, `follow-window #false` only sends it), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
 //! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `open-position X Y` (from the top left of the monitor, kept inside it, floating), `open-centered` (the middle of the monitor, floating, not together with `open-position`), `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), `content-type "game"|"video"|"photo"|"none"` (what the window shows, whatever its client says through wp_content_type_v1: with `game`, `video` or `photo`, a fullscreen window covering a monitor with `content-type-hint` makes jff tell the monitor a game, a video or a photo is on screen, which X11 and Proton windows cannot say for themselves, `none` ignores what the client says, set when the window opens like `opacity`, a rule with only a `content-type` does not use up the one rule a window gets either), `always-on-top` (the window stays above the ones that are not, even above a fullscreen one, set when the window opens like `opacity`, a rule with only an `always-on-top` does not use up the one rule a window gets either), `sticky` (the window is shown on every workspace of its monitor, set when the window opens, a window that joins a container is not sticky, a rule with only a `sticky` does not use up the one rule a window gets either), the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
@@ -1096,12 +1096,15 @@ pub const MAX_WALL_HEIGHT: i32 = 400;
 /// The `workspace-wall` setting: while a thumbnail is dragged in the overview, a row of squares,
 /// one per workspace, appears, dropping the thumbnail on one sends the window to that workspace.
 /// `height` is the height in pixels of a square (it has the shape of the monitor). `thumbnails`
-/// draws the windows of each workspace inside its square (on unless `thumbnails #false`). Off
-/// unless the setting is in the file.
+/// draws the windows of each workspace inside its square (on unless `thumbnails #false`).
+/// `follow_window` (`follow-window`, on unless `follow-window #false`) shows the workspace the
+/// window was dropped on and focuses the window there, off it only sends the window and the
+/// view stays where it is. Off unless the setting is in the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkspaceWallConfig {
     pub height: i32,
     pub thumbnails: bool,
+    pub follow_window: bool,
 }
 
 /// Default size (px) of a hot corner whose block gives none, and its upper bound.
@@ -3198,12 +3201,14 @@ fn parse_close_kill(node: &KdlNode) -> anyhow::Result<CloseKillConfig> {
     Ok(config)
 }
 
-/// `workspace-wall`, `workspace-wall #false`, or a block with `height N`, `thumbnails` and `off`.
+/// `workspace-wall`, `workspace-wall #false`, or a block with `height N`, `thumbnails`,
+/// `follow-window` and `off`.
 /// `None` when it is off.
 fn parse_workspace_wall(node: &KdlNode) -> anyhow::Result<Option<WorkspaceWallConfig>> {
     let mut on = true;
     let mut height = DEFAULT_WALL_HEIGHT;
     let mut thumbnails = true;
+    let mut follow_window = true;
     if !positional(node).is_empty() {
         on = flag_value(node)?;
     }
@@ -3216,11 +3221,16 @@ fn parse_workspace_wall(node: &KdlNode) -> anyhow::Result<Option<WorkspaceWallCo
                 }
             }
             "thumbnails" => thumbnails = flag_value(child)?,
+            "follow-window" => follow_window = flag_value(child)?,
             "off" => on = !flag_value(child)?,
             other => bail!("unknown workspace-wall setting {other:?}"),
         }
     }
-    Ok(on.then_some(WorkspaceWallConfig { height, thumbnails }))
+    Ok(on.then_some(WorkspaceWallConfig {
+        height,
+        thumbnails,
+        follow_window,
+    }))
 }
 
 /// A `window-rule` block: `match` lines, then actions.

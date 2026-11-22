@@ -41,6 +41,9 @@ workspaces { count 5; per-output }
 workspace-wall {
     height 240      // px, 32 to 400, 96 by default
     thumbnails #true // draw the windows in the squares (on by default)
+    follow-window #true // after a window is dropped on a square, show that workspace and focus
+                        // the window there (on by default). #false: the window is only sent and
+                        // you stay on the workspace you were on
 }
 
 // ---------------------------------------------------------------------------------------------

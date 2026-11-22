@@ -2508,17 +2508,27 @@ impl JffState {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
-        let Some((drag, source)) = self.overview.as_mut().and_then(|ov| {
+        let Some((drag, source, monitor)) = self.overview.as_mut().and_then(|ov| {
             let drag = ov.drag.take()?;
-            Some((drag, output_rect(&ov.output)))
+            Some((drag, output_rect(&ov.output), ov.output.name()))
         }) else {
             return;
         };
         let at = pointer.current_location();
-        // Dropped on a square of the workspace wall: the window goes to that workspace.
+        // Dropped on a square of the workspace wall: the window goes to that workspace, and
+        // with `follow-window` (the default) that workspace is shown, with the window focused.
         let cells = self.wall_cells();
         if let Some(workspace) = overview::wall_hit(&cells, (at.x, at.y)) {
             self.send_to_workspace(&drag.window, workspace);
+            if self
+                .config
+                .workspace_wall()
+                .is_some_and(|wall| wall.follow_window)
+            {
+                // This closes the overview, on the monitor it was opened on.
+                self.switch_workspace_on(&monitor, workspace);
+                self.focus_window(&drag.window);
+            }
             return;
         }
         let rects = self.output_rects();
