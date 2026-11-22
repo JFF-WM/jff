@@ -6,7 +6,7 @@
 //! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9, per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
-//! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `only-layer \"NS\"`: blur only those layer namespaces, whole surface, on any layer, `layer-radius N` / `layer-radius \"NS\" N`: corner radius of the blur behind layer surfaces, all of them or one namespace, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `close-kill { … }` (`enable`, `seconds N`: a window that is still open `N` seconds (5 by default, 1 to 3600, fractions are fine) after it was asked to close, by a bind, the overview, a taskbar or `jff msg close`, has its process killed with SIGKILL and a toast says why, off by default, the process is that of the window's Wayland client, so every window of that process goes with it, X11 windows are never killed, they all share the process of xwayland-satellite), `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none, `container-background-color "#RRGGBBAA"`: the fill of a tiling container's cell, over the blur when `blur` is on, `#00000000` for the blur alone, `container-border-width N` / `container-border-color "#RRGGBBAA"`: the border of that cell, width 0 for none, `container-font-color \"#RRGGBBAA\"`: the colour of the name written on that cell, `container-radius N`: its corner radius, fill, border and blur, half of `radius` by default), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
+//! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `only-layer \"NS\"`: blur only those layer namespaces, whole surface, on any layer, `layer-radius N` / `layer-radius \"NS\" N`: corner radius of the blur behind layer surfaces, all of them or one namespace, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `close-kill { … }` (`enable`, `seconds N`: a window that is still open `N` seconds (5 by default, 1 to 3600, fractions are fine) after it was asked to close, by a bind, the overview, a taskbar or `jff msg close`, has its process killed with SIGKILL and a toast says why, off by default, the process is that of the window's Wayland client, so every window of that process goes with it, X11 windows are never killed, they all share the process of xwayland-satellite), `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none, `border N` / `border-color \"#RRGGBBAA\"`: the border around the workspace squares (the stage's frames and the workspace wall's squares), width 0 for none, `container-background-color "#RRGGBBAA"`: the fill of a tiling container's cell, over the blur when `blur` is on, `#00000000` for the blur alone, `container-border-width N` / `container-border-color "#RRGGBBAA"`: the border of that cell, width 0 for none, `container-font-color \"#RRGGBBAA\"`: the colour of the name written on that cell, `container-radius N`: its corner radius, fill, border and blur, half of `radius` by default), `workspace-wall` (`workspace-wall`, or a block with `height N`: dragging a thumbnail in the overview shows a square per workspace to drop it on), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
 //! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `open-position X Y` (from the top left of the monitor, kept inside it, floating), `open-centered` (the middle of the monitor, floating, not together with `open-position`), `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), `content-type "game"|"video"|"photo"|"none"` (what the window shows, whatever its client says through wp_content_type_v1: with `game`, `video` or `photo`, a fullscreen window covering a monitor with `content-type-hint` makes jff tell the monitor a game, a video or a photo is on screen, which X11 and Proton windows cannot say for themselves, `none` ignores what the client says, set when the window opens like `opacity`, a rule with only a `content-type` does not use up the one rule a window gets either), `always-on-top` (the window stays above the ones that are not, even above a fullscreen one, set when the window opens like `opacity`, a rule with only an `always-on-top` does not use up the one rule a window gets either), `sticky` (the window is shown on every workspace of its monitor, set when the window opens, a window that joins a container is not sticky, a rule with only a `sticky` does not use up the one rule a window gets either), the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
@@ -1001,6 +1001,9 @@ pub const DEFAULT_CONTAINER_BACKGROUND_COLOR: [f32; 4] = [0.05, 0.06, 0.10, 0.40
 /// Default border of a tiling container's cell in the overview: 2 px of a translucent light grey.
 pub const DEFAULT_CONTAINER_BORDER_WIDTH: i32 = 2;
 pub const DEFAULT_CONTAINER_BORDER_COLOR: [f32; 4] = [0.75, 0.78, 0.88, 0.60];
+/// Default width of the border around the workspace squares of the overview (the frames of the
+/// stage and the squares of the workspace wall).
+pub const DEFAULT_OVERVIEW_BORDER_WIDTH: i32 = 2;
 /// Default colour of the name written on a tiling container's cell in the overview.
 pub const DEFAULT_CONTAINER_FONT_COLOR: [f32; 4] = [0.95, 0.95, 0.97, 1.0];
 
@@ -1016,11 +1019,18 @@ pub const DEFAULT_CONTAINER_FONT_COLOR: [f32; 4] = [0.95, 0.95, 0.97, 1.0];
 /// `container-border-width` (px, 0 for none) and `container-border-color` draw the border of the
 /// cell, `container-radius` (px) rounds the corners of its border, fill and blur together, left
 /// out it is half of the windows' `radius`. `container-font-color` (same colour syntax) is the
-/// colour of the name written on the cell.
+/// colour of the name written on the cell. `border` (px, 0 for none) and `border-color` draw the
+/// border around the squares of the workspaces the overview shows, the frames of the stage and
+/// the workspace wall's squares, left out the colour is a translucent light grey. The square the
+/// pointer is over keeps the `selection-*` outline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OverviewConfig {
     pub selection_width: i32,
     pub selection_color: [f32; 4],
+    /// Width of the border around the workspace squares, 0 draws none.
+    pub border_width: i32,
+    /// Colour of that border, straight alpha, `None` is the built-in translucent light grey.
+    pub border_color: Option<[f32; 4]>,
     /// Fill of a tiling container's cell, straight (not premultiplied) alpha.
     pub container_background_color: [f32; 4],
     /// Width of the border of a tiling container's cell, 0 draws none.
@@ -1043,6 +1053,8 @@ impl Default for OverviewConfig {
         Self {
             selection_width: DEFAULT_SELECTION_WIDTH,
             selection_color: DEFAULT_SELECTION_COLOR,
+            border_width: DEFAULT_OVERVIEW_BORDER_WIDTH,
+            border_color: None,
             container_background_color: DEFAULT_CONTAINER_BACKGROUND_COLOR,
             container_border_width: DEFAULT_CONTAINER_BORDER_WIDTH,
             container_border_color: DEFAULT_CONTAINER_BORDER_COLOR,
@@ -3465,6 +3477,8 @@ fn parse_overview(node: &KdlNode) -> anyhow::Result<OverviewConfig> {
         match child.name().value() {
             "selection-width" => config.selection_width = int_arg(child, MAX_BORDER_WIDTH)?,
             "selection-color" => config.selection_color = parse_color(&string_arg(child)?)?,
+            "border" => config.border_width = int_arg(child, MAX_BORDER_WIDTH)?,
+            "border-color" => config.border_color = Some(parse_color(&string_arg(child)?)?),
             "container-background-color" => {
                 config.container_background_color = parse_color(&string_arg(child)?)?
             }

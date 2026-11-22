@@ -217,6 +217,10 @@ overview {
     animation-ms 320          // 0 to 2000, how long the overview takes to open and close, 0 = no
                               // animation, 320 by default
     blur                      // (off by default) for the frames and the search box
+    border 2                  // px, 0 to 64, the border around the workspace squares (the frames of the
+                              // stage, the squares of the workspace wall), 0 for none, 2 by default.
+                              // The square under the pointer keeps the selection outline
+    border-color "#ebedf980"  // "#rrggbbaa", the colour of that border. Left out: a translucent light grey
     container-background-color "#0d0f1a66" // "#rrggbbaa", the fill of a tiling container's cell, over the
                               // blur when `blur` is on. "#00000000" shows the blur alone. The default is about
                               // this dark translucent colour

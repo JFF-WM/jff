@@ -2,7 +2,8 @@
 
 use jff_wm::config::{
     Action, Config, DEFAULT_CONTAINER_BACKGROUND_COLOR, DEFAULT_CONTAINER_BORDER_COLOR,
-    DEFAULT_CONTAINER_BORDER_WIDTH, DEFAULT_CONTAINER_FONT_COLOR, DEFAULT_SELECTION_COLOR,
+    DEFAULT_CONTAINER_BORDER_WIDTH, DEFAULT_CONTAINER_FONT_COLOR, DEFAULT_OVERVIEW_BORDER_WIDTH,
+    DEFAULT_SELECTION_COLOR,
 };
 use jff_wm::protocol::xx_hotkey::{mods_state, CTRL, SHIFT};
 use smithay::input::keyboard::Keysym;
@@ -267,4 +268,28 @@ fn overview_container_font_color_has_a_default_and_takes_a_colour() {
     assert!((a - 128.0 / 255.0).abs() < 1e-6);
     assert!(Config::parse("overview { container-font-color \"red\"; }").is_err());
     assert!(Config::parse("overview { container-font-color; }").is_err());
+}
+
+#[test]
+fn overview_border_has_a_default_and_takes_a_width_and_a_colour() {
+    let overview = *Config::parse("").unwrap().overview();
+    assert_eq!(overview.border_width, DEFAULT_OVERVIEW_BORDER_WIDTH);
+    assert_eq!(overview.border_color, None);
+    let config = Config::parse("overview { border 3; border-color \"#ff000080\"; }").unwrap();
+    assert_eq!(config.overview().border_width, 3);
+    let [r, g, b, a] = config.overview().border_color.unwrap();
+    assert_eq!([r, g, b], [1.0, 0.0, 0.0]);
+    assert!((a - 128.0 / 255.0).abs() < 1e-6);
+    let config = Config::parse("overview { border 0; }").unwrap();
+    assert_eq!(config.overview().border_width, 0);
+    for line in [
+        "border -1",
+        "border 65",
+        "border",
+        "border-color \"red\"",
+        "border-color",
+    ] {
+        let text = format!("overview {{ {line}; }}");
+        assert!(Config::parse(&text).is_err(), "{line}");
+    }
 }

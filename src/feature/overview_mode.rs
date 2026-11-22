@@ -537,6 +537,9 @@ pub struct OverviewPlan {
     cell_fill_pixel: Option<MemoryRenderBuffer>,
     /// The border of a cell: width and straight-alpha colour (`container-border-*`).
     cell_border: (i32, [f32; 4]),
+    /// The border of a workspace square: width and colour, `None` for the built-in colours
+    /// (`border`, `border-color`).
+    wall_border: (i32, Option<[f32; 4]>),
     /// Corner radius of a cell (`container-radius`).
     cell_radius: i32,
     /// Corner radius of windows (the `radius` setting), thumbnails get it shrunk with them.
@@ -607,11 +610,9 @@ pub struct WallPlan {
 const WALL_FILL: [f32; 4] = [0.05, 0.06, 0.10, 0.55];
 /// Outline of the square of the workspace that is shown now (straight alpha).
 const WALL_CURRENT: [f32; 4] = [0.85, 0.85, 0.90, 0.55];
-/// Rim of the frames of the stage (straight alpha), drawn just outside each frame. The frame of
-/// the shown workspace has it fully, the neighbours' frames weaker.
+/// Rim of the frames of the stage (straight alpha), drawn just outside each frame, when
+/// `overview { border-color }` is not set. The neighbours' frames have it weaker.
 const STAGE_BORDER: [f32; 4] = [0.92, 0.93, 0.98, 0.50];
-/// Width of that rim.
-const STAGE_BORDER_WIDTH: i32 = 2;
 /// How much of the rim the neighbours' frames get.
 const STAGE_PEEK_STRENGTH: f32 = 0.55;
 /// Colour of the numbers on the wall.
@@ -1134,6 +1135,7 @@ fn wall_elements(
         return;
     };
     let radius = wall.radius;
+    let (border_width, border_color) = plan.wall_border;
     for (i, cell) in wall.cells.iter().enumerate() {
         let local = Rectangle::<i32, Logical>::new(
             (cell.0 - origin.x, cell.1 - origin.y).into(),
@@ -1142,16 +1144,16 @@ fn wall_elements(
         let outline = if wall.hover == Some(i) {
             Some(plan.outline).filter(|(width, _)| *width > 0)
         } else if i == wall.current {
-            Some((2, WALL_CURRENT))
+            Some((border_width, border_color.unwrap_or(WALL_CURRENT)))
         } else if wall.behind {
             // The stage: a rim around every frame, so it stands out from the blurred background.
             let strength = stage_strength(i) * plan.cell_alpha.clamp(0.0, 1.0);
-            let [r, g, b, a] = STAGE_BORDER;
-            Some((STAGE_BORDER_WIDTH, [r, g, b, a * strength]))
+            let [r, g, b, a] = border_color.unwrap_or(STAGE_BORDER);
+            Some((border_width, [r, g, b, a * strength]))
         } else {
             None
         };
-        if let Some((border, color)) = outline {
+        if let Some((border, color)) = outline.filter(|(border, _)| *border > 0) {
             if let Some(ring) = ring_element(renderer, local, border, radius, color) {
                 out.push(JffElement::Ring(ring));
             }
@@ -3226,6 +3228,7 @@ impl JffState {
             cell_fill: style.container_background_color,
             cell_fill_pixel,
             cell_border: (style.container_border_width, style.container_border_color),
+            wall_border: (style.border_width, style.border_color),
             cell_radius,
             radius,
             blur_windows: self.config.blur_windows().clone(),
