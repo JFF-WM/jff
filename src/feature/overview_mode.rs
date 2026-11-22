@@ -426,6 +426,8 @@ pub struct Overview {
     pan: Option<(Instant, f64)>,
     /// The black pixel that darkens the workspaces' wallpaper, made when first needed.
     stage_dim: Option<MemoryRenderBuffer>,
+    /// Stable id of the backdrop behind the stage's frames (`backdrop-color`).
+    backdrop_id: Id,
     /// A pixel of the containers' fill colour (without its alpha) and that colour, made when
     /// first needed, for cells with rounded corners.
     cell_fill_pixel: Option<([f32; 3], MemoryRenderBuffer)>,
@@ -540,6 +542,9 @@ pub struct OverviewPlan {
     /// The border of a workspace square: width and colour, `None` for the built-in colours
     /// (`border`, `border-color`).
     wall_border: (i32, Option<[f32; 4]>),
+    /// The colour behind the stage's frames, straight alpha, and the id of its element
+    /// (`backdrop-color`).
+    backdrop: Option<([f32; 4], Id)>,
     /// Corner radius of a cell (`container-radius`).
     cell_radius: i32,
     /// Corner radius of windows (the `radius` setting), thumbnails get it shrunk with them.
@@ -1221,6 +1226,8 @@ fn wall_elements(
     // A wall of drag squares blurs what is behind each square and shows no wallpaper in it. The
     // frames of the stage keep their wallpaper as it is and the blur goes around them instead.
     let blurred = wall.blur && blur.is_some() && !wall.behind;
+    // The stage's backdrop goes behind the frames, in front of the blur and of the squares' fill.
+    let mut backdrop_done = false;
     match (wall.blur, blur) {
         (true, Some(blur)) if !wall.behind => {
             for (cell, id) in wall.cells.iter().zip(&wall.blur_ids) {
@@ -1251,6 +1258,10 @@ fn wall_elements(
                 Some(blur),
                 &plan.blur_layers,
             ));
+            // The backdrop goes in front of the blur: a static colour hides it, one with alpha
+            // tints it.
+            backdrop_element(plan, origin, out);
+            backdrop_done = true;
             // The whole monitor, last in the list so it is drawn first: the frames and
             // everything in them are drawn over it and stay sharp. It fades with the overview,
             // also once the frames are gone while it closes.
@@ -1270,9 +1281,25 @@ fn wall_elements(
                 out.push(JffElement::from(element.with_wallpaper_source(snapshot)));
             }
         }
-        _ => wallpaper_elements(renderer, plan, wall, origin, out),
+        _ => {
+            wallpaper_elements(renderer, plan, wall, origin, out);
+            if wall.behind && plan.backdrop.is_some() {
+                // The backdrop would cover a panel on the bottom layer, so it is drawn again
+                // in front of it, as it is with blur.
+                out.extend(layer_body_elements(
+                    renderer,
+                    &plan.output,
+                    &[Layer::Bottom],
+                    blur,
+                    &plan.blur_layers,
+                ));
+            }
+        }
     }
     if wall.behind && (blurred || !wall.wallpaper.is_empty()) {
+        if !backdrop_done {
+            backdrop_element(plan, origin, out);
+        }
         return;
     }
     for (i, cell) in wall.cells.iter().enumerate() {
@@ -1291,6 +1318,36 @@ fn wall_elements(
             Kind::Unspecified,
         )));
     }
+    if !backdrop_done {
+        backdrop_element(plan, origin, out);
+    }
+}
+
+/// The colour behind the stage's frames (`backdrop-color`): the whole monitor, fading with the
+/// overview. Nothing when it is not set or already faded out. Only the stage has one.
+fn backdrop_element(plan: &OverviewPlan, origin: Point<i32, Logical>, out: &mut Vec<JffElement>) {
+    let Some(([r, g, b, a], id)) = &plan.backdrop else {
+        return;
+    };
+    if !plan.wall.as_ref().is_some_and(|wall| wall.behind) {
+        return;
+    }
+    let a = a * plan.cell_alpha.clamp(0.0, 1.0);
+    if a <= 0.0 {
+        return;
+    }
+    let monitor = output_rect(&plan.output);
+    out.push(JffElement::Solid(SolidColorRenderElement::new(
+        id.clone(),
+        Rectangle::<i32, Physical>::new(
+            (monitor.0 - origin.x, monitor.1 - origin.y).into(),
+            (monitor.2, monitor.3).into(),
+        ),
+        CommitCounter::default(),
+        // Solid colours are premultiplied.
+        [r * a, g * a, b * a, a],
+        Kind::Unspecified,
+    )));
 }
 
 /// How much of the rim frame `i` of the stage gets: the first one is the shown
@@ -2071,6 +2128,7 @@ impl JffState {
             carry: Carry::new(),
             pan: None,
             stage_dim: None,
+            backdrop_id: Id::new(),
             cell_fill_pixel: None,
             stage_blur_ids: Vec::new(),
             search_blur: Id::new(),
@@ -3229,6 +3287,9 @@ impl JffState {
             cell_fill_pixel,
             cell_border: (style.container_border_width, style.container_border_color),
             wall_border: (style.border_width, style.border_color),
+            backdrop: style
+                .backdrop_color
+                .map(|color| (color, ov.backdrop_id.clone())),
             cell_radius,
             radius,
             blur_windows: self.config.blur_windows().clone(),

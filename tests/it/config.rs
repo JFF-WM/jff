@@ -293,3 +293,15 @@ fn overview_border_has_a_default_and_takes_a_width_and_a_colour() {
         assert!(Config::parse(&text).is_err(), "{line}");
     }
 }
+
+#[test]
+fn overview_backdrop_is_off_by_default_and_takes_a_colour() {
+    assert_eq!(Config::parse("").unwrap().overview().backdrop_color, None);
+    let config = Config::parse("overview { backdrop-color \"#000\"; }").unwrap();
+    assert_eq!(config.overview().backdrop_color, Some([0.0, 0.0, 0.0, 1.0]));
+    let config = Config::parse("overview { backdrop-color \"#00000080\"; }").unwrap();
+    let [_, _, _, a] = config.overview().backdrop_color.unwrap();
+    assert!((a - 128.0 / 255.0).abs() < 1e-6);
+    assert!(Config::parse("overview { backdrop-color \"black\"; }").is_err());
+    assert!(Config::parse("overview { backdrop-color; }").is_err());
+}
