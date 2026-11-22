@@ -35,12 +35,14 @@ pub enum Group {
     Clicks,
     /// DBus objects apps tied to a window or to themselves (xdg-dbus-annotation).
     DbusAnnotation,
+    /// The keyboard layouts and the one in use.
+    Keyboard,
 }
 
 impl Group {
     /// Group names as typed on the command line, for error messages.
     pub const NAMES: &'static str =
-        "windows, focus, workspaces, outputs, modes, popups, layers, clicks, dbus-annotation";
+        "windows, focus, workspaces, outputs, modes, popups, layers, clicks, dbus-annotation, keyboard";
 
     pub fn parse(word: &str) -> Option<Group> {
         match word {
@@ -53,6 +55,7 @@ impl Group {
             "layers" => Some(Group::Layers),
             "clicks" => Some(Group::Clicks),
             "dbus-annotation" => Some(Group::DbusAnnotation),
+            "keyboard" => Some(Group::Keyboard),
             _ => None,
         }
     }
@@ -67,7 +70,7 @@ impl Group {
 pub struct GroupSet(u16);
 
 impl GroupSet {
-    pub const ALL: GroupSet = GroupSet(0b1_1111_1111);
+    pub const ALL: GroupSet = GroupSet(0b11_1111_1111);
 
     /// No groups named means all of them.
     pub fn from_groups(groups: &[Group]) -> GroupSet {
@@ -617,6 +620,88 @@ impl DbusAnnotationInfo {
     }
 }
 
+/// One layout of the keymap, as `keyboard-layouts` lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyboardLayout {
+    /// Position in the keymap, counting from 1.
+    pub index: usize,
+    /// The name xkb gives the layout, as the keymap spells it (`English (US)`).
+    pub name: String,
+    /// The `layout` entry of the config the layout was built from (`us`), `None` when jff can't
+    /// tell which one it is.
+    pub code: Option<String>,
+    /// The `variant` entry that goes with `code`, `None` for the default variant.
+    pub variant: Option<String>,
+}
+
+impl KeyboardLayout {
+    fn members(&self) -> String {
+        format!(
+            "\"index\":{},\"name\":{},\"code\":{},\"variant\":{}",
+            self.index,
+            json_str(&self.name),
+            json_opt(self.code.as_deref()),
+            json_opt(self.variant.as_deref()),
+        )
+    }
+
+    pub fn to_json(&self) -> String {
+        format!("{{{}}}", self.members())
+    }
+}
+
+/// The layouts of the keymap on the seat and the one in use.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KeyboardInfo {
+    /// The `index` of the layout in use, `None` when the seat has no keyboard.
+    pub active: Option<usize>,
+    /// Every layout of the keymap, in keymap order.
+    pub layouts: Vec<KeyboardLayout>,
+}
+
+impl KeyboardInfo {
+    /// Describe a keymap that has the layouts `names` (in keymap order) with `active` (counting
+    /// from 0) in use. `layout` and `variant` are the comma separated lists the keymap was built
+    /// from, they only give `code` and `variant` to the layouts when they list as many entries
+    /// as the keymap has layouts, else (a keymap a client set, rules that add layouts) jff can't
+    /// tell which entry is which and both stay `None`.
+    pub fn new(names: Vec<String>, active: usize, layout: &str, variant: &str) -> KeyboardInfo {
+        let entries = |list: &str| -> Vec<Option<String>> {
+            list.split(',')
+                .map(|entry| Some(entry.trim().to_string()).filter(|entry| !entry.is_empty()))
+                .collect()
+        };
+        let codes = entries(layout);
+        let variants = entries(variant);
+        let named = codes.len() == names.len();
+        let layouts: Vec<KeyboardLayout> = names
+            .into_iter()
+            .enumerate()
+            .map(|(position, name)| KeyboardLayout {
+                index: position + 1,
+                name,
+                code: named.then(|| codes[position].clone()).flatten(),
+                variant: named
+                    .then(|| variants.get(position).cloned().flatten())
+                    .flatten(),
+            })
+            .collect();
+        let active = (active < layouts.len()).then_some(active + 1);
+        KeyboardInfo { active, layouts }
+    }
+
+    /// The members `keyboard-layouts`, the `keyboard-layout` event and the snapshot's `keyboard`
+    /// share: `"active":2,"layouts":[...]`.
+    pub fn members(&self) -> String {
+        let layouts: Vec<String> = self.layouts.iter().map(KeyboardLayout::to_json).collect();
+        format!(
+            "\"active\":{},\"layouts\":[{}]",
+            json_id(self.active.map(|index| index as u64)),
+            layouts.join(",")
+        )
+    }
+}
+
 /// Everything `watch` reports, at one moment.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
@@ -637,6 +722,8 @@ pub struct Snapshot {
     pub layers: Vec<LayerInfo>,
     /// DBus objects apps tied to a window or to themselves.
     pub dbus_annotations: Vec<DbusAnnotationInfo>,
+    /// The keyboard layouts and the one in use.
+    pub keyboard: KeyboardInfo,
     /// The window the user is moving with the pointer right now (a titlebar drag, or a thumbnail
     /// carried in the overview). `diff` turns
     /// changes of it into `drag` events, the snapshot itself doesn't carry it.
@@ -688,6 +775,9 @@ impl Snapshot {
                 ",\"dbus_annotations\":[{}]",
                 annotations.join(",")
             ));
+        }
+        if groups.contains(Group::Keyboard) {
+            out.push_str(&format!(",\"keyboard\":{{{}}}", self.keyboard.members()));
         }
         out.push('}');
         out
@@ -806,6 +896,8 @@ pub enum Event {
     },
     /// A mouse button was pressed (not part of the snapshot diff, queued by the input code).
     Click(ClickInfo),
+    /// The layout in use changed, or the keymap got other layouts.
+    KeyboardLayout(KeyboardInfo),
 }
 
 fn json_id(id: Option<u64>) -> String {
@@ -842,6 +934,7 @@ impl Event {
             Event::LayerOpened(_) | Event::LayerClosed { .. } => Group::Layers,
             Event::Click(_) => Group::Clicks,
             Event::DbusAnnotation(_) | Event::DbusAnnotationRemoved { .. } => Group::DbusAnnotation,
+            Event::KeyboardLayout(_) => Group::Keyboard,
         }
     }
 
@@ -947,6 +1040,9 @@ impl Event {
             }
             Event::LayerClosed { id } => format!("{{\"event\":\"layer-closed\",\"id\":{id}}}"),
             Event::Click(click) => format!("{{\"event\":\"click\",{}}}", click.members()),
+            Event::KeyboardLayout(keyboard) => {
+                format!("{{\"event\":\"keyboard-layout\",{}}}", keyboard.members())
+            }
         }
     }
 }
@@ -956,7 +1052,7 @@ impl Event {
 /// then changes on windows already there (ascending id, and per window: title, app id,
 /// drag start, geometry, maximized, minimized, fullscreen, urgent, always on top, sticky, workspace, container, drag end), then the shown workspace, then focus, then
 /// menus close, windows close (ascending id, after the focus event that moved away from them),
-/// panels close, then monitors removed, overview, screenshot, lock. A menu always opens after
+/// panels close, then monitors removed, overview, screenshot, lock, keyboard layout. A menu always opens after
 /// and closes before what it belongs to.
 ///
 /// Nothing changed means no events. A window's geometry is one event however many of x, y,
@@ -1203,6 +1299,9 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
     }
     if old.locked != new.locked {
         events.push(Event::Lock { on: new.locked });
+    }
+    if old.keyboard != new.keyboard {
+        events.push(Event::KeyboardLayout(new.keyboard.clone()));
     }
 
     events

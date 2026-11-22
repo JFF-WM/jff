@@ -9,8 +9,8 @@ use std::os::unix::net::UnixStream;
 use jff_wm::desk::Goto;
 use jff_wm::ipc::events::{Group, GroupSet};
 use jff_wm::ipc::{
-    parse_request, split_style, ClickButton, Maximize, OnTop, Outbox, Request, Stick, Subscriber,
-    TagOp, COMMANDS, MAX_PENDING,
+    parse_request, split_style, ClickButton, LayoutTarget, Maximize, OnTop, Outbox, Request, Stick,
+    Subscriber, TagOp, COMMANDS, MAX_PENDING,
 };
 use jff_wm::primitives::json::{json_opt, json_str, pretty};
 use jff_wm::primitives::layout::MonitorTarget;
@@ -103,12 +103,47 @@ fn requests_are_parsed() {
 }
 
 #[test]
+fn keyboard_layout_commands_are_parsed() {
+    assert_eq!(
+        parse_request("keyboard-layouts"),
+        Ok(Request::KeyboardLayouts)
+    );
+    assert!(parse_request("keyboard-layouts 1").is_err());
+    assert_eq!(
+        parse_request("switch-layout next"),
+        Ok(Request::SwitchLayout(LayoutTarget::Next))
+    );
+    assert_eq!(
+        parse_request("switch-layout prev"),
+        Ok(Request::SwitchLayout(LayoutTarget::Prev))
+    );
+    assert_eq!(
+        parse_request("switch-layout 2"),
+        Ok(Request::SwitchLayout(LayoutTarget::Number(2)))
+    );
+    assert_eq!(
+        parse_request("switch-layout br"),
+        Ok(Request::SwitchLayout(LayoutTarget::Code("br".into())))
+    );
+    let err = parse_request("switch-layout 0").unwrap_err();
+    assert!(err.contains("count from 1"), "{err}");
+    assert!(parse_request("switch-layout").is_err());
+    assert!(parse_request("switch-layout us br").is_err());
+    assert!(COMMANDS.contains("keyboard-layouts"));
+    assert!(COMMANDS.contains("switch-layout"));
+}
+
+#[test]
 fn watch_is_parsed() {
     assert_eq!(parse_request("watch"), Ok(Request::Watch(vec![])));
     assert_eq!(parse_request("  watch \n"), Ok(Request::Watch(vec![])));
     assert_eq!(
         parse_request("watch windows workspaces"),
         Ok(Request::Watch(vec![Group::Windows, Group::Workspaces]))
+    );
+    assert_eq!(
+        parse_request("watch keyboard"),
+        Ok(Request::Watch(vec![Group::Keyboard]))
     );
     assert_eq!(
         parse_request("watch focus outputs modes"),

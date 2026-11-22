@@ -48,6 +48,8 @@
 //! status                     windows and workspace state in one reply (for panels)
 //! outputs                    every monitor: area, scanout, adaptive sync, colors and HDR
 //! hotkeys                    the global hotkeys clients bound (xx-hotkey-v1): who, which trigger, whether it is held
+//! keyboard-layouts           the layouts of the keyboard's keymap and the one in use
+//! switch-layout next|prev|N|CODE  make another layout the one in use (N counts from 1, CODE is `us`, `br`, ...)
 //! hdr on|off|toggle [MONITOR]    turn HDR on a monitor on or off
 //! sdr-white [+|-]NITS [MONITOR]  SDR white on an HDR monitor, in cd/m²
 //! hdr-set MONITOR KEY VALUE...   change one HDR setting of a monitor (see below)
@@ -134,6 +136,18 @@
 //! modifier that fires on release, `seat` the seat name it is limited to (null: all), and `held`
 //! whether its key or button is down now (a tap never is).
 //!
+//! `keyboard-layouts` replies `{"ok":true,"active":2,"layouts":[LAYOUT,...]}` with the layouts of the
+//! keymap on the seat in keymap order and `active`, the `index` of the one in use (null when the seat has no
+//! keyboard). A LAYOUT is `{"index":2,"name":"Portuguese (Brazil)","code":"br","variant":"abnt2"}`:
+//! `index` counts from 1, `name` is what xkb calls the layout, `code` and `variant` the entries of
+//! the config's `keyboard { layout }` and `{ variant }` it was built from (`variant` is null for the
+//! default one). Both are null when jff can't tell which entry belongs to a layout: a client
+//! (a virtual keyboard) set its own keymap, or the config lists fewer entries than the keymap has
+//! layouts. `switch-layout` makes another layout the one in use, as the xkb group switch keys
+//! do, and replies like `keyboard-layouts` does, after the switch. `next` and `prev` wrap around,
+//! `N` is an `index`, `CODE` a `code` (any case). A layout that is not there is an error reply.
+//! The `keyboard-layout` event tells a bar when the layout in use changes, by any means.
+//!
 //! Watching: `watch [GROUP...]`
 //!
 //! `jff msg watch` is for panels. The connection stays open, and jff writes one JSON object per
@@ -156,13 +170,14 @@
 //!  "locked":false,                         the session is locked
 //!  "popups":[POPUP,...],                   mapped menus and popovers
 //!  "layers":[LAYER,...],                   mapped panels, bars, launchers, wallpapers
-//!  "dbus_annotations":[ANNOTATION,...]}    DBus objects apps tied to a window or to themselves (xdg-dbus-annotation, KDE appmenu, gtk_shell1)
+//!  "dbus_annotations":[ANNOTATION,...],    DBus objects apps tied to a window or to themselves (xdg-dbus-annotation, KDE appmenu, gtk_shell1)
+//!  "keyboard":{"active":1,"layouts":[LAYOUT,...]}}    the keyboard layouts and the one in use (see `keyboard-layouts`)
 //! ```
 //!
 //! Following events are written flat, `{"event":"title","id":5,"title":"..."}`, in an order a
 //! client can apply: monitors added or changed, windows opened, changes on windows already there,
 //! the shown workspace, focus, windows closed (after the `focus` that moved away from them),
-//! monitors removed, overview, screenshot selection, lock. Panels open before windows and close
+//! monitors removed, overview, screenshot selection, lock, keyboard layout. Panels open before windows and close
 //! after them, menus open after their window or panel and close before it.
 //!
 //! ```text
@@ -196,6 +211,7 @@
 //!                  object_path
 //! dbus-annotation-removed  id                                  dbus-annotation
 //! click            button, x, y, target, + see below         clicks
+//! keyboard-layout  active, layouts (see `keyboard-layouts`)  keyboard
 //! ```
 //!
 //! A popup (menu, popover) belongs to a `window` or to a `layer` (the id of a panel), the other
@@ -317,11 +333,12 @@
 //! follow it.
 //!
 //! `watch` takes the groups to report (`windows`, `focus`, `workspaces`, `outputs`, `modes` for
-//! overview, screenshot selection and lock, `popups`, `layers`, `clicks`, `dbus-annotation`).
+//! overview, screenshot selection and lock, `popups`, `layers`, `clicks`, `dbus-annotation`,
+//! `keyboard`).
 //! `watch windows workspaces` sends
 //! only those events and a snapshot with only matching members (`windows`, `workspace` and
 //! `count`, `focused`, `outputs`, `overview`, `screenshot` and `locked`, `popups`, `layers`,
-//! `dbus_annotations`).
+//! `dbus_annotations`, `keyboard`).
 //! No groups means all of them. An unknown group gets the usual
 //! `{"ok":false,...}` reply and the connection closes.
 //!
@@ -352,6 +369,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{bail, Context};
 use smithay::backend::input::{ButtonState, InputTime};
 use smithay::desktop::{layer_map_for_output, PopupManager, Window};
+use smithay::input::keyboard::Layout;
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -367,7 +385,7 @@ use crate::feature::outputs::output_rect;
 use crate::input::{spawn_command, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use crate::ipc::events::{
     ClickInfo, ClickTarget, ContainerInfo, ContainerRef, DbusAnnotationInfo, Event, Group,
-    GroupSet, LayerInfo, OutputColor, OutputInfo, PopupInfo, Snapshot, WindowInfo,
+    GroupSet, KeyboardInfo, LayerInfo, OutputColor, OutputInfo, PopupInfo, Snapshot, WindowInfo,
 };
 use crate::primitives::json::{json_opt, json_str, pretty};
 use crate::primitives::layout::MonitorTarget;
@@ -452,6 +470,36 @@ pub enum TagOp {
     Clear,
 }
 
+/// What `switch-layout` asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LayoutTarget {
+    /// `next`: the layout after the one in use, the first one after the last.
+    Next,
+    /// `prev`: the layout before the one in use, the last one before the first.
+    Prev,
+    /// A layout number, counted from 1 as `keyboard-layouts` lists them.
+    Number(usize),
+    /// The `code` of a layout (`us`), matched without regard to case.
+    Code(String),
+}
+
+impl LayoutTarget {
+    /// Read the word after `switch-layout`: `next`, `prev`, a number from 1, or a layout code.
+    pub fn parse(word: &str) -> Result<LayoutTarget, String> {
+        match word {
+            "next" => Ok(LayoutTarget::Next),
+            "prev" => Ok(LayoutTarget::Prev),
+            _ if word.bytes().all(|byte| byte.is_ascii_digit()) => word
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n >= 1)
+                .map(LayoutTarget::Number)
+                .ok_or_else(|| format!("{word:?} is not a layout number (they count from 1)")),
+            _ => Ok(LayoutTarget::Code(word.to_string())),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     Windows,
@@ -460,6 +508,10 @@ pub enum Request {
     Outputs,
     /// `hotkeys`: the global hotkeys clients have bound (xx-hotkey-v1).
     Hotkeys,
+    /// `keyboard-layouts`: the layouts of the keymap and the one in use.
+    KeyboardLayouts,
+    /// `switch-layout next|prev|N|CODE`: make another layout the one in use.
+    SwitchLayout(LayoutTarget),
     Focused,
     Info(Option<u64>),
     Close(Option<u64>),
@@ -533,7 +585,7 @@ pub enum Request {
 pub const COMMANDS: &str =
     "windows, status, outputs, focused, window-info, close, maximize, unmaximize, toggle-maximize, \
      minimize, unminimize, fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, sticky, unsticky, toggle-sticky, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
-     screenshot-area, screenshot-fullscreen, screenshot-window, window-thumbnail, move-cursor, click, toggle-overview, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, hotkeys, watch";
+     screenshot-area, screenshot-fullscreen, screenshot-window, window-thumbnail, move-cursor, click, toggle-overview, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, hotkeys, keyboard-layouts, switch-layout, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
     word.parse::<usize>()
@@ -552,6 +604,11 @@ fn parse_monitor(word: &str) -> Result<MonitorTarget, String> {
 fn layout_slots_json(template: &crate::primitives::layout_template::Template) -> String {
     let slots: Vec<String> = template.slots().into_iter().map(json_opt).collect();
     format!("[{}]", slots.join(","))
+}
+
+/// The reply of `keyboard-layouts` and `switch-layout`.
+fn keyboard_reply(keyboard: &KeyboardInfo) -> String {
+    format!("{{\"ok\":true,{}}}\n", keyboard.members())
 }
 
 /// The reply of the commands that change HDR: what the monitor is set to now.
@@ -672,6 +729,16 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         ("outputs", _) => return Err("outputs takes no arguments".to_string()),
         ("hotkeys", []) => return Ok(Request::Hotkeys),
         ("hotkeys", _) => return Err("hotkeys takes no arguments".to_string()),
+        ("keyboard-layouts", []) => return Ok(Request::KeyboardLayouts),
+        ("keyboard-layouts", _) => return Err("keyboard-layouts takes no arguments".to_string()),
+        ("switch-layout", [word]) => {
+            return Ok(Request::SwitchLayout(LayoutTarget::parse(word)?));
+        }
+        ("switch-layout", _) => {
+            return Err(
+                "switch-layout needs next, prev, a layout number or a layout code".to_string(),
+            );
+        }
         ("window-thumbnail", [id]) => {
             let id = id
                 .parse::<u64>()
@@ -894,6 +961,11 @@ impl JffState {
                     self.hotkeys_enabled(),
                     hotkeys.join(",")
                 ))
+            }
+            Request::KeyboardLayouts => Ok(keyboard_reply(&self.keyboard_info())),
+            Request::SwitchLayout(target) => {
+                let keyboard = self.switch_keyboard_layout(&target)?;
+                Ok(keyboard_reply(&keyboard))
             }
             Request::Focused => Ok(match self.focused_window() {
                 Some(window) => {
@@ -1524,7 +1596,8 @@ impl JffState {
 
     /// Everything `watch` reports, right now. The focus is the keyboard's (`focused_window()`),
     /// not the `focused_window` field, which only says what the user picked last.
-    pub fn take_snapshot(&self) -> Snapshot {
+    pub fn take_snapshot(&mut self) -> Snapshot {
+        let keyboard = self.keyboard_info();
         let windows = self.window_list();
         // A window that has the keyboard but isn't in `windows` yet (no size) isn't announced
         // either, so a `focus` event never names a window the client hasn't been told about.
@@ -1542,10 +1615,75 @@ impl JffState {
             popups: self.popup_list(),
             layers: self.layer_list(),
             dbus_annotations: self.dbus_annotation_list(),
+            keyboard,
             dragging: self
                 .dragging_window
                 .or_else(|| self.overview_dragged_view()),
         }
+    }
+
+    /// The layouts of the seat's keymap and the one in use. `code` and `variant` come from the
+    /// config, so they're left out while a client's keymap is on the seat.
+    pub(crate) fn keyboard_info(&mut self) -> KeyboardInfo {
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return KeyboardInfo::default();
+        };
+        let (names, active) = keyboard.with_xkb_state(self, |context| {
+            let xkb = context.xkb().lock().unwrap();
+            let names: Vec<String> = xkb
+                .layouts()
+                .map(|layout| xkb.layout_name(layout).to_owned())
+                .collect();
+            (names, xkb.active_layout().0 as usize)
+        });
+        let config = self.config.keyboard();
+        let (layout, variant) = match self.active_virtual_keymap {
+            Some(_) => ("", ""),
+            None => (config.layout.as_str(), config.variant.as_str()),
+        };
+        KeyboardInfo::new(names, active, layout, variant)
+    }
+
+    /// Make the layout `target` names the one in use, and say what the keyboard looks like
+    /// after. The focused client hears about it through the modifiers event.
+    fn switch_keyboard_layout(&mut self, target: &LayoutTarget) -> Result<KeyboardInfo, String> {
+        let keyboard = self.seat.get_keyboard().ok_or("there is no keyboard")?;
+        let info = self.keyboard_info();
+        let count = info.layouts.len();
+        if count == 0 {
+            return Err("the keyboard has no layouts".to_string());
+        }
+        let current = info.active.map_or(0, |index| index - 1);
+        let next = match target {
+            LayoutTarget::Next => (current + 1) % count,
+            LayoutTarget::Prev => (current + count - 1) % count,
+            LayoutTarget::Number(n) if (1..=count).contains(n) => n - 1,
+            LayoutTarget::Number(n) => {
+                return Err(format!("there is no layout {n}, there are {count}"));
+            }
+            LayoutTarget::Code(code) => info
+                .layouts
+                .iter()
+                .position(|layout| {
+                    layout
+                        .code
+                        .as_deref()
+                        .is_some_and(|known| known.eq_ignore_ascii_case(code))
+                })
+                .ok_or_else(|| {
+                    let codes: Vec<&str> = info
+                        .layouts
+                        .iter()
+                        .filter_map(|layout| layout.code.as_deref())
+                        .collect();
+                    format!(
+                        "{code:?} is not a layout of the keyboard, codes: {}",
+                        codes.join(", ")
+                    )
+                })?,
+        };
+        keyboard.with_xkb_state(self, |mut context| context.set_layout(Layout(next as u32)));
+        Ok(self.keyboard_info())
     }
 
     /// Every DBus annotation of a window, then those of apps that annotated themselves.

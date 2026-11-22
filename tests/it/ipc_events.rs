@@ -2,7 +2,7 @@
 
 use jff_wm::ipc::events::{
     diff, ContainerInfo, ContainerRef, DbusAnnotationInfo, Event, Group, GroupSet, IconRef,
-    LayerInfo, OutputColor, OutputHdr, OutputInfo, PopupInfo, Snapshot, WindowInfo,
+    KeyboardInfo, LayerInfo, OutputColor, OutputHdr, OutputInfo, PopupInfo, Snapshot, WindowInfo,
 };
 use jff_wm::primitives::color::{ImageDescription, NamedPrimaries};
 
@@ -721,6 +721,7 @@ fn groups_are_parsed_and_collected() {
     assert_eq!(Group::parse("popups"), Some(Group::Popups));
     assert_eq!(Group::parse("layers"), Some(Group::Layers));
     assert_eq!(Group::parse("dbus-annotation"), Some(Group::DbusAnnotation));
+    assert_eq!(Group::parse("keyboard"), Some(Group::Keyboard));
     assert_eq!(Group::parse("window"), None);
     assert_eq!(Group::parse("Windows"), None);
 
@@ -735,6 +736,7 @@ fn groups_are_parsed_and_collected() {
         Group::Layers,
         Group::Clicks,
         Group::DbusAnnotation,
+        Group::Keyboard,
     ] {
         assert!(all.contains(group));
     }
@@ -809,6 +811,10 @@ fn every_event_belongs_to_its_group() {
         (Event::OutputChanged(o), Group::Outputs),
         (Event::Overview { open: true }, Group::Modes),
         (Event::Screenshot { open: true }, Group::Modes),
+        (
+            Event::KeyboardLayout(KeyboardInfo::default()),
+            Group::Keyboard,
+        ),
     ];
     for (event, group) in cases {
         assert_eq!(event.group(), group, "{event:?}");
@@ -1156,7 +1162,8 @@ fn an_empty_snapshot_is_valid() {
         s.to_json(GroupSet::ALL),
         "{\"event\":\"snapshot\",\"windows\":[],\"workspace\":1,\"count\":9,\
              \"focused\":null,\"outputs\":[],\"overview\":false,\"screenshot\":false,\
-             \"locked\":false,\"popups\":[],\"layers\":[],\"dbus_annotations\":[]}"
+             \"locked\":false,\"popups\":[],\"layers\":[],\"dbus_annotations\":[],\
+             \"keyboard\":{\"active\":null,\"layouts\":[]}}"
     );
 }
 
@@ -1518,4 +1525,93 @@ fn per_output_workspaces_only_report_the_monitor_that_changed() {
             ..output("HDMI-A-1", 1920)
         })]
     );
+}
+
+fn two_layouts(active: usize) -> KeyboardInfo {
+    KeyboardInfo::new(
+        vec![
+            "English (US)".to_string(),
+            "Portuguese (Brazil)".to_string(),
+        ],
+        active,
+        "us,br",
+        ",abnt2",
+    )
+}
+
+#[test]
+fn a_layout_takes_its_code_and_variant_from_the_config_lists() {
+    let keyboard = two_layouts(1);
+    assert_eq!(keyboard.active, Some(2));
+    assert_eq!(keyboard.layouts[0].index, 1);
+    assert_eq!(keyboard.layouts[0].code.as_deref(), Some("us"));
+    assert_eq!(keyboard.layouts[0].variant, None);
+    assert_eq!(keyboard.layouts[1].code.as_deref(), Some("br"));
+    assert_eq!(keyboard.layouts[1].variant.as_deref(), Some("abnt2"));
+    assert_eq!(
+        keyboard.members(),
+        "\"active\":2,\"layouts\":[\
+         {\"index\":1,\"name\":\"English (US)\",\"code\":\"us\",\"variant\":null},\
+         {\"index\":2,\"name\":\"Portuguese (Brazil)\",\"code\":\"br\",\"variant\":\"abnt2\"}]"
+    );
+}
+
+#[test]
+fn a_layout_without_a_known_entry_has_no_code() {
+    let names = || vec!["A".to_string(), "B".to_string()];
+    let fewer = KeyboardInfo::new(names(), 0, "us", "");
+    assert!(fewer
+        .layouts
+        .iter()
+        .all(|layout| layout.code.is_none() && layout.variant.is_none()));
+    let default = KeyboardInfo::new(vec!["English (US)".to_string()], 0, "", "");
+    assert_eq!(default.active, Some(1));
+    assert_eq!(default.layouts[0].code, None);
+    let none = KeyboardInfo::new(Vec::new(), 0, "us", "");
+    assert_eq!(none.active, None);
+    assert_eq!(none.members(), "\"active\":null,\"layouts\":[]");
+    assert_eq!(KeyboardInfo::new(names(), 2, "us,br", "").active, None);
+}
+
+#[test]
+fn switching_layout_is_a_keyboard_layout_event() {
+    let mut old = snapshot(vec![]);
+    old.keyboard = two_layouts(0);
+    let mut new = old.clone();
+    assert!(diff(&old, &new).is_empty());
+    new.keyboard = two_layouts(1);
+    let events = diff(&old, &new);
+    assert_eq!(events, vec![Event::KeyboardLayout(two_layouts(1))]);
+    assert_eq!(
+        events[0].to_json(),
+        format!(
+            "{{\"event\":\"keyboard-layout\",{}}}",
+            two_layouts(1).members()
+        )
+    );
+}
+
+#[test]
+fn the_keyboard_layout_comes_after_the_lock() {
+    let old = snapshot(vec![]);
+    let mut new = snapshot(vec![]);
+    new.locked = true;
+    new.keyboard = two_layouts(0);
+    assert_eq!(names(&diff(&old, &new)), ["lock", "keyboard-layout"]);
+}
+
+#[test]
+fn the_snapshot_has_the_keyboard_group() {
+    let mut s = snapshot(vec![]);
+    s.keyboard = two_layouts(0);
+    assert_eq!(
+        s.to_json(GroupSet::from_groups(&[Group::Keyboard])),
+        format!(
+            "{{\"event\":\"snapshot\",\"keyboard\":{{{}}}}}",
+            two_layouts(0).members()
+        )
+    );
+    assert!(!s
+        .to_json(GroupSet::from_groups(&[Group::Windows]))
+        .contains("keyboard"));
 }
