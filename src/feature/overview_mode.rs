@@ -68,6 +68,7 @@ use crate::feature::osd::{
 use crate::feature::outputs::output_rect;
 use crate::feature::overview_search::{self as search_ui, Row};
 use crate::input::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
+use crate::ipc::window_is_urgent;
 use crate::primitives::app_search::{self as apps, DesktopEntry, Pick, Query};
 use crate::primitives::container_view;
 use crate::primitives::geom::Size;
@@ -371,6 +372,8 @@ pub struct Overview {
     /// The close button painted at rest and under the pointer, for every side it can have, made
     /// when first needed.
     close_buttons: HashMap<i32, (MemoryRenderBuffer, MemoryRenderBuffer)>,
+    /// The badge of an urgent window for every side it can have, made when first needed.
+    urgent_badges: HashMap<i32, MemoryRenderBuffer>,
     /// (window, pointer pos) captured when the left button went down on a thumbnail. Moving far
     /// enough starts a drag.
     press_origin: Option<(Window, Point<f64, Logical>)>,
@@ -563,6 +566,9 @@ pub struct OverviewPlan {
     /// The close button of the selected thumbnail: its index in `thumbs` and its picture, drawn
     /// in `badge_alpha`. `None` when no thumbnail shows one.
     close: Option<(usize, MemoryRenderBuffer)>,
+    /// The urgent badge of each thumbnail whose window asked for attention: its index in
+    /// `thumbs` and its picture, drawn in `badge_alpha`.
+    urgent: Vec<(usize, MemoryRenderBuffer)>,
     /// The app icon badge of each of `thumbs` (same order), `None` for an app that has no app id.
     badges: Vec<Option<MemoryRenderBuffer>>,
     /// Fades the badges with the open and close animation.
@@ -788,6 +794,40 @@ fn close_elements(
     }
 }
 
+/// Push the urgent badge of thumbnail `index` if its window asked for attention: in the top left
+/// corner of it. Call before the thumbnail's own elements, like `badge_elements`.
+fn urgent_elements(
+    renderer: &mut GlesRenderer,
+    plan: &OverviewPlan,
+    index: usize,
+    origin: Point<i32, Logical>,
+    out: &mut Vec<JffElement>,
+) {
+    let (Some((_, buffer)), Some((_, thumb))) = (
+        plan.urgent.iter().find(|(n, _)| *n == index),
+        plan.thumbs.get(index),
+    ) else {
+        return;
+    };
+    let Some((x, y, side, _)) = overview::urgent_rect(thumb.rect()) else {
+        return;
+    };
+    let margin = search_ui::close_margin(side);
+    let corner = Point::<i32, Physical>::from((x - margin - origin.x, y - margin - origin.y));
+    match MemoryRenderBufferRenderElement::from_buffer(
+        &mut *renderer,
+        corner.to_f64(),
+        buffer,
+        Some(plan.badge_alpha),
+        None,
+        None,
+        Kind::Unspecified,
+    ) {
+        Ok(element) => out.push(JffElement::Memory(element)),
+        Err(err) => tracing::warn!("error drawing an urgent badge in the overview: {err:?}"),
+    }
+}
+
 /// Push the render elements for one thumbnail, placed relative to `origin`.
 pub(crate) fn thumb_elements(
     renderer: &mut GlesRenderer,
@@ -959,6 +999,7 @@ pub fn overview_elements(
         }
         let (window, thumb) = &plan.thumbs[i];
         close_elements(renderer, plan, i, origin, &mut out);
+        urgent_elements(renderer, plan, i, origin, &mut out);
         badge_elements(renderer, plan, i, origin, &mut out);
         thumb_elements(
             renderer,
@@ -2010,7 +2051,23 @@ impl JffState {
         }
         // Start with the focused window centered, so the first press already slides.
         self.switcher_retarget(true);
-        self.handle_overview_key(OverviewKey::Cycle { backwards });
+        // The first stop is the window that asked for attention last (what `focus-urgent`
+        // would pick) when it is on this monitor and workspace, and the next one in the row
+        // otherwise. From there the keys step on as usual.
+        let urgent = self.newest_urgent().filter(|window| {
+            self.overview
+                .as_ref()
+                .is_some_and(|ov| ov.visible.contains(window))
+        });
+        match urgent {
+            Some(window) => {
+                if let Some(ov) = self.overview.as_mut() {
+                    ov.selected = Some(window);
+                }
+                self.switcher_retarget(false);
+            }
+            None => self.handle_overview_key(OverviewKey::Cycle { backwards }),
+        }
     }
 
     /// Whether the switcher is open and a modifier it was opened with is no longer in `now`.
@@ -2131,6 +2188,7 @@ impl JffState {
             pressed: None,
             press_on_close: false,
             close_buttons: HashMap::new(),
+            urgent_badges: HashMap::new(),
             press_origin: None,
             drag: None,
             layer_buttons: Vec::new(),
@@ -3378,6 +3436,15 @@ impl JffState {
                     },
                 ))
             });
+        let urgent = thumbs
+            .iter()
+            .enumerate()
+            .filter(|(_, (window, _))| window_is_urgent(window))
+            .filter_map(|(index, (_, thumb))| {
+                let rect = overview::urgent_rect(thumb.rect())?;
+                Some((index, ov.urgent_badges.get(&rect.2)?.clone()))
+            })
+            .collect();
         let badges = thumbs
             .iter()
             .map(|(window, _)| ov.badges.get(&badge_key(window)).cloned())
@@ -3405,6 +3472,7 @@ impl JffState {
             .or(stage_wall);
         let mut plan = OverviewPlan {
             output,
+            urgent,
             thumbs,
             selected,
             dragged,
@@ -3503,6 +3571,12 @@ impl JffState {
                         buffer_of(&search_ui::paint_close_button(side, true)),
                     ),
                 );
+            }
+        }
+        if ov.urgent_badges.is_empty() {
+            for side in overview::CLOSE_MIN..=overview::CLOSE_MAX {
+                ov.urgent_badges
+                    .insert(side, buffer_of(&search_ui::paint_urgent_badge(side)));
             }
         }
         let stamp = (ov.search.version, fonts.is_some());

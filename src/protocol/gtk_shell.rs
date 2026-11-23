@@ -392,7 +392,7 @@ impl JffState {
             self.focus_window(&window);
         } else if self.focused_window().as_ref() != Some(&window) {
             tracing::debug!("gtk-shell: focus request without recent input, urgent only");
-            self.set_urgent(&window, true);
+            self.mark_urgent(&window);
         }
     }
 

@@ -433,6 +433,14 @@ pub struct WindowId(pub u64);
 #[derive(Debug, Default)]
 struct Urgent(AtomicU64);
 
+/// Whether `window` asked for attention and hasn't had the keyboard since.
+pub fn window_is_urgent(window: &Window) -> bool {
+    window
+        .user_data()
+        .get::<Urgent>()
+        .is_some_and(|u| u.0.load(std::sync::atomic::Ordering::Relaxed) != 0)
+}
+
 /// The next place in line for an urgent window.
 static NEXT_URGENT: AtomicU64 = AtomicU64::new(1);
 
@@ -1596,10 +1604,17 @@ impl JffState {
 
     /// Whether `window` asked for attention and hasn't been focused since.
     pub fn is_urgent(&self, window: &Window) -> bool {
-        window
-            .user_data()
-            .get::<Urgent>()
-            .is_some_and(|u| u.0.load(std::sync::atomic::Ordering::Relaxed) != 0)
+        window_is_urgent(window)
+    }
+
+    /// [`JffState::set_urgent`] on for `window`, and an open overview draws again to show the
+    /// badge. Returns whether it changed.
+    pub fn mark_urgent(&mut self, window: &Window) -> bool {
+        let changed = self.set_urgent(window, true);
+        if changed && self.overview_active() {
+            self.queue_redraw_all();
+        }
+        changed
     }
 
     /// The urgent window that asked last, on any workspace, hidden ones included.

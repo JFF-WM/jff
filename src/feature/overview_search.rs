@@ -593,6 +593,47 @@ pub fn paint_close_button(body: i32, hot: bool) -> Picture {
     into_picture(canvas, side, side)
 }
 
+/// The badge of a window that asked for attention, on its thumbnail: the close button's dark disc
+/// with its soft shadow, and a white exclamation mark. Same size and margin as the close button, so it maps
+/// 1:1 to screen pixels.
+pub fn paint_urgent_badge(body: i32) -> Picture {
+    let margin = close_margin(body);
+    let side = body + 2 * margin;
+    let mut canvas: Vec<Pixel> = vec![[0.0; 4]; (side * side) as usize];
+    let center = side as f32 / 2.0;
+    let radius = body as f32 / 2.0;
+    let k = body as f32 / 24.0;
+    // The mark: a bar over a dot, both with round ends.
+    let (bar_half_w, bar_half_h) = (1.5 * k, 4.4 * k);
+    let bar_y = center - 2.6 * k;
+    let (dot_r, dot_y) = (1.7 * k, center + 6.0 * k);
+    for py in 0..side {
+        for px in 0..side {
+            let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
+            let (dx, dy) = (fx - center, fy - center);
+            let pixel = &mut canvas[(py * side + px) as usize];
+            let shadow = (dx * dx + (dy - k) * (dy - k)).sqrt() - radius;
+            over(
+                pixel,
+                [0.0; 3],
+                0.45 * (1.0 - smoothstep(-k, 3.5 * k, shadow)),
+            );
+            let d = (dx * dx + dy * dy).sqrt() - radius;
+            let cover = (0.5 - d).clamp(0.0, 1.0);
+            if cover > 0.0 {
+                over(pixel, FILL, cover * 0.94);
+                let inner = (0.5 - (d + 1.0)).clamp(0.0, 1.0);
+                over(pixel, [1.0; 3], (cover - inner).max(0.0) * 0.12);
+            }
+            let bar = sd_round_box(fx, fy, center, bar_y, bar_half_w, bar_half_h, bar_half_w);
+            over(pixel, [1.0; 3], (0.5 - bar).clamp(0.0, 1.0));
+            let dot = ((fx - center).powi(2) + (fy - dot_y).powi(2)).sqrt() - dot_r;
+            over(pixel, [1.0; 3], (0.5 - dot).clamp(0.0, 1.0));
+        }
+    }
+    into_picture(canvas, side, side)
+}
+
 /// The badge of an app that goes on its window's thumbnail: its icon on a dark rounded square
 /// with a soft shadow. Without an icon, the lettered round badge of the search grid, with
 /// `name`'s first letter (the letter is skipped while there's no font).

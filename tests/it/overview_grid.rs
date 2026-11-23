@@ -434,3 +434,16 @@ fn tiny_thumbnails_get_no_badge() {
     assert_eq!(badge_rect((0, 0, 40, 300)), None);
     assert!(badge_rect((0, 0, 3000, 2000)).is_some_and(|r| r.2 <= 80));
 }
+
+#[test]
+fn urgent_badge_sits_in_the_top_left_corner_opposite_the_close_button() {
+    use jff_wm::primitives::overview_grid::{close_rect, urgent_rect};
+    let thumb: Rect = (100, 50, 400, 300);
+    let urgent = urgent_rect(thumb).unwrap();
+    let close = close_rect(thumb).unwrap();
+    // Same size and height as the close button, on the other side, inside the thumbnail.
+    assert_eq!((urgent.1, urgent.2, urgent.3), (close.1, close.2, close.3));
+    assert!(urgent.0 > thumb.0 && urgent.0 + urgent.2 < close.0);
+    // Too small a thumbnail carries none.
+    assert_eq!(urgent_rect((0, 0, 40, 40)), None);
+}

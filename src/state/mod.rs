@@ -1175,7 +1175,7 @@ impl XdgActivationHandler for JffState {
                         !focused
                     );
                     if !focused {
-                        self.set_urgent(&window, true);
+                        self.mark_urgent(&window);
                     }
                 } else {
                     // The window may be on a workspace that isn't shown: go there, or the
@@ -1416,7 +1416,7 @@ impl XdgShellHandler for JffState {
                 self.desk
                     .place_below_where(|w| *w == window, |w| w == anchor);
             }
-            self.set_urgent(&window, true);
+            self.mark_urgent(&window);
             tracing::debug!("new toplevel left unfocused (focus-new-windows off)");
         } else if self.overview_active() {
             self.end_overview(Some(window.clone()));

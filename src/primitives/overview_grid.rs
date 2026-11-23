@@ -409,6 +409,15 @@ pub fn close_rect(thumb: Rect) -> Option<Rect> {
     ))
 }
 
+/// The square the badge of an urgent window covers on a thumbnail at `thumb`: in its top left
+/// corner, the same size and inset as the close button on the other side. `None` when the
+/// thumbnail is too small to carry one.
+pub fn urgent_rect(thumb: Rect) -> Option<Rect> {
+    let (_, y, side, _) = close_rect(thumb)?;
+    let inset = (side / 4).max(6);
+    Some((thumb.0 + inset, y, side, side))
+}
+
 /// The square an app icon badge covers on a thumbnail at `thumb`: centred along the bottom
 /// edge, a little above it. `None` when the thumbnail is too small to carry one.
 pub fn badge_rect(thumb: Rect) -> Option<Rect> {
