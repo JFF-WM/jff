@@ -350,3 +350,11 @@ fn hide_behind_containers_is_on_unless_told_not_to() {
         .hide_behind_containers());
     assert!(Config::parse("hide-behind-containers \"maybe\"").is_err());
 }
+
+#[test]
+fn focus_urgent_can_be_bound() {
+    let config = Config::parse("binds {\n    Ctrl+u { focus-urgent; }\n}\n").unwrap();
+    let action = config.action_for(&mods_state(CTRL), Keysym::u);
+    assert!(matches!(action, Some(Action::FocusUrgent)), "{action:?}");
+    assert!(Config::parse("binds {\n    Ctrl+u { focus-urgent \"x\"; }\n}\n").is_err());
+}

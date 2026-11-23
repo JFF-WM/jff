@@ -961,6 +961,11 @@ impl JffState {
             Action::Close => self.close_focused(),
             Action::Minimize => self.minimize_focused(),
             Action::Unminimize => self.unminimize_last(),
+            Action::FocusUrgent => {
+                if self.focus_urgent().is_none() {
+                    self.show_error("No urgent window", "No window is asking for attention.");
+                }
+            }
             Action::MoveToScratchpad => self.move_to_scratchpad_focused(),
             Action::Scratchpad => self.toggle_scratchpad(),
             Action::Overview => self.toggle_overview(),

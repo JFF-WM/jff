@@ -15,7 +15,7 @@
 //!
 //! `binds` has three actions for several monitors, each takes one target: `left`, `right`, `up`, `down` (the monitor that lies that way from the one in use), `next`, `prev` (left to right, then top to bottom, wrapping) or the name of a monitor (`"DP-2"`, see `jff msg outputs`). `focus-monitor "right"` moves the pointer and the keyboard there (to the topmost window, or to the middle of an empty monitor). `move-to-monitor "right"` sends the focused window there, pointer and keyboard follow, and a window of a tiling container takes its container along. `move-workspace-to-monitor "right"` trades what the monitor in use shows with what that monitor shows, and needs `workspaces { per-output }`. A target that does not exist (the edge of the desktop) does nothing, a name that is not connected shows an error toast.
 //!
-//! `binds` also has `minimize` (the focused window goes out of sight), `unminimize` (the one minimized last comes back) and a scratchpad: `move-to-scratchpad` puts the focused window in it, `scratchpad` brings one to the monitor in use, centered, or puts it away again when it has the keyboard (with several it steps through them). A hidden window keeps its workspace and place, a taskbar click or an activation request brings it back, and sending a scratchpad window to a workspace takes it out of the scratchpad.
+//! `binds` also has `minimize` (the focused window goes out of sight), `unminimize` (the one minimized last comes back), `focus-urgent` (the window that asked for attention last gets the keyboard, on its workspace, and a minimized one comes back; press again for the one before it) and a scratchpad: `move-to-scratchpad` puts the focused window in it, `scratchpad` brings one to the monitor in use, centered, or puts it away again when it has the keyboard (with several it steps through them). A hidden window keeps its workspace and place, a taskbar click or an activation request brings it back, and sending a scratchpad window to a workspace takes it out of the scratchpad.
 //!
 //! `warp-mouse-to-focus` moves the pointer to the center of a window when it gets the keyboard by something other than the pointer (a binding, the switcher, a new window, a closed one, a taskbar, a workspace switch), also when the pointer is over it already, unless the focus came from a click, a game has locked the pointer, or a window is being dragged. Off by default.
 //!
@@ -245,6 +245,9 @@ pub enum Action {
     Minimize,
     /// Bring back the window that was minimized last, on the workspace it came from.
     Unminimize,
+    /// Focus the window that asked for attention last (urgent), on its workspace. A minimized
+    /// one comes back. Again goes to the one that asked before it.
+    FocusUrgent,
     /// Put the focused window in the scratchpad, out of sight.
     MoveToScratchpad,
     /// A scratchpad window that has the keyboard goes away, otherwise one comes to the monitor
@@ -4092,6 +4095,7 @@ fn parse_action(node: &KdlNode) -> anyhow::Result<Action> {
         "close" => no_args(Action::Close),
         "minimize" => no_args(Action::Minimize),
         "unminimize" => no_args(Action::Unminimize),
+        "focus-urgent" => no_args(Action::FocusUrgent),
         "move-to-scratchpad" => no_args(Action::MoveToScratchpad),
         "scratchpad" => no_args(Action::Scratchpad),
         "overview" => no_args(Action::Overview),

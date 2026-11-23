@@ -720,6 +720,7 @@ window-rule { match app-id="kitty"; opacity 0.9; }
 //                                 scanout and tearing are off, and the overlay says so. `jff msg stats` reads the
 //                                 same numbers without drawing anything.
 //   forward-key "APP-ID"          hand the key to that app's window without focusing it, for its own global hotkeys
+//   focus-urgent                  focus the window that asked for attention last (urgent), on its workspace, again for the one before
 //   Needing `tiling-containers`:
 //   spawn-container "NAME"        start the `container-template` NAME in a container of that name, or, when that
 //                                 container exists (on any workspace), show and focus it instead
@@ -809,6 +810,10 @@ binds {
     // minimize/unminimize and scratchpad
     Super+M       { minimize; }
     Super+Shift+M { unminimize; }
+
+    // Go to the window that asked for attention last (urgent, see `focus-new-windows`): its
+    // workspace is shown, a minimized one comes back. Press again for the one before it.
+    // Super+U { focus-urgent; }
     Super+Minus       { scratchpad; }
     Super+Shift+Minus { move-to-scratchpad; }
 }

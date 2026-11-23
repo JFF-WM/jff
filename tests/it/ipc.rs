@@ -1028,3 +1028,9 @@ fn sticky_requests_are_parsed() {
         assert!(COMMANDS.contains(command));
     }
 }
+
+#[test]
+fn focus_urgent_is_parsed() {
+    assert_eq!(parse_request("focus-urgent"), Ok(Request::FocusUrgent));
+    assert!(parse_request("focus-urgent 4").is_err());
+}

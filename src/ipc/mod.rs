@@ -16,6 +16,7 @@
 //! toggle-maximize [ID]       maximize, or put back when it already is
 //! minimize [ID]              put a window out of sight (the focused one without an ID)
 //! unminimize [ID]            bring a minimized window back (the one minimized last without an ID)
+//! focus-urgent               focus the window that asked for attention last, on its workspace (a minimized one comes back), as the `focus-urgent` bind does, again for the one before
 //! move-to-scratchpad [ID]    put a window (the focused one without an ID) into the scratchpad, out of sight
 //! scratchpad [ID]            bring an away scratchpad window to the monitor in use, or put a shown one away (without an ID: as the `scratchpad` bind does)
 //! fullscreen [ID]            make a window fullscreen
@@ -426,9 +427,14 @@ const MAX_WATCH_INPUT: usize = 64 * 1024;
 pub struct WindowId(pub u64);
 
 /// Whether a window asked for attention (an activation token without input, see
-/// `XdgActivationHandler`) and hasn't had the keyboard since. Attached to the window.
+/// `XdgActivationHandler`) and hasn't had the keyboard since. Attached to the window. Zero is
+/// "not urgent", anything else is the place of its last request in line, a higher number is
+/// a later one (`focus-urgent` takes the highest first).
 #[derive(Debug, Default)]
-struct Urgent(std::sync::atomic::AtomicBool);
+struct Urgent(AtomicU64);
+
+/// The next place in line for an urgent window.
+static NEXT_URGENT: AtomicU64 = AtomicU64::new(1);
 
 /// Same for popups and layer surfaces, given the first time one is listed.
 struct SurfaceId(u64);
@@ -546,6 +552,8 @@ pub enum Request {
     /// `sticky`, `unsticky` and `toggle-sticky`: show a window on every workspace of its monitor, or not.
     Sticky(Option<u64>, Stick),
     Focus(u64),
+    /// `focus-urgent`: focus the window that asked for attention last.
+    FocusUrgent,
     Workspaces,
     /// `containers`: the tiling containers on the shown workspace.
     Containers,
@@ -606,7 +614,7 @@ pub enum Request {
 
 pub const COMMANDS: &str =
     "windows, status, outputs, focused, window-info, close, maximize, unmaximize, toggle-maximize, \
-     minimize, unminimize, move-to-scratchpad, scratchpad, fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, sticky, unsticky, toggle-sticky, focus, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
+     minimize, unminimize, move-to-scratchpad, scratchpad, fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, sticky, unsticky, toggle-sticky, focus, focus-urgent, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
      screenshot-area, screenshot-fullscreen, screenshot-window, window-thumbnail, move-cursor, click, toggle-overview, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, hotkeys, keyboard-layouts, switch-layout, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
@@ -918,6 +926,7 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         "sticky" => Ok(Request::Sticky(id, Stick::On)),
         "unsticky" => Ok(Request::Sticky(id, Stick::Off)),
         "toggle-sticky" => Ok(Request::Sticky(id, Stick::Toggle)),
+        "focus-urgent" => no_id(Request::FocusUrgent),
         "focus" => id
             .map(Request::Focus)
             .ok_or_else(|| "focus needs a window id".to_string()),
@@ -1215,6 +1224,13 @@ impl JffState {
                     }
                     self.set_sticky(&window, want);
                 }
+                Ok(format!(
+                    "{{\"ok\":true,\"window\":{}}}\n",
+                    self.window_json(&window)
+                ))
+            }
+            Request::FocusUrgent => {
+                let window = self.focus_urgent().ok_or("no window is urgent")?;
                 Ok(format!(
                     "{{\"ok\":true,\"window\":{}}}\n",
                     self.window_json(&window)
@@ -1583,10 +1599,24 @@ impl JffState {
         window
             .user_data()
             .get::<Urgent>()
-            .is_some_and(|u| u.0.load(std::sync::atomic::Ordering::Relaxed))
+            .is_some_and(|u| u.0.load(std::sync::atomic::Ordering::Relaxed) != 0)
     }
 
-    /// Mark `window` as wanting attention (`true`) or clear it. Returns whether it changed.
+    /// The urgent window that asked last, on any workspace, hidden ones included.
+    pub fn newest_urgent(&self) -> Option<Window> {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.desk
+            .all_top_down()
+            .filter_map(|entry| {
+                let since = entry.window.user_data().get::<Urgent>()?.0.load(Relaxed);
+                (since != 0).then_some((since, &entry.window))
+            })
+            .max_by_key(|(since, _)| *since)
+            .map(|(_, window)| window.clone())
+    }
+
+    /// Mark `window` as wanting attention (`true`) or clear it. Returns whether it changed. A
+    /// window that asks again moves to the front of the line for `focus-urgent`.
     pub fn set_urgent(&self, window: &Window, on: bool) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
         if !on && window.user_data().get::<Urgent>().is_none() {
@@ -1594,7 +1624,14 @@ impl JffState {
         }
         window.user_data().insert_if_missing(Urgent::default);
         let flag = window.user_data().get::<Urgent>();
-        flag.is_some_and(|u| u.0.swap(on, Relaxed) != on)
+        flag.is_some_and(|u| {
+            let next = if on {
+                NEXT_URGENT.fetch_add(1, Relaxed)
+            } else {
+                0
+            };
+            (u.0.swap(next, Relaxed) != 0) != on
+        })
     }
 
     /// Process id of the client that owns `window`, if the socket can tell.
@@ -2369,6 +2406,10 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("focused", "the focused window"),
             ("window-info [ID]", "details of a window"),
             ("focus ID", "focus a window"),
+            (
+                "focus-urgent",
+                "focus the window that asked for attention last",
+            ),
             ("close [ID]", "close a window"),
             ("maximize [ID]", "maximize a window"),
             ("unmaximize [ID]", "restore a maximized window"),

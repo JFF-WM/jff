@@ -131,6 +131,30 @@ impl JffState {
             || anchor.is_some()
     }
 
+    /// `focus-urgent`: go to the window that asked for attention last (see
+    /// [`JffState::newest_urgent`]), on whatever workspace it is on, and give it the keyboard.
+    /// A minimized window comes back, with the overview open it closes in favour of the window.
+    /// The window stops being urgent, so the next call goes to the one that asked before it.
+    /// Returns the window, or `None`, having changed nothing, when none is urgent.
+    pub fn focus_urgent(&mut self) -> Option<Window> {
+        let window = self.newest_urgent()?;
+        let hidden = self
+            .desk
+            .find_by(|w| *w == window)
+            .is_some_and(|entry| entry.hidden.is_some());
+        if self.overview_active() {
+            self.show_workspace_of(&window);
+            self.end_overview(Some(window.clone()));
+        } else if hidden {
+            self.unminimize_window(&window);
+        } else {
+            self.show_workspace_of(&window);
+            self.focus_window(&window);
+        }
+        self.set_urgent(&window, false);
+        Some(window)
+    }
+
     /// A window that just showed (`join_container_on_map`) takes the keyboard, like a new window
     /// does. With `focus-new-windows` off it does not, unless it has the keyboard already (it
     /// opened with nothing to take it from, see `keeps_focus_from_new_window`).
