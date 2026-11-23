@@ -120,14 +120,15 @@ impl JffState {
 
     /// Whether a window that just opened must not take the keyboard (`focus-new-windows` off):
     /// a locked session, the screenshot selection, a panel or launcher that has the keyboard, or
-    /// a window on the monitor in use is where the user is working. With the overview open and
-    /// no window to return to, the new window is the first one and takes over as usual.
-    pub fn keeps_focus_from_new_window(&self) -> bool {
+    /// a window on the monitor in use (`anchor`, taken before the new window was added) is where
+    /// the user is working. With the overview open and no window to return to, the new window is
+    /// the first one and takes over as usual.
+    pub fn keeps_focus_from_new_window(&self, anchor: Option<&Window>) -> bool {
         self.session_locked()
             || self.screenshot.is_some()
             || self.layer_on_demand_focus.is_some()
             || self.exclusive_layer_surface().is_some()
-            || self.layout_focus().is_some()
+            || anchor.is_some()
     }
 
     /// A window that just showed (`join_container_on_map`) takes the keyboard, like a new window
@@ -343,7 +344,7 @@ impl JffState {
 
     /// The window the user is working in: the one they picked while it's still on the shown
     /// workspace, otherwise whatever is on top there.
-    fn layout_focus(&self) -> Option<Window> {
+    pub(crate) fn layout_focus(&self) -> Option<Window> {
         if let Some(window) = &self.focused_window {
             if self.desk.top_down().any(|entry| entry.window == *window) {
                 return Some(window.clone());

@@ -652,3 +652,30 @@ fn a_sticky_window_follows_only_its_own_monitor_with_per_output_workspaces() {
     assert_eq!(d.workspace_of(|w| *w == "a"), Some(5));
     assert!(d.is_sticky(|w| *w == "a"));
 }
+
+#[test]
+fn place_below_puts_a_window_under_the_anchor() {
+    let mut d = Desk::default();
+    d.add("a");
+    d.add("b");
+    d.add("c");
+    d.add("new");
+    d.place_below_where(|w| *w == "new", |w| *w == "b");
+    assert_eq!(order(&d), ["c", "b", "new", "a"]);
+    // Anchor below the window, and a missing anchor.
+    d.place_below_where(|w| *w == "c", |w| *w == "a");
+    assert_eq!(order(&d), ["b", "new", "a", "c"]);
+    d.place_below_where(|w| *w == "c", |w| *w == "zzz");
+    assert_eq!(order(&d), ["b", "new", "a", "c"]);
+}
+
+#[test]
+fn place_below_keeps_always_on_top_windows_above() {
+    let mut d = Desk::default();
+    d.add("a");
+    d.add("top");
+    d.set_above_where(|w| *w == "top", true);
+    d.add("new");
+    d.place_below_where(|w| *w == "new", |w| *w == "top");
+    assert_eq!(order(&d), ["top", "new", "a"]);
+}

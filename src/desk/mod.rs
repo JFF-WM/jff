@@ -787,6 +787,35 @@ impl<W> Desk<W> {
         }
     }
 
+    /// Put the first window matching `pred` just below the first matching `anchor`: below the
+    /// lowest member when the anchor is in a container, so the container is not split. Windows
+    /// that are always on top stay above anyway. Nothing happens when either is missing.
+    pub fn place_below_where(&mut self, pred: impl Fn(&W) -> bool, anchor: impl Fn(&W) -> bool) {
+        let Some(i) = self.entries.iter().position(|e| pred(&e.window)) else {
+            return;
+        };
+        let Some(a) = self.entries.iter().position(|e| anchor(&e.window)) else {
+            return;
+        };
+        if i == a {
+            return;
+        }
+        let container = self.entries.get(a).and_then(|e| e.container);
+        let target = match container {
+            Some(id) => self
+                .entries
+                .iter()
+                .position(|e| e.container == Some(id))
+                .unwrap_or(a),
+            None => a,
+        };
+        let entry = self.entries.remove(i);
+        // Removing an entry below the target moves the target down by one.
+        let target = if i < target { target - 1 } else { target };
+        self.entries.insert(target, entry);
+        self.settle();
+    }
+
     /// Whether the window is always on top, which a member of a container is when any member of it is.
     pub fn is_above(&self, pred: impl Fn(&W) -> bool) -> bool {
         self.find_by(pred).is_some_and(|e| self.above_of(e))

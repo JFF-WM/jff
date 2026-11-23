@@ -1381,6 +1381,9 @@ impl XdgShellHandler for JffState {
             .and_then(|i| self.outputs.get(i))
             .map(|output| output.name())
             .unwrap_or_else(|| self.active_output_name());
+        // The window the user is working in, before the new one is on the desk: with
+        // `focus-new-windows` off the new window goes below it.
+        let anchor = self.layout_focus();
         let cascade = self.desk.add_on(window.clone(), &output);
         let pos = (cascade.0 + placed_rect.0, cascade.1 + placed_rect.1);
         self.desk.set_pos_where(|w| *w == window, pos);
@@ -1407,7 +1410,12 @@ impl XdgShellHandler for JffState {
         //
         // With `focus-new-windows` off the keyboard stays where it is, as long as somebody has
         // it on the monitor in use. The new window asks for attention instead.
-        if !self.config.focus_new_windows() && self.keeps_focus_from_new_window() {
+        if !self.config.focus_new_windows() && self.keeps_focus_from_new_window(anchor.as_ref()) {
+            // It opens below the window that has the keyboard, not on top of it.
+            if let Some(anchor) = &anchor {
+                self.desk
+                    .place_below_where(|w| *w == window, |w| w == anchor);
+            }
             self.set_urgent(&window, true);
             tracing::debug!("new toplevel left unfocused (focus-new-windows off)");
         } else if self.overview_active() {
