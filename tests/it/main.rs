@@ -6,6 +6,7 @@ mod app_restore;
 mod app_search;
 mod border;
 mod capture_color;
+mod clipboard;
 mod color_management;
 mod color_management_versions;
 mod color_names;

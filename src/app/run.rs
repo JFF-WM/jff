@@ -164,6 +164,8 @@ pub fn run() -> anyhow::Result<()> {
         |_, display, state| {
             // SAFETY: the display is never dropped while the loop is running.
             unsafe { display.get_mut().dispatch_clients(state).unwrap() };
+            // Smithay does not report the owner of the clipboard going away.
+            state.clipboard_check_owner();
             // `done` of an information object destroys it, so it can't go out mid-request.
             crate::protocol::color_management::flush_pending_info(state);
             crate::protocol::color_management::refresh_feedbacks(state);

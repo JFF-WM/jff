@@ -4,6 +4,7 @@ pub mod alpha;
 pub mod app_restore;
 pub mod app_search;
 pub mod capture_color;
+pub mod clipboard;
 pub mod color;
 pub mod color_names;
 pub mod container_drop;

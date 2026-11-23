@@ -79,7 +79,7 @@ use smithay::wayland::selection::wlr_data_control::{DataControlHandler, DataCont
 use smithay::wayland::security_context::{
     SecurityContext, SecurityContextHandler, SecurityContextListenerSource, SecurityContextState,
 };
-use smithay::wayland::selection::SelectionHandler;
+use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::wayland::shell::xdg::dialog::{ToplevelDialogHint, XdgDialogHandler, XdgDialogState};
@@ -194,6 +194,9 @@ pub struct JffState {
     pub data_control_state: DataControlState,
     /// ext_data_control_v1: the standardized version of the same thing, newer clients prefer it.
     pub ext_data_control_state: ExtDataControlState,
+    /// What jff keeps of the clipboard so it outlives the app that copied it, and the history
+    /// of earlier copies (see `feature/clipboard.rs`).
+    pub clipboard: crate::feature::clipboard::ClipboardKeeper,
     /// The picture the dragging client attached to the drag in progress (see `dnd.rs`).
     pub dnd_icon: Option<WlSurface>,
     /// The window of a tiling container the pointer carries right now, drawn small at the
@@ -478,6 +481,8 @@ impl JffState {
             Some(&primary_selection_state),
             |client| !is_sandboxed(client),
         );
+        // Keeps the clipboard when its app exits (`clipboard { … }`).
+        let clipboard = crate::feature::clipboard::ClipboardKeeper::new(&loop_handle);
         // wp_security_context_v1: Flatpak and friends ask for a socket of their own for one
         // app. Clients on such a socket are sandboxed (see `is_sandboxed`), and don't see
         // the global that makes more of them.
@@ -676,6 +681,7 @@ impl JffState {
             primary_selection_state,
             data_control_state,
             ext_data_control_state,
+            clipboard,
             dnd_icon: None,
             tile_carry: None,
             osd: crate::feature::osd::Osd::new(config.osd().font.clone()),
@@ -1069,9 +1075,38 @@ impl SeatHandler for JffState {
 
 // ---- clipboard / drag-and-drop ---------------------------------------------------------------
 
-// Clients exchange clipboard contents directly, the compositor keeps none.
+// Clients exchange clipboard contents directly. jff keeps a copy of what was copied, and offers
+// it itself once the app that owned the clipboard is gone (see `feature/clipboard.rs`). The
+// primary selection is left to the clients.
 impl SelectionHandler for JffState {
     type SelectionUserData = ();
+
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        if matches!(ty, SelectionTarget::Clipboard) {
+            self.clipboard_selection_changed(source.map(|source| source.mime_types()));
+        }
+    }
+
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &Self::SelectionUserData,
+    ) {
+        // jff only ever offers the clipboard. Dropping `fd` for anything else ends the paste.
+        if matches!(ty, SelectionTarget::Clipboard) {
+            self.clipboard_send(&mime_type, fd);
+        } else {
+            tracing::debug!("clipboard: send_selection for {ty:?}, not served");
+        }
+    }
 }
 
 impl DataControlHandler for JffState {

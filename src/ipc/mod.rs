@@ -64,6 +64,9 @@
 //! window-thumbnail ID [MAXW MAXH]  PNG of a window that fits MAXW x MAXH (default 320 x 200)
 //!                            at $XDG_RUNTIME_DIR/jff-wm/thumbs/thumb-ID.png, for panel previews,
 //!                            reply {"ok":true,"path":...,"width":...,"height":...}
+//! clipboard-history          the copies jff keeps of the clipboard, newest first (see `clipboard { history N }`)
+//! clipboard-select ID        make one of them the clipboard again, it moves to the front
+//! clipboard-clear            forget every copy (and empty the clipboard when jff is the one holding it)
 //! spawn-sh LINE              run LINE through `sh -c` (for panels and scripts)
 //! spawn PROG [ARG...]        run PROG (whitespace-split, no quoting)
 //! watch [GROUP...]           keep the connection open and stream events (see below)
@@ -136,6 +139,11 @@
 //! (all null before it has been laid out).
 //!
 //! `layout-save` replies `{"ok":true,"name":"Dev","layout":"h0.7(_,@browser)","slots":[null,"browser"]}`, `layout-apply` replies `{"ok":true,"name":"Dev","slots":2,"empty":0,"extra":0}`, `layout-list` replies `{"ok":true,"layouts":[{"name":..,"layout":..,"slots":[..]}]}`, a tagged window goes to the slot with its tag, layouts are in `$XDG_STATE_HOME/jff-wm/container-layouts`.
+//!
+//! `clipboard-history` replies `{"ok":true,"enabled":true,"limit":10,"entries":[{"id":3,"time":1767225600,"size":42,"mimes":["text/plain;charset=utf-8"],"preview":"the text, on one line","current":true}]}`.
+//! `id` is what `clipboard-select` takes, `time` is unix seconds, `size` bytes over all the mime types, `preview` the start of the text (`[image/png 12.3 KiB]` for anything else), `current` is true for the newest copy.
+//! The history lives in memory only. A copy that a password manager marks as a secret is never in it.
+//! `clipboard-select` and `clipboard-clear` reply `{"ok":true}`, `clipboard-select` with an id that is not there is an error reply.
 //!
 //! `outputs` replies `{"ok":true,"outputs":[OUTPUT,...]}`, each OUTPUT what `watch` describes
 //! below (`name`, `x`, `y`, `width`, `height`, `workspace`, `scanout`, `adaptive_sync`, `color`, `hdr`), as it is
@@ -575,6 +583,12 @@ pub enum Request {
     LayoutList,
     /// `layout-delete NAME`: forget a saved layout.
     LayoutDelete(String),
+    /// `clipboard-history`: the copies kept of the clipboard, newest first.
+    ClipboardHistory,
+    /// `clipboard-select ID`: make a kept copy the clipboard again.
+    ClipboardSelect(u64),
+    /// `clipboard-clear`: forget every kept copy.
+    ClipboardClear,
     Workspace(Goto),
     /// Workspace number, counted from 1, as typed.
     MoveToWorkspace(Option<u64>, usize),
@@ -623,7 +637,7 @@ pub enum Request {
 pub const COMMANDS: &str =
     "windows, status, outputs, focused, window-info, close, maximize, unmaximize, toggle-maximize, \
      minimize, unminimize, move-to-scratchpad, scratchpad, fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, sticky, unsticky, toggle-sticky, focus, focus-urgent, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
-     screenshot-area, screenshot-fullscreen, screenshot-window, window-thumbnail, move-cursor, click, toggle-overview, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, hotkeys, keyboard-layouts, switch-layout, watch";
+     screenshot-area, screenshot-fullscreen, screenshot-window, window-thumbnail, move-cursor, click, toggle-overview, clipboard-history, clipboard-select, clipboard-clear, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, hotkeys, keyboard-layouts, switch-layout, watch";
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
     word.parse::<usize>()
@@ -843,6 +857,20 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         ("layout-list", _) => return Err("layout-list takes no arguments".to_string()),
         ("layout-delete", [name]) => return Ok(Request::LayoutDelete((*name).to_string())),
         ("layout-delete", _) => return Err("layout-delete takes a layout name".to_string()),
+        ("clipboard-history", []) => return Ok(Request::ClipboardHistory),
+        ("clipboard-history", _) => {
+            return Err("clipboard-history takes no arguments".to_string());
+        }
+        ("clipboard-select", [id]) => {
+            return id.parse::<u64>().map(Request::ClipboardSelect).map_err(|_| {
+                format!("{id:?} is not a clipboard entry id (see clipboard-history)")
+            });
+        }
+        ("clipboard-select", _) => {
+            return Err("clipboard-select takes an entry id".to_string());
+        }
+        ("clipboard-clear", []) => return Ok(Request::ClipboardClear),
+        ("clipboard-clear", _) => return Err("clipboard-clear takes no arguments".to_string()),
         ("workspace", [n]) => {
             return Ok(Request::Workspace(Goto::To(parse_workspace_number(n)? - 1)));
         }
@@ -1063,6 +1091,15 @@ impl JffState {
             }
             Request::LayoutDelete(name) => {
                 self.delete_container_layout(&name)?;
+                Ok("{\"ok\":true}\n".to_string())
+            }
+            Request::ClipboardHistory => Ok(self.clipboard_history_json()),
+            Request::ClipboardSelect(id) => {
+                self.clipboard_select(id)?;
+                Ok("{\"ok\":true}\n".to_string())
+            }
+            Request::ClipboardClear => {
+                self.clipboard_clear();
                 Ok("{\"ok\":true}\n".to_string())
             }
             Request::Info(id) => {
@@ -2471,6 +2508,14 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("layout-apply NAME [ID]", "apply a saved layout"),
             ("layout-list", "list the saved layouts"),
             ("layout-delete NAME", "delete a saved layout"),
+        ],
+    ),
+    (
+        "Clipboard",
+        &[
+            ("clipboard-history", "list the copies jff kept"),
+            ("clipboard-select ID", "make a kept copy the clipboard"),
+            ("clipboard-clear", "forget every kept copy"),
         ],
     ),
     (

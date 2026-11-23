@@ -661,6 +661,32 @@ fn container_layout_requests_are_parsed() {
 }
 
 #[test]
+fn clipboard_requests_are_parsed() {
+    assert_eq!(
+        parse_request("clipboard-history"),
+        Ok(Request::ClipboardHistory)
+    );
+    assert_eq!(
+        parse_request("clipboard-select 12"),
+        Ok(Request::ClipboardSelect(12))
+    );
+    assert_eq!(
+        parse_request("clipboard-clear"),
+        Ok(Request::ClipboardClear)
+    );
+    assert!(parse_request("clipboard-history 1").is_err());
+    assert!(parse_request("clipboard-clear now").is_err());
+    assert!(parse_request("clipboard-select").is_err());
+    assert!(parse_request("clipboard-select 1 2").is_err());
+    let err = parse_request("clipboard-select first").unwrap_err();
+    assert!(err.contains("clipboard-history"), "{err}");
+    assert!(parse_request("clipboard-select -3").is_err());
+    for command in ["clipboard-history", "clipboard-select", "clipboard-clear"] {
+        assert!(COMMANDS.contains(command));
+    }
+}
+
+#[test]
 fn monitor_requests_are_parsed() {
     assert_eq!(
         parse_request("focus-monitor right"),

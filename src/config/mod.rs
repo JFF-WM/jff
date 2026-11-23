@@ -15,7 +15,7 @@
 //!
 //! `binds` has three actions for several monitors, each takes one target: `left`, `right`, `up`, `down` (the monitor that lies that way from the one in use), `next`, `prev` (left to right, then top to bottom, wrapping) or the name of a monitor (`"DP-2"`, see `jff msg outputs`). `focus-monitor "right"` moves the pointer and the keyboard there (to the topmost window, or to the middle of an empty monitor). `move-to-monitor "right"` sends the focused window there, pointer and keyboard follow, and a window of a tiling container takes its container along. `move-workspace-to-monitor "right"` trades what the monitor in use shows with what that monitor shows, and needs `workspaces { per-output }`. A target that does not exist (the edge of the desktop) does nothing, a name that is not connected shows an error toast.
 //!
-//! `binds` also has `minimize` (the focused window goes out of sight), `unminimize` (the one minimized last comes back), `focus-urgent` (the window that asked for attention last gets the keyboard, on its workspace, and a minimized one comes back; press again for the one before it) and a scratchpad: `move-to-scratchpad` puts the focused window in it, `scratchpad` brings one to the monitor in use, centered, or puts it away again when it has the keyboard (with several it steps through them). A hidden window keeps its workspace and place, a taskbar click or an activation request brings it back, and sending a scratchpad window to a workspace takes it out of the scratchpad.
+//! `binds` also has `minimize` (the focused window goes out of sight), `unminimize` (the one minimized last comes back), `focus-urgent` (the window that asked for attention last gets the keyboard, on its workspace, and a minimized one comes back, press again for the one before it) and a scratchpad: `move-to-scratchpad` puts the focused window in it, `scratchpad` brings one to the monitor in use, centered, or puts it away again when it has the keyboard (with several it steps through them). A hidden window keeps its workspace and place, a taskbar click or an activation request brings it back, and sending a scratchpad window to a workspace takes it out of the scratchpad.
 //!
 //! `warp-mouse-to-focus` moves the pointer to the center of a window when it gets the keyboard by something other than the pointer (a binding, the switcher, a new window, a closed one, a taskbar, a workspace switch), also when the pointer is over it already, unless the focus came from a click, a game has locked the pointer, or a window is being dragged. Off by default.
 //!
@@ -68,6 +68,9 @@
 //! - `maximize-new-windows`, `focus-new-windows`, `warp-mouse-to-focus`, `focus-follows-mouse`, `no-client-decorations`, `numlock`, `include-cursor`,
 //!   `copy-to-clipboard` and `enable` (in `log`) accept a bare name (`numlock`), `true` / `false`, `"true"` /
 //!   `"false"`, `"yes"` / `"no"`, or `"on"` / `"off"`.
+//! - `clipboard { … }` (`off`, `history N`: how many copies are kept, 1 to 500, 1 by default,
+//!   `max-size N`: MiB, 1 to 256, 8 by default) is the clipboard that outlives the app that copied
+//!   it. On unless `off`.
 //!
 //! `DEFAULT_CONFIG` is what runs when the user has no file. It has to parse: `Config::default`
 //! goes through `parse()` and logs an error if it fails.
@@ -205,6 +208,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "blur",
     "osd",
     "close-kill",
+    "clipboard",
     "switcher",
     "overview",
     "workspace-wall",
@@ -958,6 +962,31 @@ impl Default for CloseKillConfig {
     }
 }
 
+/// The `clipboard { … }` block. Wayland has no clipboard storage: the app that copied serves the
+/// data, and when it exits the clipboard is empty. Unless `off`, jff keeps a copy of what was
+/// copied and offers it itself once the app is gone (`feature/clipboard.rs`). `history` is how
+/// many copies it keeps (the latest one is the clipboard, the others can be brought back with
+/// `jff msg clipboard-select`), `max_size` how many bytes one copy may have in all its mime
+/// types together, a bigger one is not kept. Read when a copy is made, so a reload applies to
+/// the next one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipboardConfig {
+    pub off: bool,
+    pub history: usize,
+    /// In bytes (the file says MiB).
+    pub max_size: usize,
+}
+
+impl Default for ClipboardConfig {
+    fn default() -> Self {
+        Self {
+            off: false,
+            history: crate::primitives::clipboard::DEFAULT_HISTORY,
+            max_size: crate::primitives::clipboard::DEFAULT_MAX_SIZE_MIB * 1024 * 1024,
+        }
+    }
+}
+
 /// The `osd { … }` block, the toasts shown for the system bell. On unless `off`. A changed
 /// `font` applies on reload.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1681,6 +1710,7 @@ pub struct Config {
     blur_windows: BlurWindows,
     osd: OsdConfig,
     close_kill: CloseKillConfig,
+    clipboard: ClipboardConfig,
     switcher: SwitcherConfig,
     overview: OverviewConfig,
     workspace_wall: Option<WorkspaceWallConfig>,
@@ -1757,6 +1787,7 @@ impl Default for Config {
                 blur_windows: BlurWindows::default(),
                 osd: OsdConfig::default(),
                 close_kill: CloseKillConfig::default(),
+                clipboard: ClipboardConfig::default(),
                 switcher: SwitcherConfig::default(),
                 overview: OverviewConfig::default(),
                 workspace_wall: None,
@@ -2119,6 +2150,11 @@ impl Config {
             Some(node) => parse_close_kill(node).context("in close-kill")?,
         };
 
+        let clipboard = match doc.get("clipboard") {
+            None => ClipboardConfig::default(),
+            Some(node) => parse_clipboard(node).context("in clipboard")?,
+        };
+
         let workspace_wall = match doc.get("workspace-wall") {
             None => None,
             Some(node) => parse_workspace_wall(node).context("in workspace-wall")?,
@@ -2237,6 +2273,7 @@ impl Config {
             blur_windows,
             osd,
             close_kill,
+            clipboard,
             switcher,
             overview,
             workspace_wall,
@@ -2387,6 +2424,10 @@ impl Config {
 
     pub fn close_kill(&self) -> &CloseKillConfig {
         &self.close_kill
+    }
+
+    pub fn clipboard(&self) -> &ClipboardConfig {
+        &self.clipboard
     }
 
     pub fn switcher(&self) -> &SwitcherConfig {
@@ -3260,6 +3301,37 @@ fn parse_close_kill(node: &KdlNode) -> anyhow::Result<CloseKillConfig> {
         }
     }
     config.enable = parse_flag(children, "enable", config.enable)?;
+    Ok(config)
+}
+
+/// `clipboard { off, history N, max-size N }`. `max-size` is in MiB.
+fn parse_clipboard(node: &KdlNode) -> anyhow::Result<ClipboardConfig> {
+    use crate::primitives::clipboard::{MAX_HISTORY, MAX_MAX_SIZE_MIB};
+    let mut config = ClipboardConfig::default();
+    let Some(children) = node.children() else {
+        return Ok(config);
+    };
+    for child in children.nodes() {
+        match child.name().value() {
+            "history" => {
+                let n = int_arg(child, MAX_HISTORY as i32)?;
+                if n < 1 {
+                    bail!("history takes a number from 1 to {MAX_HISTORY}");
+                }
+                config.history = n as usize;
+            }
+            "max-size" => {
+                let mib = int_arg(child, MAX_MAX_SIZE_MIB as i32)?;
+                if mib < 1 {
+                    bail!("max-size takes a number of MiB from 1 to {MAX_MAX_SIZE_MIB}");
+                }
+                config.max_size = mib as usize * 1024 * 1024;
+            }
+            "off" => {}
+            other => bail!("unknown clipboard setting {other:?}"),
+        }
+    }
+    config.off = parse_flag(children, "off", config.off)?;
     Ok(config)
 }
 
