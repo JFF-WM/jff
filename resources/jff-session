@@ -1,22 +1,61 @@
 #!/bin/sh
-# Started by the login manager (GDM, SDDM, greetd, ly, ...) to begin a jff session.
+# Started by GDM (or SDDM, greetd, ly) to begin a jff session.
 
-# A login manager gives no WAYLAND_DISPLAY or DISPLAY, but make sure jff runs on the GPU
-# and not nested inside another session.
 export JFF_BACKEND=tty
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=jff
 export XDG_SESSION_DESKTOP=jff
 
-# Your usual environment (PATH, EDITOR, ...), as a login shell would have it.
 [ -f /etc/profile ] && . /etc/profile
 [ -f "$HOME/.profile" ] && . "$HOME/.profile"
 
 jff="$(dirname "$0")/jff"
 [ -x "$jff" ] || jff=jff
 
-# Most systems already have a user D-Bus session at this point. If not, start one.
-if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null 2>&1; then
-    exec dbus-run-session -- "$jff" "$@"
+# Only start a new D-Bus session if NOT launched by a systemd-integrated DM like GDM
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && [ -z "$XDG_SESSION_ID" ] && command -v dbus-run-session >/dev/null 2>&1; then
+  exec dbus-run-session -- "$0" "$@"
 fi
-exec "$jff" "$@"
+
+if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+  dbus-update-activation-environment --systemd XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP
+fi
+
+# Start jff as a child of jff-session so GDM keeps tracking the session PID
+"$jff" "$@" &
+JFF_PID=$!
+
+# Wait for jff to create its Wayland socket
+if [ -n "$XDG_RUNTIME_DIR" ]; then
+  for _ in $(seq 1 50); do
+    for sock in "$XDG_RUNTIME_DIR"/wayland-[0-9]*; do
+      case "$sock" in
+      *.lock) continue ;;
+      esac
+      if [ -S "$sock" ]; then
+        export WAYLAND_DISPLAY="$(basename "$sock")"
+        break 2
+      fi
+    done
+    sleep 0.1
+  done
+fi
+
+if [ -n "$WAYLAND_DISPLAY" ] && command -v dbus-update-activation-environment >/dev/null 2>&1; then
+  dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user start graphical-session.target
+fi
+
+# Forward GDM logout/shutdown signals to jff
+trap 'kill -TERM "$JFF_PID" 2>/dev/null' TERM INT HUP
+wait "$JFF_PID"
+EXIT_CODE=$?
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user stop graphical-session.target
+fi
+
+exit "$EXIT_CODE"
