@@ -55,11 +55,28 @@ fn install_panic_hook() {
     });
 }
 
+/// `jff 0.0.1 (rev abc1234-dirty, built 2026-11-24 17:30:00 -0300)`, which build this is.
+pub fn version_line() -> String {
+    format!(
+        "jff {} (rev {}, built {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("JFF_REV"),
+        env!("JFF_BUILT")
+    )
+}
+
 pub fn run() -> anyhow::Result<()> {
     install_panic_hook();
 
-    // `jff msg ...` only talks to a running instance, it never starts one.
     let args: Vec<String> = std::env::args().collect();
+
+    // `jff --version` says which build this is and exits, it never starts the compositor.
+    if matches!(args.get(1).map(String::as_str), Some("--version" | "-V")) {
+        println!("{}", version_line());
+        return Ok(());
+    }
+
+    // `jff msg ...` only talks to a running instance, it never starts one.
     if args.get(1).map(String::as_str) == Some("msg") {
         std::process::exit(crate::ipc::client(&args[2..])?);
     }
@@ -71,6 +88,7 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     crate::logging::init();
+    tracing::info!("{}", version_line());
 
     let mut event_loop: EventLoop<JffState> = EventLoop::try_new()?;
     let display: Display<JffState> = Display::new()?;
