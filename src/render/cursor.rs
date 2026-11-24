@@ -13,19 +13,24 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
+use smithay::backend::renderer::utils::{with_renderer_surface_state, CommitCounter};
+use smithay::desktop::utils::bbox_from_surface_tree;
 use smithay::input::pointer::{CursorIcon, CursorImageStatus, CursorImageSurfaceData};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{IsAlive, Logical, Point, Transform};
-use smithay::wayland::compositor::with_states;
+use smithay::wayland::compositor::{with_states, with_surface_tree_downward, TraversalAction};
 use xcursor::parser::parse_xcursor;
 use xcursor::CursorTheme;
 
 use crate::config::CursorConfig;
+use crate::primitives::cursor_capture::{pixel_at, pixels};
 use crate::primitives::cursor_hide::CursorHide;
 
 /// One picture of a cursor, ready to be drawn.
 pub struct Frame {
     pub buffer: MemoryRenderBuffer,
+    /// Size of the picture in its own pixels.
+    pub size: (i32, i32),
     /// The pixel inside the picture that sits exactly on the pointer position.
     pub hotspot: Point<i32, Logical>,
     delay_ms: u32,
@@ -60,6 +65,7 @@ impl Cursor {
 }
 
 /// What the renderer should draw for the cursor right now.
+#[derive(Clone)]
 pub enum RenderCursor {
     Hidden,
     /// A client drew its own cursor.
@@ -68,6 +74,90 @@ pub enum RenderCursor {
         surface: WlSurface,
     },
     Named(Rc<Cursor>),
+}
+
+/// What a picture of the cursor is like on a monitor of one scale: how big it is, where its
+/// hotspot sits, and a stamp that changes whenever its pixels do. Two looks that are equal are
+/// the same picture (`protocol/image_copy.rs` sends a cursor frame only when they differ).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CursorLook {
+    /// Pixel size of the picture.
+    pub size: (i32, i32),
+    /// The pixel of the picture that sits on the pointer.
+    pub hotspot: (i32, i32),
+    scale: f64,
+    stamp: Stamp,
+}
+
+/// What makes one cursor picture differ from another without its size or hotspot changing.
+#[derive(Clone, Debug, PartialEq)]
+enum Stamp {
+    /// A themed picture: which frame of which icon (the frame's address, the icon is cached).
+    Themed(usize),
+    /// A client's surface: its commits, and those of its subsurfaces.
+    Surface(Vec<CommitCounter>),
+}
+
+/// The commit counters of `root` and its subsurfaces.
+///
+/// `with_surface_tree_downward` holds the surface's data lock while it calls back, and
+/// `with_renderer_surface_state` takes that same lock: reading the counter inside the callback
+/// would deadlock, so the surfaces are collected first (same as `window_signature`).
+pub fn surface_tree_signature(root: &WlSurface) -> Vec<CommitCounter> {
+    let mut surfaces = Vec::new();
+    with_surface_tree_downward(
+        root,
+        (),
+        |_, _, _| TraversalAction::DoChildren(()),
+        |surface, _, _| surfaces.push(surface.clone()),
+        |_, _, _| true,
+    );
+    surfaces
+        .iter()
+        .map(|surface| {
+            with_renderer_surface_state(surface, |state| state.current_commit()).unwrap_or_default()
+        })
+        .collect()
+}
+
+impl RenderCursor {
+    /// The look of this cursor at `scale`, `millis` after start (themed cursors can animate).
+    /// `None` when there is no picture: hidden, or a client's surface that has nothing in it.
+    pub fn look(&self, millis: u32, scale: f64) -> Option<CursorLook> {
+        match self {
+            RenderCursor::Hidden => None,
+            RenderCursor::Named(cursor) => {
+                let frame = cursor.frame(millis);
+                Some(CursorLook {
+                    size: (pixels(frame.size.0, scale), pixels(frame.size.1, scale)),
+                    hotspot: (
+                        pixel_at(frame.hotspot.x, scale),
+                        pixel_at(frame.hotspot.y, scale),
+                    ),
+                    scale,
+                    stamp: Stamp::Themed(frame as *const Frame as usize),
+                })
+            }
+            RenderCursor::Surface { hotspot, surface } => {
+                let bbox = bbox_from_surface_tree(surface, (0, 0));
+                // A cursor surface with nothing attached is how a client hides its cursor.
+                if bbox.size.w <= 0 || bbox.size.h <= 0 {
+                    return None;
+                }
+                // The picture starts at the top-left of the surface tree, which can be above
+                // and left of the surface itself when a subsurface sticks out.
+                Some(CursorLook {
+                    size: (pixels(bbox.size.w, scale), pixels(bbox.size.h, scale)),
+                    hotspot: (
+                        pixel_at(hotspot.x - bbox.loc.x, scale),
+                        pixel_at(hotspot.y - bbox.loc.y, scale),
+                    ),
+                    scale,
+                    stamp: Stamp::Surface(surface_tree_signature(surface)),
+                })
+            }
+        }
+    }
 }
 
 pub struct CursorManager {
@@ -226,6 +316,12 @@ impl CursorManager {
         }
     }
 
+    /// The themed cursor for `icon`, whatever the status is now. For a size to offer while there
+    /// is no picture to show (`protocol/image_copy.rs`).
+    pub fn themed(&mut self, icon: CursorIcon) -> Rc<Cursor> {
+        self.named(icon)
+    }
+
     fn named(&mut self, icon: CursorIcon) -> Rc<Cursor> {
         if let Some(cursor) = self.cache.get(&icon) {
             return cursor.clone();
@@ -287,6 +383,7 @@ fn load_cursor(theme: &CursorTheme, name: &str, size: i32) -> anyhow::Result<Cur
     let frames: Vec<Frame> = images
         .iter()
         .map(|image| Frame {
+            size: (image.width as i32, image.height as i32),
             // The pixels are stored as ARGB words, which is what Argb8888 expects in memory.
             buffer: MemoryRenderBuffer::from_slice(
                 &image.pixels_rgba,
@@ -352,6 +449,7 @@ fn builtin_arrow() -> Cursor {
     }
 
     let frame = Frame {
+        size: (w as i32, h as i32),
         buffer: MemoryRenderBuffer::from_slice(
             &pixels,
             Fourcc::Argb8888,

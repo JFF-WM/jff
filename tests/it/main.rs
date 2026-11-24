@@ -15,6 +15,7 @@ mod config;
 mod config_lenient;
 mod container_drop;
 mod container_view;
+mod cursor_capture;
 mod cursor_config;
 mod cursor_hide;
 mod dbus_name;

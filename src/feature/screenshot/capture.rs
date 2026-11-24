@@ -77,7 +77,7 @@ use crate::protocol::layer_shell::{
     below_windows_elements, layer_elements, layer_popup_elements, layers_above, BELOW_WINDOWS,
 };
 use crate::protocol::session_lock::{lock_surface_elements, LOCKED_BACKGROUND};
-use crate::render::cursor::RenderCursor;
+use crate::render::cursor::{CursorLook, RenderCursor};
 use crate::render::effects::background_effect::window_elements;
 use crate::render::effects::border::BorderPaint;
 use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
@@ -588,6 +588,47 @@ impl JffState {
             BACKGROUND,
         )?;
         Ok(size)
+    }
+
+    /// The picture of `cursor` that `look` describes, alone on a transparent background with its
+    /// top-left corner at (0, 0), drawn at `scale`. Pixels are premultiplied, like
+    /// `capture_window`. For a cursor capture session: the picture is the cursor as a client
+    /// should composite it, so there is no color conversion.
+    pub(crate) fn capture_cursor_image(
+        &mut self,
+        cursor: RenderCursor,
+        look: &CursorLook,
+        scale: f64,
+        millis: u32,
+    ) -> Result<Captured, String> {
+        // `cursor_elements` puts the picture at pointer - hotspot, so with the pointer on the
+        // hotspot (and no origin) it lands on (0, 0).
+        let pointer: Point<f64, Logical> = match &cursor {
+            RenderCursor::Hidden => return Err("there is no cursor picture".to_string()),
+            RenderCursor::Named(themed) => themed.frame(millis).hotspot.to_f64(),
+            // A client's surface is drawn at its own origin: shift it by what sticks out
+            // above and left of it (a subsurface), so the picture starts at (0, 0).
+            RenderCursor::Surface { hotspot, surface } => {
+                let bbox = smithay::desktop::utils::bbox_from_surface_tree(surface, (0, 0));
+                (*hotspot - bbox.loc).to_f64()
+            }
+        };
+        let _frame_scale = crate::render::effects::frame_scale::enter(scale);
+        let elements = cursor_elements(
+            self.backend.renderer(),
+            cursor,
+            pointer,
+            (0, 0).into(),
+            Scale::from(scale),
+            millis,
+        );
+        render_to_rgba(
+            self.backend.renderer(),
+            look.size,
+            scale,
+            &elements,
+            [0.0; 4],
+        )
     }
 
     /// The stats overlay of a monitor on another GPU, drawn on the primary with the rest of its frame. `None` when it is off, follows a window of another monitor, or the picture under it is not the window's (the lock screen, the overview, a frozen screenshot).

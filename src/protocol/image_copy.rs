@@ -39,9 +39,20 @@
 //! pixels that changed as its damage.
 //!
 //! Cursor: `paint_cursors` is honored for monitors on the TTY backend (where jff draws the
-//! cursor), a window picture never has one. Cursor
-//! capture sessions (`create_pointer_cursor_session`) aren't supported: clients get a session
-//! that never produces anything and fall back to painting the cursor.
+//! cursor), a window picture never has one. A client that wants the cursor apart from the
+//! picture (a portal's "metadata" cursor mode: OBS and browsers draw or hide it themselves)
+//! uses a cursor capture session (`create_pointer_cursor_session`) on the same source:
+//!
+//! - `enter` / `leave` / `position` / `hotspot` follow the pointer. The cursor is on the source
+//!   while its picture touches it, positions are in the pixels of the source's picture. Hidden
+//!   (typing, resting, a client that hides it) and a locked session count as `leave`.
+//! - Its capture session hands out the cursor's own picture (`Argb8888`, `wl_shm` only,
+//!   premultiplied), at the scale of the monitor the source is on. A frame is only answered
+//!   when the picture is a different one (another icon, an animation frame, a commit of the
+//!   client's cursor surface). A different size is new buffer constraints, like a mode change.
+//!   While there is no picture (hidden) a frame stays pending.
+//! - Only the seat's pointer can be captured. Animated cursors only advance when the loop wakes
+//!   for something else (a frame sent to the monitor, input), as nothing schedules a wake-up.
 //!
 //! Sessions end when the monitor goes away or is switched off. A mode change (or a window
 //! resize) sends new buffer constraints and fails the frame in flight with `buffer_constraints`.
@@ -51,8 +62,10 @@ use smithay::backend::allocator::{Buffer as _, Fourcc, Modifier};
 use smithay::backend::drm::DrmNode;
 use smithay::backend::renderer::utils::{with_renderer_surface_state, CommitCounter};
 use smithay::desktop::{PopupManager, Window};
+use smithay::input::pointer::{CursorIcon, PointerHandle};
 use smithay::output::{Output, WeakOutput};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
+use smithay::reexports::wayland_server::protocol::wl_pointer::WlPointer;
 use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::utils::{Buffer as BufferCoords, IsAlive, Rectangle, Size, Transform};
@@ -65,21 +78,23 @@ use smithay::wayland::image_capture_source::{
     ToplevelCaptureSourceState,
 };
 use smithay::wayland::image_copy_capture::{
-    BufferConstraints, CaptureFailureReason, DmabufConstraints, Frame, FrameRef,
-    ImageCopyCaptureHandler, ImageCopyCaptureState, Session, SessionRef,
+    BufferConstraints, CaptureFailureReason, CursorSession, CursorSessionRef, DmabufConstraints,
+    Frame, FrameRef, ImageCopyCaptureHandler, ImageCopyCaptureState, Session, SessionRef,
 };
 use smithay::wayland::shm::{with_buffer_contents, with_buffer_contents_mut};
 
 use std::sync::Arc;
 
 use crate::app::Backend;
-use crate::feature::outputs::frame_size;
+use crate::feature::outputs::{frame_size, output_rect};
 use crate::feature::screenshot::{Captured, HdrCaptured};
 use crate::ipc::WindowId;
 use crate::primitives::capture_color::frame_description_fits;
+use crate::primitives::cursor_capture::hotspot_in_source;
 use crate::primitives::hdr_capture::{pack_row_2101010, pq_picture};
 use crate::protocol::color_management::Described;
 use crate::protocol::presentation::monotonic_now;
+use crate::render::cursor::{CursorLook, RenderCursor};
 use crate::state::{is_sandboxed, JffState};
 
 /// One capture session and what jff keeps for it.
@@ -92,6 +107,16 @@ pub struct CaptureSession {
     pending: Option<Frame>,
     /// What the source was at when `last` was made: while it is the same, nothing is drawn.
     seen: Option<Seen>,
+}
+
+/// One cursor capture session and what jff keeps for it.
+pub struct CursorCapture {
+    /// Dropping it tells the client the session is over.
+    session: CursorSession,
+    /// The frame the client is waiting for.
+    pending: Option<Frame>,
+    /// What the cursor picture was like when the last frame was sent.
+    last: Option<CursorLook>,
 }
 
 /// A cheap stand-in for "the source may look different now", compared for equality.
@@ -234,6 +259,7 @@ pub struct ImageCopy {
     toplevel_capture_source: ToplevelCaptureSourceState,
     image_copy_capture: ImageCopyCaptureState,
     sessions: Vec<CaptureSession>,
+    cursor_sessions: Vec<CursorCapture>,
     /// How many frames were sent to each monitor (by name).
     drawn: Vec<(String, u64)>,
     /// The `HDR_FORMATS` that `wl_shm` offers: a client can't make a buffer in any other.
@@ -265,6 +291,7 @@ impl ImageCopy {
                 |client| !is_sandboxed(client),
             ),
             sessions: Vec::new(),
+            cursor_sessions: Vec::new(),
             drawn: Vec::new(),
             hdr_formats: Vec::new(),
             dma_node: None,
@@ -319,6 +346,16 @@ impl ImageCopy {
 enum Target {
     Output(Output),
     Window(Window),
+}
+
+/// Where a capture source is in the shared space and how big its picture is.
+struct SourceSpace {
+    /// Pixels per logical pixel.
+    scale: f64,
+    /// Top-left corner, in logical pixels.
+    origin: (i32, i32),
+    /// Size of the picture, in pixels.
+    size: (i32, i32),
 }
 
 /// Set on a source made for a window: the window id (see `WindowId`).
@@ -586,12 +623,179 @@ impl JffState {
     /// Answer the frames clients wait for. Runs when a frame is asked for and after every
     /// event-loop iteration, does nothing while there are no sessions.
     pub fn service_image_copy(&mut self) {
-        if self.image_copy.sessions.is_empty() {
-            return;
+        if !self.image_copy.sessions.is_empty() {
+            let mut sessions = std::mem::take(&mut self.image_copy.sessions);
+            sessions.retain_mut(|entry| self.service_session(entry));
+            self.image_copy.sessions = sessions;
         }
-        let mut sessions = std::mem::take(&mut self.image_copy.sessions);
-        sessions.retain_mut(|entry| self.service_session(entry));
-        self.image_copy.sessions = sessions;
+        if !self.image_copy.cursor_sessions.is_empty() {
+            let mut sessions = std::mem::take(&mut self.image_copy.cursor_sessions);
+            sessions.retain_mut(|entry| self.service_cursor_session(entry));
+            self.image_copy.cursor_sessions = sessions;
+        }
+    }
+
+    /// Where `target` is, and how big its picture is: scale, top-left corner in the shared
+    /// space (the pointer's space) and size in pixels. `None` when there is no picture.
+    fn source_space(&self, target: &Target) -> Option<SourceSpace> {
+        match target {
+            Target::Output(output) => {
+                let rect = output_rect(output);
+                Some(SourceSpace {
+                    scale: output.current_scale().fractional_scale(),
+                    origin: (rect.0, rect.1),
+                    size: frame_size(output)?,
+                })
+            }
+            Target::Window(window) => {
+                let (scale, size) = self.window_capture_size(window).ok()?;
+                // `pos` is the corner of the window's geometry, which is what a picture of it
+                // starts at.
+                let pos = self.desk.pos_of(|w| w == window)?;
+                Some(SourceSpace {
+                    scale,
+                    origin: (pos.0, pos.1),
+                    size: (size.w, size.h),
+                })
+            }
+        }
+    }
+
+    /// What the cursor is now: the picture to show (`None`: nothing, the session is locked or the
+    /// cursor hidden) and its look on a source of `scale`.
+    fn cursor_now(&mut self, scale: f64) -> (RenderCursor, Option<CursorLook>) {
+        let cursor = if self.session_locked() {
+            RenderCursor::Hidden
+        } else {
+            self.cursor.render_cursor()
+        };
+        let look = cursor.look(self.start_time.elapsed().as_millis() as u32, scale);
+        (cursor, look)
+    }
+
+    /// The constraints of a cursor session on a source of `scale`: one `Argb8888` picture, as big
+    /// as the cursor. While there is no picture to size it by, the size it has (`current`) or
+    /// the theme's default arrow.
+    fn cursor_constraints(
+        &mut self,
+        scale: f64,
+        look: Option<&CursorLook>,
+        current: Option<(i32, i32)>,
+    ) -> BufferConstraints {
+        let size = look.map(|look| look.size).or(current).unwrap_or_else(|| {
+            let millis = self.start_time.elapsed().as_millis() as u32;
+            RenderCursor::Named(self.cursor.themed(CursorIcon::Default))
+                .look(millis, scale)
+                .map_or((24, 24), |look| look.size)
+        });
+        BufferConstraints {
+            size: size.into(),
+            // Alpha is the point of a cursor picture.
+            shm: vec![wl_shm::Format::Argb8888],
+            dma: None,
+        }
+    }
+
+    /// Look after one cursor session: tell the client where the cursor is, keep the constraints
+    /// the size of its picture, answer the frame it waits for. Returns false when the session is
+    /// over.
+    fn service_cursor_session(&mut self, entry: &mut CursorCapture) -> bool {
+        if !entry.session.alive() {
+            return false;
+        }
+        let Some(target) = self.source_target(&entry.session.source()) else {
+            return false;
+        };
+        let Some(space) = self.source_space(&target) else {
+            return false;
+        };
+        let (cursor, look) = self.cursor_now(space.scale);
+
+        // Where the cursor is. The hotspot first: `enter` carries it.
+        let position = look.as_ref().and_then(|look| {
+            let pointer = self.seat.get_pointer()?.current_location();
+            hotspot_in_source(
+                (
+                    pointer.x - f64::from(space.origin.0),
+                    pointer.y - f64::from(space.origin.1),
+                ),
+                space.scale,
+                look.hotspot,
+                look.size,
+                space.size,
+            )
+        });
+        if let Some(look) = &look {
+            entry.session.set_cursor_hotspot(look.hotspot);
+        }
+        entry.session.set_cursor_pos(position.map(Into::into));
+
+        // The picture changed size: clients have to allocate new buffers.
+        let current = entry
+            .session
+            .current_constraints()
+            .map(|c| (c.size.w, c.size.h));
+        let wanted = self.cursor_constraints(space.scale, look.as_ref(), current);
+        let constraints_ok = entry
+            .session
+            .current_constraints()
+            .is_some_and(|c| c.size == wanted.size && c.shm == wanted.shm);
+        if !constraints_ok {
+            entry.session.update_constraints(wanted);
+            entry.last = None;
+            if let Some(frame) = entry.pending.take() {
+                frame.fail(CaptureFailureReason::BufferConstraints);
+            }
+            return true;
+        }
+
+        // No picture to show: the frame stays pending until there is one.
+        let Some(look) = look else {
+            return true;
+        };
+        let Some(frame) = entry.pending.take() else {
+            return true;
+        };
+        // Nothing changed since the last frame: the client keeps waiting.
+        if entry.last.as_ref() == Some(&look) {
+            entry.pending = Some(frame);
+            return true;
+        }
+        let buffer = frame.buffer();
+        // Only `Argb8888` in `wl_shm` was offered.
+        if get_dmabuf(&buffer).is_ok() || buffer_format(&buffer) != Some(wl_shm::Format::Argb8888) {
+            frame.fail(CaptureFailureReason::BufferConstraints);
+            return true;
+        }
+        // Nothing converts a picture to another description, and a cursor is sRGB.
+        let wanted = self.xx_capture_color.description_of(&frame);
+        if !description_fits(wanted.as_deref(), false) {
+            tracing::warn!(
+                "image-copy-capture: the cursor frame's image description is not what it is drawn as"
+            );
+            frame.fail(CaptureFailureReason::Unknown);
+            return true;
+        }
+        let millis = self.start_time.elapsed().as_millis() as u32;
+        let written = self
+            .capture_cursor_image(cursor, &look, space.scale, millis)
+            .and_then(|picture| write_shm(&buffer, &picture));
+        match written {
+            Ok(()) => {
+                let size: Size<i32, BufferCoords> = look.size.into();
+                frame.success(
+                    Transform::Normal,
+                    vec![Rectangle::from_size(size)],
+                    monotonic_now(),
+                );
+                entry.last = Some(look);
+            }
+            Err(why) => {
+                tracing::warn!("image-copy-capture: cursor: {why}");
+                frame.fail(CaptureFailureReason::Unknown);
+            }
+        }
+        true
     }
 
     /// Look after one session. Returns false when the session is over (it's then dropped, which
@@ -784,6 +988,52 @@ impl ImageCopyCaptureHandler for JffState {
         self.target_constraints(&self.source_target(source)?)
     }
 
+    // Only the seat's pointer is captured: the cursor jff draws is that one's.
+    fn cursor_capture_constraints(
+        &mut self,
+        source: &ImageCaptureSource,
+        pointer: &WlPointer,
+    ) -> Option<BufferConstraints> {
+        let ours = self.seat.get_pointer()?;
+        if PointerHandle::<JffState>::from_resource(pointer)? != ours {
+            return None;
+        }
+        let space = self.source_space(&self.source_target(source)?)?;
+        let (_, look) = self.cursor_now(space.scale);
+        Some(self.cursor_constraints(space.scale, look.as_ref(), None))
+    }
+
+    fn new_cursor_session(&mut self, session: CursorSession) {
+        self.image_copy.cursor_sessions.push(CursorCapture {
+            session,
+            pending: None,
+            last: None,
+        });
+        // The next pass of the loop tells it where the cursor is.
+    }
+
+    fn cursor_frame(&mut self, session: &CursorSessionRef, frame: Frame) {
+        // From now on the frame's image description can't be set any more.
+        self.xx_capture_color.frame_captured(&frame);
+        let Some(entry) = self
+            .image_copy
+            .cursor_sessions
+            .iter_mut()
+            .find(|entry| entry.session == *session)
+        else {
+            frame.fail(CaptureFailureReason::Stopped);
+            return;
+        };
+        entry.pending = Some(frame);
+        self.service_image_copy();
+    }
+
+    fn cursor_session_destroyed(&mut self, session: CursorSessionRef) {
+        self.image_copy
+            .cursor_sessions
+            .retain(|entry| entry.session != session);
+    }
+
     fn new_session(&mut self, session: Session) {
         self.image_copy.sessions.push(CaptureSession {
             session,
@@ -812,6 +1062,15 @@ impl ImageCopyCaptureHandler for JffState {
     // The client gave up on a frame (destroyed it, or went away).
     fn frame_aborted(&mut self, frame: FrameRef) {
         for entry in &mut self.image_copy.sessions {
+            if entry
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.eq(&frame))
+            {
+                entry.pending = None;
+            }
+        }
+        for entry in &mut self.image_copy.cursor_sessions {
             if entry
                 .pending
                 .as_ref()

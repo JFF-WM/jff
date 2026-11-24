@@ -9,6 +9,7 @@ pub mod color;
 pub mod color_names;
 pub mod container_drop;
 pub mod container_view;
+pub mod cursor_capture;
 pub mod cursor_hide;
 pub mod dbus_name;
 pub mod edid;
