@@ -65,10 +65,45 @@ pub fn version_line() -> String {
     )
 }
 
+/// What `jff --help` prints.
+fn help_text() -> String {
+    format!(
+        "{version}
+
+Usage:
+  jff                       start the compositor
+  jff COMMAND               start it and launch COMMAND right away
+  jff msg [OPTIONS] ...     talk to the running compositor (`jff msg help` lists the commands)
+  jff check-config [FILE]   check a config file (default: the one jff loads) and exit
+  jff -V, --version         print the version and exit
+  jff -h, --help            print this help and exit
+
+Environment:
+  JFF_CONFIG     config file (default: $XDG_CONFIG_HOME/jff/config.kdl, else ~/.config/jff/config.kdl)
+  JFF_BACKEND    `winit` or `tty` (default: winit when a Wayland or X11 session is around, else tty)
+  JFF_TERMINAL   terminal for `Terminal=true` entries and the terminal action (then TERMINAL, then alacritty)
+  JFF_SOCKET     IPC socket `jff msg` talks to (set by the compositor for what it starts)
+  RUST_LOG       log filter on stderr (default: info)
+
+Files:
+  {panic_log}   one line per panic, appended
+",
+        version = version_line(),
+        panic_log = PANIC_LOG,
+    )
+}
+
 pub fn run() -> anyhow::Result<()> {
     install_panic_hook();
 
     let args: Vec<String> = std::env::args().collect();
+
+    // `jff --help` prints the usage and exits, it never starts the compositor (or a client
+    // named `--help`).
+    if matches!(args.get(1).map(String::as_str), Some("--help" | "-h")) {
+        print!("{}", help_text());
+        return Ok(());
+    }
 
     // `jff --version` says which build this is and exits, it never starts the compositor.
     if matches!(args.get(1).map(String::as_str), Some("--version" | "-V")) {
