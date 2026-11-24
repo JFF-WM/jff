@@ -148,30 +148,34 @@ fn damage_between<T: PartialEq>(now: &[T], last: &[T], width: usize) -> Damage {
 
 /// The commit counters of `window`'s surfaces and those of its menus.
 fn window_signature(window: &Window) -> Vec<CommitCounter> {
-    let mut out = Vec::new();
     let Some(toplevel) = window.toplevel() else {
-        return out;
+        return Vec::new();
     };
     let mut roots = vec![toplevel.wl_surface().clone()];
     roots.extend(
         PopupManager::popups_for_surface(toplevel.wl_surface())
             .map(|(popup, _)| popup.wl_surface().clone()),
     );
+    // `with_surface_tree_downward` holds the surface's data lock while it calls back, and
+    // `with_renderer_surface_state` takes that same lock: asking for the counter from inside
+    // the callback deadlocks the whole compositor. So only collect the surfaces there, and
+    // read the counters after the traversal is over.
+    let mut surfaces = Vec::new();
     for root in &roots {
         with_surface_tree_downward(
             root,
             (),
             |_, _, _| TraversalAction::DoChildren(()),
-            |surface, _, _| {
-                out.push(
-                    with_renderer_surface_state(surface, |state| state.current_commit())
-                        .unwrap_or_default(),
-                );
-            },
+            |surface, _, _| surfaces.push(surface.clone()),
             |_, _, _| true,
         );
     }
-    out
+    surfaces
+        .iter()
+        .map(|surface| {
+            with_renderer_surface_state(surface, |state| state.current_commit()).unwrap_or_default()
+        })
+        .collect()
 }
 
 /// What the last frame of a session looked like.
@@ -514,7 +518,9 @@ impl JffState {
             return true;
         }
         if !description_fits(wanted.as_deref(), ten_bit) {
-            tracing::warn!("image-copy-capture: the frame's image description is not what it is drawn as");
+            tracing::warn!(
+                "image-copy-capture: the frame's image description is not what it is drawn as"
+            );
             frame.fail(CaptureFailureReason::Unknown);
             return true;
         }
@@ -644,7 +650,9 @@ impl JffState {
         // Nothing converts a picture to another description: the one the client asked for has to
         // be what the buffer's format gets drawn as.
         if !bad_format && !description_fits(wanted.as_deref(), ten_bit.is_some()) {
-            tracing::warn!("image-copy-capture: the frame's image description is not what it is drawn as");
+            tracing::warn!(
+                "image-copy-capture: the frame's image description is not what it is drawn as"
+            );
             frame.fail(CaptureFailureReason::Unknown);
             return true;
         }
