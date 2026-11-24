@@ -53,6 +53,10 @@
   (it needs `Xwayland` too) and jff starts it for you and sets `DISPLAY` for
   everything it launches. Without it, X11 apps simply don't run.
 - **Portals** (file dialogs and friends) are set up on first start.
+  Screen sharing uses
+  [`xdg-desktop-portal-jff`](https://github.com/JFF-WM/xdg-desktop-portal-jff),
+  see the [Screen sharing wiki](https://github.com/JFF-WM/jff/wiki/Screen-sharing)
+  for the setup.
 - **Remembers windows:** apps that support `xdg-session-management` get their
   windows put back where they were.
 - **Works with your tools:** bars (waybar, yambar, nwg-panel), launchers,
