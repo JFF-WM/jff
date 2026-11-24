@@ -12,6 +12,7 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use crate::render::effects::border::BorderElement;
 use crate::render::effects::framebuffer_effect::FramebufferEffectElement;
 use crate::render::effects::hdr::HdrFrameElement;
+use crate::render::effects::magnifier::MagnifiedElement;
 use crate::render::effects::rounded::{
     RoundedMemoryElement, RoundedScaledMemoryElement, RoundedSurfaceElement, RoundedThumbElement,
 };
@@ -42,4 +43,6 @@ render_elements! {
     LinearScaledMemory = RoundedScaledMemoryElement,
     /// The working-space texture of an HDR output, drawn through the final pass.
     Hdr = HdrFrameElement,
+    /// Part of the monitor's own frame, enlarged to fill it (the screen zoom).
+    Magnified = MagnifiedElement,
 }

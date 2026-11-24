@@ -211,6 +211,8 @@ pub struct JffState {
     pub layout_memory: crate::primitives::layout_memory::LayoutMemory<crate::desk::WindowId>,
     /// The stats overlay and its counters (`toggle-stats`, see `feature/stats.rs`).
     pub stats: crate::feature::stats::StatsOverlay,
+    /// The screen magnifier (`zoom-in`, see `feature/zoom.rs`).
+    pub zoom: crate::feature::zoom::ZoomState,
     /// Installed applications, for the overview search.
     pub app_index: crate::feature::app_index::AppIndex,
     /// `restore-apps`: the apps of the last session and the ones open now.
@@ -688,6 +690,7 @@ impl JffState {
             close_watch: crate::feature::close_watch::CloseWatch::default(),
             layout_memory: crate::primitives::layout_memory::LayoutMemory::default(),
             stats: crate::feature::stats::StatsOverlay::new(),
+            zoom: crate::feature::zoom::ZoomState::new(),
             app_index: crate::feature::app_index::AppIndex::new(),
             app_restore: crate::feature::app_restore::AppRestore::default(),
             template_claims: crate::feature::container_templates::TemplateClaims::default(),

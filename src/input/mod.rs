@@ -238,6 +238,9 @@ impl JffState {
                 let stop_y = amount_y == 0.0
                     && (source == AxisSource::Finger || source == AxisSource::Continuous)
                     && event.amount(Axis::Vertical) == Some(0.0);
+                if self.zoom_scroll(source, amount_y, event.amount_v120(Axis::Vertical), stop_y) {
+                    return;
+                }
                 if self.overview_scroll(source, amount_y, event.amount_v120(Axis::Vertical), stop_y)
                 {
                     return;
@@ -487,6 +490,8 @@ impl JffState {
                             // that first).
                             Some(Action::Overview) => Bind::Action(Action::Overview),
                             Some(Action::Quit) => Bind::Action(Action::Quit),
+                            // The screen can be zoomed with the overview open.
+                            Some(action) if action.is_zoom() => Bind::Action(action.clone()),
                             // Anything else that types a character goes to the search.
                             _ => {
                                 let sym = handle.modified_sym();
@@ -507,6 +512,7 @@ impl JffState {
                             Some(Action::Quit) => Bind::Action(Action::Quit),
                             Some(Action::Overview) => Bind::Action(Action::Overview),
                             Some(Action::ScreenshotArea) => Bind::Screenshot(ScreenshotKey::Cancel),
+                            Some(action) if action.is_zoom() => Bind::Action(action.clone()),
                             _ => screenshot_key(handle.modified_sym())
                                 .map_or(Bind::Swallow, Bind::Screenshot),
                         };
@@ -806,7 +812,10 @@ impl JffState {
                     // Like keys: with overview or screenshot open, only `overview`
                     // (which closes it) and `quit` act, anything else is ignored.
                     let modal = self.overview_active() || self.screenshot.is_some();
-                    if !modal || matches!(action, Action::Overview | Action::Quit) {
+                    if !modal
+                        || matches!(action, Action::Overview | Action::Quit)
+                        || action.is_zoom()
+                    {
                         self.run_action(action);
                     }
                     return;
@@ -993,6 +1002,10 @@ impl JffState {
             }
             Action::ToggleShortcutsInhibit => self.toggle_shortcuts_inhibit(),
             Action::ToggleStats => self.toggle_stats(),
+            Action::ZoomIn => self.zoom_in(),
+            Action::ZoomOut => self.zoom_out(),
+            Action::ZoomReset => self.zoom_reset(),
+            Action::ZoomPan(way) => self.zoom_pan(way),
             Action::FocusContainer(name) => {
                 self.focus_container_named(&name);
             }

@@ -358,3 +358,98 @@ fn focus_urgent_can_be_bound() {
     assert!(matches!(action, Some(Action::FocusUrgent)), "{action:?}");
     assert!(Config::parse("binds {\n    Ctrl+u { focus-urgent \"x\"; }\n}\n").is_err());
 }
+
+#[test]
+fn zoom_has_defaults_and_takes_its_settings() {
+    use jff_wm::primitives::zoom::{PointerStyle, Tracking};
+    use std::time::Duration;
+
+    let default = Config::parse("").unwrap().zoom();
+    assert_eq!(default.step, 1.2);
+    assert_eq!(default.max, 20.0);
+    assert_eq!(default.tracking, Tracking::Proportional);
+    assert_eq!(default.pointer, PointerStyle::Scale);
+    assert_eq!(default.animation, Duration::from_millis(200));
+
+    let config = Config::parse(
+        "zoom { step 1.5; max 8; tracking \"push\"; pointer \"keep\"; animation-ms 0; }",
+    )
+    .unwrap()
+    .zoom();
+    assert_eq!(config.step, 1.5);
+    assert_eq!(config.max, 8.0);
+    assert_eq!(config.tracking, Tracking::Push);
+    assert_eq!(config.pointer, PointerStyle::Keep);
+    assert_eq!(config.animation, Duration::ZERO);
+}
+
+#[test]
+fn zoom_refuses_what_makes_no_sense() {
+    assert!(Config::parse("zoom { step 1; }").is_err());
+    assert!(Config::parse("zoom { step 5; }").is_err());
+    assert!(Config::parse("zoom { max 0.5; }").is_err());
+    assert!(Config::parse("zoom { max 100; }").is_err());
+    assert!(Config::parse("zoom { tracking \"sideways\"; }").is_err());
+    assert!(Config::parse("zoom { pointer \"big\"; }").is_err());
+    assert!(Config::parse("zoom { animation-ms 2001; }").is_err());
+    assert!(Config::parse("zoom { scroll-modifier \"Hyper\"; }").is_err());
+    assert!(Config::parse("zoom { no-such-thing 1; }").is_err());
+}
+
+#[test]
+fn zoom_scrolls_with_super_unless_told_otherwise() {
+    let logo = mods_state(0);
+    let held = |config: &Config, logo_down: bool, alt: bool| {
+        let mut mods = logo;
+        mods.logo = logo_down;
+        mods.alt = alt;
+        config.zoom().scroll_modifier_held(&mods)
+    };
+    let default = Config::parse("").unwrap();
+    assert!(held(&default, true, false));
+    assert!(!held(&default, false, false));
+
+    let alt = Config::parse("zoom { scroll-modifier \"Alt\"; }").unwrap();
+    assert!(held(&alt, false, true));
+    assert!(!held(&alt, true, false));
+
+    let none = Config::parse("zoom { scroll-modifier \"none\"; }").unwrap();
+    assert!(!held(&none, true, true));
+}
+
+#[test]
+fn zoom_actions_can_be_bound_and_are_there_by_default() {
+    use jff_wm::primitives::zoom::Pan;
+
+    let config = Config::parse(
+        "binds { Alt+Z { zoom-in; } Alt+X { zoom-out; } Alt+C { zoom-reset; } Alt+H { zoom-pan-left; } }",
+    )
+    .unwrap();
+    let mods = |alt: bool| {
+        let mut mods = mods_state(0);
+        mods.alt = alt;
+        mods
+    };
+    let action = |sym| config.action_for(&mods(true), sym).cloned();
+    assert_eq!(action(Keysym::z), Some(Action::ZoomIn));
+    assert_eq!(action(Keysym::x), Some(Action::ZoomOut));
+    assert_eq!(action(Keysym::c), Some(Action::ZoomReset));
+    assert_eq!(action(Keysym::h), Some(Action::ZoomPan(Pan::Left)));
+    assert!(Action::ZoomIn.is_zoom() && !Action::Quit.is_zoom());
+
+    let default = Config::default();
+    let mut logo = mods_state(0);
+    logo.logo = true;
+    assert_eq!(
+        default.action_for(&logo, Keysym::equal),
+        Some(&Action::ZoomIn)
+    );
+    assert_eq!(
+        default.action_for(&logo, Keysym::minus),
+        Some(&Action::ZoomOut)
+    );
+    assert_eq!(
+        default.action_for(&logo, Keysym::_0),
+        Some(&Action::ZoomReset)
+    );
+}

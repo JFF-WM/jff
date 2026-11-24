@@ -262,6 +262,10 @@ impl JffState {
             })
             .unwrap_or_default();
         let layer_output = self.outputs.first().cloned();
+        // Needs &mut self too: the part of the window the zoom shows follows the pointer.
+        let zoom = layer_output
+            .as_ref()
+            .and_then(|output| self.zoom_plan(output, std::time::Instant::now()));
         let fullscreen = self.fullscreen_rects();
         let above = layer_output
             .as_ref()
@@ -515,6 +519,13 @@ impl JffState {
                 BACKGROUND
             };
             let clear = hdr_frame::clear_color(space, background);
+            // zoomed: the final pass draws the part around the pointer over the whole window
+            if let Some(frame) = state.frame.as_mut() {
+                frame.set_view(
+                    zoom.as_ref()
+                        .map(|plan| plan.src(output.current_scale().fractional_scale())),
+                );
+            }
             match state
                 .frame
                 .as_mut()
@@ -534,6 +545,27 @@ impl JffState {
             }
         } else {
             self.winit_hdr = WinitHdr::default();
+        }
+
+        // Zoomed, and not HDR: the scene goes into a texture of its own and the part around the
+        // pointer is drawn enlarged over the whole window.
+        if let (Some(plan), None, Some(output)) = (zoom.as_ref(), hdr, layer_output.as_ref()) {
+            let clear = if locked {
+                crate::protocol::session_lock::LOCKED_BACKGROUND
+            } else {
+                BACKGROUND
+            };
+            let scene = std::mem::take(&mut elements);
+            match self
+                .zoom
+                .magnify(winit.renderer(), output, &scene, clear, plan)
+            {
+                Some((element, states)) => {
+                    elements.push(JffElement::Magnified(element));
+                    hdr_states = Some(states);
+                }
+                None => elements = scene,
+            }
         }
 
         let result = {

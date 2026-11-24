@@ -9,6 +9,9 @@
 //!   focus moves. Also opt-in.
 //! * `frame_scale`: the scale of the output a frame is built for, read by what is sized in frame
 //!   pixels (corner radius, border width).
+//! * `magnifier`: the screen zoom - the monitor's frame is composited into a texture and the part
+//!   around the pointer is drawn enlarged over all of it. Nothing runs while the screen is not
+//!   zoomed.
 //! * `rounded`: rounded window corners (`radius` setting) - a texture shader masking the
 //!   window's surface. Also opt-in: nothing runs with `radius 0`.
 //!
@@ -48,6 +51,7 @@ pub mod frame_scale;
 pub mod framebuffer_effect;
 pub mod gamut;
 pub mod hdr;
+pub mod magnifier;
 pub mod pixel_alpha;
 pub mod ripple;
 pub mod rounded;

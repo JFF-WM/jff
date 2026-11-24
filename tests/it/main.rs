@@ -63,3 +63,4 @@ mod window_rules;
 mod xx_hotkey;
 mod yuv;
 mod zone;
+mod zoom;

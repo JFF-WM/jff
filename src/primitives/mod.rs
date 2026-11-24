@@ -34,3 +34,4 @@ pub mod tile_tree;
 pub mod touch;
 pub mod yuv;
 pub mod zone;
+pub mod zoom;

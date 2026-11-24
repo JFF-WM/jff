@@ -99,6 +99,7 @@ use crate::primitives::hdr_output::{self, FinalPass};
 use crate::primitives::hdr_scanout::{self, Decline, Facts, Over, Tried};
 use crate::primitives::layout;
 use crate::primitives::stats as nerd;
+use crate::primitives::zoom::PointerStyle;
 use crate::protocol::color_management::WorkingSpace;
 use crate::protocol::content_type::Content;
 use crate::protocol::layer_shell::{
@@ -2357,6 +2358,8 @@ impl JffState {
         let overview = self.overview_plan();
         let fullscreen = self.fullscreen_rects();
         self.release_commit_timers(&output, presented_at);
+        // Needs &mut self too: the part of the monitor the zoom shows follows the pointer.
+        let zoom = self.zoom_plan(&output, anim_now);
 
         let Backend::Tty(tty) = &mut self.backend else {
             return;
@@ -2489,13 +2492,30 @@ impl JffState {
         let mut elements: Vec<JffElement> = Vec::new();
         let cursor_near =
             layout::contains(layout::grow(rect, CURSOR_MARGIN), (pointer.x, pointer.y));
+        // While zoomed, a pointer kept at its size is drawn where the zoom puts it on the screen,
+        // on top of the zoomed frame. Otherwise it is drawn with the rest of the scene.
+        let cursor_zoomed = zoom
+            .as_ref()
+            .filter(|plan| plan.pointer == PointerStyle::Keep && lit.hdr.is_none());
+        let cursor_at: Point<f64, Logical> = match cursor_zoomed {
+            Some(plan) => {
+                let (x, y) = plan
+                    .view
+                    .to_screen((pointer.x - f64::from(rect.0), pointer.y - f64::from(rect.1)));
+                (x + f64::from(rect.0), y + f64::from(rect.1)).into()
+            }
+            None => pointer,
+        };
         match self.cursor.render_cursor() {
             RenderCursor::Hidden => {}
             _ if !cursor_near => {}
+            _ if zoom
+                .as_ref()
+                .is_some_and(|plan| plan.pointer == PointerStyle::Hide) => {}
             // client-drawn cursor, placed at the pointer minus hotspot
             RenderCursor::Surface { hotspot, surface } => {
                 let loc: Point<i32, Physical> =
-                    (pointer.to_i32_round() - hotspot - origin).to_physical_precise_round(scale);
+                    (cursor_at.to_i32_round() - hotspot - origin).to_physical_precise_round(scale);
                 let cursor_elements: Vec<JffElement> = render_elements_from_surface_tree(
                     &mut *renderer,
                     &surface,
@@ -2511,7 +2531,7 @@ impl JffState {
                 let millis = self.start_time.elapsed().as_millis() as u32;
                 let frame = cursor.frame(millis);
                 let loc: Point<f64, Physical> =
-                    (pointer - origin.to_f64() - frame.hotspot.to_f64()).to_physical(scale);
+                    (cursor_at - origin.to_f64() - frame.hotspot.to_f64()).to_physical(scale);
                 match MemoryRenderBufferRenderElement::from_buffer(
                     &mut *renderer,
                     loc,
@@ -2526,6 +2546,8 @@ impl JffState {
                 }
             }
         }
+        // Those are the cursor's elements, kept out of the zoomed scene when it is drawn on top.
+        let cursor_len = elements.len();
         // dnd icon: under the cursor, above everything else
         if cursor_near {
             let loc: Point<i32, Physical> =
@@ -2637,7 +2659,8 @@ impl JffState {
             let covering = overview_here.is_none() && fullscreen_covers(&self.desk, rect);
             nerd_covering = covering;
             nerd_overview = overview_here.is_some();
-            direct_scanout = hdr_space.is_none() && covering && !nerd_overlay;
+            // A zoomed frame is drawn from a texture of its own, so a window can't go to the plane.
+            direct_scanout = hdr_space.is_none() && covering && !nerd_overlay && zoom.is_none();
             if nerd_overlay && hdr_space.is_none() {
                 // without the overlay the frame would be tried on the plane
                 nerd_alt = Some(covering);
@@ -2667,7 +2690,8 @@ impl JffState {
                         // A night light tint is drawn by the final pass, which the plane skips.
                         effects: !crate::render::effects::yuv::corrections(&surface).is_empty()
                             || !crate::render::effects::pixel_alpha::modes(&surface).is_empty()
-                            || lit.night_gain != [1.0; 3],
+                            || lit.night_gain != [1.0; 3]
+                            || zoom.is_some(),
                         tag,
                         buffer_format,
                         swapchain_format: lit.compositor.format() as u32,
@@ -2945,7 +2969,8 @@ impl JffState {
         let nerd_async = matches!(presentation, PresentationMode::Async);
 
         // HDR: composite in the working space, then hand the output's compositor the one
-        // element that encodes the result for the signal.
+        // element that encodes the result for the signal. The states of what was composited in
+        // a texture first (this, or the zoomed frame below) are the ones clients hear about.
         let mut hdr_states = None;
         let mut hdr_failed = false;
         if let Some(hdr) = lit.hdr.as_mut().filter(|_| hdr_scanout_try.is_none()) {
@@ -2977,6 +3002,10 @@ impl JffState {
                 BACKGROUND
             };
             let clear = hdr_frame::clear_color(space, background);
+            // zoomed: the final pass draws the part around the pointer over the whole monitor
+            if let Some(frame) = hdr.frame.as_mut() {
+                frame.set_view(zoom.as_ref().map(|plan| plan.src(output_scale)));
+            }
             match hdr
                 .frame
                 .as_mut()
@@ -3002,6 +3031,33 @@ impl JffState {
                     hdr_failed = true;
                 }
                 None => hdr_failed = true,
+            }
+        }
+
+        // Zoomed, on a monitor that is not HDR: the scene goes into a texture of its own and the
+        // part around the pointer is drawn enlarged over the whole monitor. A pointer kept at its
+        // size stays out of the texture and goes on top.
+        if let (Some(plan), None) = (zoom.as_ref(), lit.hdr.as_ref()) {
+            let on_top = if cursor_zoomed.is_some() {
+                cursor_len
+            } else {
+                0
+            };
+            let scene = elements.split_off(on_top);
+            let clear = if locked {
+                LOCKED_BACKGROUND
+            } else {
+                BACKGROUND
+            };
+            match self
+                .zoom
+                .magnify(&mut *renderer, &lit.output, &scene, clear, plan)
+            {
+                Some((element, states)) => {
+                    elements.push(JffElement::Magnified(element));
+                    hdr_states = Some(states);
+                }
+                None => elements.extend(scene),
             }
         }
 

@@ -102,6 +102,10 @@ impl JffState {
         if self.cursor.is_animated() {
             return true;
         }
+        // the screen zooming in or out
+        if self.zoom_animating() {
+            return true;
+        }
         // the borders of a window being carried run on their own clock
         if self.tile_carry.as_ref().is_some_and(|carry| carry.shown) {
             return true;

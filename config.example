@@ -140,6 +140,29 @@ hot-corner {
 }
 //hot-corner 6      // just the size
 
+// Screen magnifier: zooms the screen in around the pointer, on the monitor the pointer is on.
+// `zoom-in`, `zoom-out` and `zoom-reset` in binds (Super+= / Super+- / Super+0 by default), and
+// scrolling the wheel with `scroll-modifier` held, change the zoom. Everything here is optional,
+// the block only tunes it. Clicks go to what is under the pointer, which is what the zoomed
+// screen shows there. A touchscreen does not line up while zoomed, and screenshots and screen
+// captures are of the unzoomed screen.
+zoom {
+    step 1.2                    // what one zoom-in multiplies the zoom by, 1.01 to 4
+    max 20                      // the most zoom-in zooms, 1 to 64
+    tracking "proportional"     // how the part shown follows the pointer:
+                                //   "proportional": the pointer stays over what it points at,
+                                //                   the view slides with it from edge to edge
+                                //   "centered":     the pointer is in the middle
+                                //   "push":         the view moves when the pointer reaches its edge
+                                //   "disabled":     the view stays, move it with zoom-pan-*
+    pointer "scale"             // "scale": magnified with the screen, "keep": at its normal size,
+                                // "hide". "keep" does not apply on a monitor with `hdr`, where
+                                // the pointer is magnified
+    animation-ms 200            // how long a change of the zoom takes, 0 to 2000, 0 for none
+    scroll-modifier "Super"     // scroll with it held to zoom: "Super", "Alt", "Ctrl", "Shift" or
+                                // "none". Scrolling up zooms in
+}
+
 // Global hotkeys (xx-hotkey-v1, off by default): clients may bind their own hotkeys, which then
 // work whatever has the keyboard. See also `forward-key` in binds. `jff msg hotkeys` lists what
 // is bound, by whom, and whether it is held.
@@ -723,6 +746,9 @@ window-rule { match app-id="kitty"; opacity 0.9; }
 //   reload-config / quit
 //   screenshot-area / screenshot-fullscreen / screenshot-window
 //   toggle-shortcuts-inhibit      let the focused window's keyboard-shortcuts inhibitor go, or come back
+//   zoom-in / zoom-out / zoom-reset   the screen magnifier (see `zoom`), also while the overview is open
+//   zoom-pan-left / zoom-pan-right / zoom-pan-up / zoom-pan-down   move the part that is zoomed in on, for
+//                                 `tracking "push"` and `"disabled"`
 //   toggle-stats                  show or hide "statistics for nerds" for the focused window: client / shown /
 //                                 display FPS, frame sync (vsync, VRR, tearing), HDR, direct scanout and why not.
 //                                 While shown the window is composited (the overlay is drawn over it), so direct
@@ -765,6 +791,13 @@ binds {
     // Alt+Up { snap-top; }
     // Alt+Down { snap-bottom; }
     // Super+Escape { toggle-shortcuts-inhibit; }
+    // Super+equal { zoom-in; }
+    // Super+minus { zoom-out; }
+    // Super+0 { zoom-reset; }
+    // Super+Ctrl+Left { zoom-pan-left; }
+    // Super+Ctrl+Right { zoom-pan-right; }
+    // Super+Ctrl+Up { zoom-pan-up; }
+    // Super+Ctrl+Down { zoom-pan-down; }
     // Super+Shift+S { toggle-stats; }
 
     // Tiling containers (need `tiling-containers`)

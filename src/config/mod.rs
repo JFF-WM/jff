@@ -6,7 +6,7 @@
 //! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9, per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
-//! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `only-layer \"NS\"`: blur only those layer namespaces, whole surface, on any layer, `layer-radius N` / `layer-radius \"NS\" N`: corner radius of the blur behind layer surfaces, all of them or one namespace, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `close-kill { … }` (`enable`, `seconds N`: a window that is still open `N` seconds (5 by default, 1 to 3600, fractions are fine) after it was asked to close, by a bind, the overview, a taskbar or `jff msg close`, has its process killed with SIGKILL and a toast says why, off by default, the process is that of the window's Wayland client, so every window of that process goes with it, X11 windows are never killed, they all share the process of xwayland-satellite), `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none, `border N` / `border-color \"#RRGGBBAA\"`: the border around the workspace squares (the stage's frames and the workspace wall's squares), width 0 for none, `backdrop-color \"#RRGGBBAA\"`: a colour over the whole monitor behind the stage's frames, over the wallpaper and its blur, without alpha it is a static colour, `search-background-color \"#RRGGBBAA\"` / `search-font-color \"#RRGGBBAA\"`: the fill and the text colour of the search box and the app grid, `container-background-color "#RRGGBBAA"`: the fill of a tiling container's cell, over the blur when `blur` is on, `#00000000` for the blur alone, `container-border-width N` / `container-border-color "#RRGGBBAA"`: the border of that cell, width 0 for none, `container-font-color \"#RRGGBBAA\"`: the colour of the name written on that cell, `container-radius N`: its corner radius, fill, border and blur, half of `radius` by default), `workspace-wall` (`workspace-wall`, or a block with `height N`, `thumbnails`, `follow-window`: dragging a thumbnail in the overview shows a square per workspace to drop it on, and by default the workspace it was dropped on is shown and the window focused, `follow-window #false` only sends it), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
+//! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `only-layer \"NS\"`: blur only those layer namespaces, whole surface, on any layer, `layer-radius N` / `layer-radius \"NS\" N`: corner radius of the blur behind layer surfaces, all of them or one namespace, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `close-kill { … }` (`enable`, `seconds N`: a window that is still open `N` seconds (5 by default, 1 to 3600, fractions are fine) after it was asked to close, by a bind, the overview, a taskbar or `jff msg close`, has its process killed with SIGKILL and a toast says why, off by default, the process is that of the window's Wayland client, so every window of that process goes with it, X11 windows are never killed, they all share the process of xwayland-satellite), `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none, `border N` / `border-color \"#RRGGBBAA\"`: the border around the workspace squares (the stage's frames and the workspace wall's squares), width 0 for none, `backdrop-color \"#RRGGBBAA\"`: a colour over the whole monitor behind the stage's frames, over the wallpaper and its blur, without alpha it is a static colour, `search-background-color \"#RRGGBBAA\"` / `search-font-color \"#RRGGBBAA\"`: the fill and the text colour of the search box and the app grid, `container-background-color "#RRGGBBAA"`: the fill of a tiling container's cell, over the blur when `blur` is on, `#00000000` for the blur alone, `container-border-width N` / `container-border-color "#RRGGBBAA"`: the border of that cell, width 0 for none, `container-font-color \"#RRGGBBAA\"`: the colour of the name written on that cell, `container-radius N`: its corner radius, fill, border and blur, half of `radius` by default), `workspace-wall` (`workspace-wall`, or a block with `height N`, `thumbnails`, `follow-window`: dragging a thumbnail in the overview shows a square per workspace to drop it on, and by default the workspace it was dropped on is shown and the window focused, `follow-window #false` only sends it), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `zoom { … }` (the screen magnifier: `step N`: how much one `zoom-in` or `zoom-out` multiplies the zoom by, 1.2 by default, `max N`: the most `zoom-in` zooms, 20 by default, `tracking "proportional"|"centered"|"push"|"disabled"`: how the part shown follows the pointer, `pointer "scale"|"keep"|"hide"`: what the pointer looks like while zoomed, `animation-ms N`: how long a change of the zoom takes, 200 by default, 0 for none, `scroll-modifier "Super"|"Alt"|"Ctrl"|"Shift"|"none"`: scrolling the wheel with it held zooms, Super by default), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
 //! `window-rule { … }` (any number, `match app-id="…"`, `title="…"` (contains), `tag="…"` (xdg-toplevel-tag), `dialog=#true`, `restored=#true`, all of which have to hold, then `open-on-output "NAME"|"pointer"`, `open-workspace N`, `open-maximized`, `open-size W H`, `open-position X Y` (from the top left of the monitor, kept inside it, floating), `open-centered` (the middle of the monitor, floating, not together with `open-position`), `floating`, `open-in-container "NAME"` (the window joins the container of that name on its workspace and monitor, and starts one with that name, filling the usable area, when there is none, needs `tiling-containers`, a dialog joins too, so use `match dialog=#false` or a tag to keep dialogs out, and a rule that sets it cannot say `floating`), `tag "NAME"` (gives the window a tag of yours that `match tag` and every rule sees, whatever its title, a rule with only a `tag` does not use up the one rule a window gets), `opacity N` (0 to 1, how opaque the window is drawn, its blur stays as strong as it is, set when the window opens, a rule with only an `opacity` does not use up the one rule a window gets either), `sdr-white N` (10 to 1000 cd/m², the window's own SDR white on a monitor with `hdr`: its white is shown at N instead of at the monitor's `sdr-white`, and the rest of its light goes up or down with it, so a game or a video player can be brighter or dimmer than the desktop, HDR content included, its subsurfaces follow but its popups do not), `sdr` (the window is read as plain sRGB whatever color description its client set, and what it says about how bright it gets is ignored, with `sdr-white` it is sRGB at that white, a rule with only `sdr` or `sdr-white` does not use up the one rule a window gets either, and both are set when the window opens like `opacity`), `content-type "game"|"video"|"photo"|"none"` (what the window shows, whatever its client says through wp_content_type_v1: with `game`, `video` or `photo`, a fullscreen window covering a monitor with `content-type-hint` makes jff tell the monitor a game, a video or a photo is on screen, which X11 and Proton windows cannot say for themselves, `none` ignores what the client says, set when the window opens like `opacity`, a rule with only a `content-type` does not use up the one rule a window gets either), `always-on-top` (the window stays above the ones that are not, even above a fullscreen one, set when the window opens like `opacity`, a rule with only an `always-on-top` does not use up the one rule a window gets either), `sticky` (the window is shown on every workspace of its monitor, set when the window opens, a window that joins a container is not sticky, a rule with only a `sticky` does not use up the one rule a window gets either), the first rule that fits a window applies), and
 //! `binds { "Combo" { action, } }` (`forward-key "APP-ID"` hands the key to that app's window without focusing it, for its own global hotkeys). Unknown top-level nodes are silently ignored, an
 //! unknown key *inside* a known block is an error.
@@ -97,6 +97,7 @@ pub use crate::primitives::input_settings::{
 };
 use crate::primitives::layout::MonitorTarget;
 use crate::primitives::tile_tree::Axis;
+use crate::primitives::zoom::{self, Pan, PointerStyle, Tracking};
 
 /// Default number of workspaces.
 pub const DEFAULT_WORKSPACES: usize = 9;
@@ -153,6 +154,9 @@ binds {
     Alt+Shift+R { reload-config; }
     Ctrl+Alt+BackSpace { quit; }
     Super+Escape { toggle-shortcuts-inhibit; }
+    Super+equal { zoom-in; }
+    Super+minus { zoom-out; }
+    Super+0 { zoom-reset; }
     Alt+1 { workspace 1; }
     Alt+2 { workspace 2; }
     Alt+3 { workspace 3; }
@@ -213,6 +217,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "overview",
     "workspace-wall",
     "hot-corner",
+    "zoom",
     "autostart",
     "sh-autostart",
     "outputs",
@@ -290,6 +295,15 @@ pub enum Action {
     ScreenshotWindow,
     /// Toggle the keyboard-shortcuts inhibitor of the focused window.
     ToggleShortcutsInhibit,
+    /// Zoom the screen in by one step, around the pointer (`zoom { step }`, up to `zoom { max }`).
+    ZoomIn,
+    /// Zoom the screen out by one step, down to the screen as it is.
+    ZoomOut,
+    /// Back to the screen as it is.
+    ZoomReset,
+    /// Move the part of the screen that is zoomed in on one way. Only the `push` and `disabled`
+    /// tracking leave it where it was put, the others bring it back to the pointer.
+    ZoomPan(Pan),
     /// Show or hide the stats overlay for the focused window: frame rates, vsync, VRR, HDR,
     /// direct scanout and why not. While it is shown the window is composited, so direct
     /// scanout and tearing are off (it says so).
@@ -326,6 +340,17 @@ pub enum Action {
     PowerOff,
     /// Stop the compositor.
     Quit,
+}
+
+impl Action {
+    /// Whether this is one of the screen zoom's actions, which also work while the overview or a
+    /// screenshot selection is open.
+    pub fn is_zoom(&self) -> bool {
+        matches!(
+            self,
+            Action::ZoomIn | Action::ZoomOut | Action::ZoomReset | Action::ZoomPan(_)
+        )
+    }
 }
 
 /// What the PC's power button does (`power-key`).
@@ -1715,6 +1740,7 @@ pub struct Config {
     overview: OverviewConfig,
     workspace_wall: Option<WorkspaceWallConfig>,
     hot_corner: Option<HotCorner>,
+    zoom: ZoomConfig,
     autostart: Vec<Action>,
     /// `window-rule` blocks, in file order.
     window_rules: Vec<WindowRule>,
@@ -1747,6 +1773,69 @@ enum DragModifier {
     Super,
     Ctrl,
     Shift,
+}
+
+impl DragModifier {
+    /// The modifier a config value names.
+    fn named(word: &str) -> Option<Self> {
+        match word.to_ascii_lowercase().as_str() {
+            "alt" => Some(Self::Alt),
+            "super" | "logo" | "mod4" => Some(Self::Super),
+            "ctrl" | "control" => Some(Self::Ctrl),
+            "shift" => Some(Self::Shift),
+            _ => None,
+        }
+    }
+
+    fn held(self, mods: &ModifiersState) -> bool {
+        match self {
+            Self::Alt => mods.alt,
+            Self::Super => mods.logo,
+            Self::Ctrl => mods.ctrl,
+            Self::Shift => mods.shift,
+        }
+    }
+}
+
+/// The most a change of the zoom can take, in milliseconds.
+pub const MAX_ZOOM_ANIMATION_MS: i32 = 2000;
+/// What one zoom step can multiply the zoom by, at least and at most.
+pub const ZOOM_STEP_RANGE: RangeInclusive<f64> = 1.01..=4.0;
+
+/// The `zoom { … }` block: how the screen magnifier behaves. The magnifier is always there, the
+/// block only tunes it, and the `zoom-*` binds and the scroll modifier turn it on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ZoomConfig {
+    /// What one `zoom-in` multiplies the zoom by and one `zoom-out` divides it by.
+    pub step: f64,
+    /// The zoom `zoom-in` stops at.
+    pub max: f64,
+    pub tracking: Tracking,
+    pub pointer: PointerStyle,
+    /// How long a change of the zoom takes.
+    pub animation: Duration,
+    /// Scrolling with it held zooms, `None` for no zoom by scrolling.
+    scroll_modifier: Option<DragModifier>,
+}
+
+impl Default for ZoomConfig {
+    fn default() -> Self {
+        Self {
+            step: zoom::DEFAULT_STEP,
+            max: zoom::DEFAULT_MAX,
+            tracking: Tracking::default(),
+            pointer: PointerStyle::default(),
+            animation: zoom::DEFAULT_ANIMATION,
+            scroll_modifier: Some(DragModifier::Super),
+        }
+    }
+}
+
+impl ZoomConfig {
+    /// Whether the modifier that makes the wheel zoom is held.
+    pub fn scroll_modifier_held(&self, mods: &ModifiersState) -> bool {
+        self.scroll_modifier.is_some_and(|m| m.held(mods))
+    }
 }
 
 impl Default for Config {
@@ -1792,6 +1881,7 @@ impl Default for Config {
                 overview: OverviewConfig::default(),
                 workspace_wall: None,
                 hot_corner: None,
+                zoom: ZoomConfig::default(),
                 autostart: Vec::new(),
                 window_rules: Vec::new(),
                 tiling_containers: false,
@@ -2175,6 +2265,11 @@ impl Config {
             Some(node) => parse_hot_corner(node).context("in hot-corner")?,
         };
 
+        let zoom = match doc.get("zoom") {
+            None => ZoomConfig::default(),
+            Some(node) => parse_zoom(node).context("in zoom")?,
+        };
+
         let mut autostart = Vec::new();
         for node in doc.nodes() {
             let name = node.name().value();
@@ -2278,6 +2373,7 @@ impl Config {
             overview,
             workspace_wall,
             hot_corner,
+            zoom,
             autostart,
             window_rules,
             tiling_containers,
@@ -2446,6 +2542,11 @@ impl Config {
     /// The hot corner, `None` when it is off (no block, `hot-corner 0`, or `size 0`).
     pub fn hot_corner(&self) -> Option<HotCorner> {
         self.hot_corner.clone()
+    }
+
+    /// The `zoom { … }` settings of the screen magnifier.
+    pub fn zoom(&self) -> ZoomConfig {
+        self.zoom
     }
 
     /// Whether `color-representation { yuv }` is on.
@@ -3755,6 +3856,73 @@ fn parse_hot_corner(node: &KdlNode) -> anyhow::Result<Option<HotCorner>> {
     }))
 }
 
+/// The `zoom { … }` block. A bare `zoom` leaves everything at its default.
+fn parse_zoom(node: &KdlNode) -> anyhow::Result<ZoomConfig> {
+    let mut config = ZoomConfig::default();
+    for child in node.children().map(KdlDocument::nodes).unwrap_or_default() {
+        match child.name().value() {
+            "step" => {
+                let step = float_arg(child)?;
+                if !ZOOM_STEP_RANGE.contains(&step) {
+                    bail!(
+                        "step takes a number from {} to {}",
+                        ZOOM_STEP_RANGE.start(),
+                        ZOOM_STEP_RANGE.end()
+                    );
+                }
+                config.step = step;
+            }
+            "max" => {
+                let max = float_arg(child)?;
+                if !(zoom::MIN_LEVEL..=zoom::MAX_LEVEL).contains(&max) {
+                    bail!(
+                        "max takes a number from {} to {}",
+                        zoom::MIN_LEVEL,
+                        zoom::MAX_LEVEL
+                    );
+                }
+                config.max = max;
+            }
+            "tracking" => {
+                config.tracking = match string_arg(child)?.to_ascii_lowercase().as_str() {
+                    "proportional" => Tracking::Proportional,
+                    "centered" | "centred" => Tracking::Centered,
+                    "push" => Tracking::Push,
+                    "disabled" | "off" => Tracking::Disabled,
+                    _ => bail!(
+                        "tracking takes \"proportional\", \"centered\", \"push\" or \"disabled\""
+                    ),
+                }
+            }
+            "pointer" => {
+                config.pointer = match string_arg(child)?.to_ascii_lowercase().as_str() {
+                    "scale" => PointerStyle::Scale,
+                    "keep" => PointerStyle::Keep,
+                    "hide" => PointerStyle::Hide,
+                    _ => bail!("pointer takes \"scale\", \"keep\" or \"hide\""),
+                }
+            }
+            "animation-ms" => {
+                let ms = int_arg(child, MAX_ZOOM_ANIMATION_MS)?;
+                config.animation = Duration::from_millis(u64::try_from(ms)?);
+            }
+            "scroll-modifier" => {
+                let word = string_arg(child)?;
+                config.scroll_modifier =
+                    if matches!(word.to_ascii_lowercase().as_str(), "none" | "off") {
+                        None
+                    } else {
+                        Some(DragModifier::named(&word).with_context(|| {
+                        "scroll-modifier takes \"Super\", \"Alt\", \"Ctrl\", \"Shift\" or \"none\""
+                    })?)
+                    };
+            }
+            other => bail!("unknown zoom setting {other:?}"),
+        }
+    }
+    Ok(config)
+}
+
 /// The `screenshot { … }` block.
 fn parse_screenshot(node: &KdlNode) -> anyhow::Result<ScreenshotConfig> {
     let mut config = ScreenshotConfig::default();
@@ -4181,6 +4349,13 @@ fn parse_action(node: &KdlNode) -> anyhow::Result<Action> {
         "screenshot-window" => no_args(Action::ScreenshotWindow),
         "toggle-shortcuts-inhibit" => no_args(Action::ToggleShortcutsInhibit),
         "toggle-stats" => no_args(Action::ToggleStats),
+        "zoom-in" => no_args(Action::ZoomIn),
+        "zoom-out" => no_args(Action::ZoomOut),
+        "zoom-reset" => no_args(Action::ZoomReset),
+        "zoom-pan-left" => no_args(Action::ZoomPan(Pan::Left)),
+        "zoom-pan-right" => no_args(Action::ZoomPan(Pan::Right)),
+        "zoom-pan-up" => no_args(Action::ZoomPan(Pan::Up)),
+        "zoom-pan-down" => no_args(Action::ZoomPan(Pan::Down)),
         "forward-key" => match <[String; 1]>::try_from(args) {
             Ok([app_id]) if !app_id.is_empty() => Ok(Action::ForwardKey(app_id)),
             _ => bail!("forward-key takes one app id, like forward-key \"com.obsproject.Studio\""),

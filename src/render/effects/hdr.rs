@@ -140,7 +140,7 @@ fn solid(space: WorkingSpace, element: &SolidColorRenderElement) -> SolidColorRe
 }
 
 /// The size of the working texture: the mode in the output's own orientation, width and height swapped for a quarter turn. The output's compositor turns the frame onto the panel, so the texture is never turned itself.
-fn oriented_size(output: &Output) -> Option<Size<i32, Physical>> {
+pub(super) fn oriented_size(output: &Output) -> Option<Size<i32, Physical>> {
     let mode = output.current_mode()?;
     Some(
         output
@@ -174,6 +174,8 @@ pub struct HdrFrame {
     pass: FinalPass,
     /// The content peak the last frame was drawn through, `None` when no visible surface stated one.
     content_peak: Option<f32>,
+    /// The part of the texture the output shows, enlarged to fill it (the zoom), `None` for all of it.
+    view: Option<Rectangle<f64, Buffer>>,
     program: GlesTexProgram,
 }
 
@@ -201,8 +203,17 @@ impl HdrFrame {
             age: 0,
             pass,
             content_peak: None,
+            view: None,
             program,
         })
+    }
+
+    /// Show only `view` of the texture, enlarged to fill the output, from the next `render` on (`None`: all of it). A new view damages the whole output: nothing in the texture changed, but the element would look unchanged to the output's compositor.
+    pub fn set_view(&mut self, view: Option<Rectangle<f64, Buffer>>) {
+        if view != self.view {
+            self.view = view;
+            self.damage.add([Rectangle::from_size(self.size)]);
+        }
     }
 
     /// The content peak the last frame went out through, in cd/m².
@@ -260,6 +271,7 @@ impl HdrFrame {
             damage: self.damage.snapshot(),
             program: self.program.clone(),
             pass: self.pass.with_content_peak(content_peak),
+            view: self.view,
         };
         Ok((element, states))
     }
@@ -274,6 +286,8 @@ pub struct HdrFrameElement {
     damage: DamageSnapshot<i32, Physical>,
     program: GlesTexProgram,
     pass: FinalPass,
+    /// The part of the texture that is drawn, all of it when `None`.
+    view: Option<Rectangle<f64, Buffer>>,
 }
 
 impl HdrFrameElement {
@@ -292,6 +306,7 @@ impl HdrFrameElement {
             damage: DamageBag::default().snapshot(),
             program,
             pass,
+            view: None,
         })
     }
 }
@@ -306,7 +321,9 @@ impl Element for HdrFrameElement {
     }
 
     fn src(&self) -> Rectangle<f64, Buffer> {
-        Rectangle::from_size((f64::from(self.size.w), f64::from(self.size.h)).into())
+        self.view.unwrap_or_else(|| {
+            Rectangle::from_size((f64::from(self.size.w), f64::from(self.size.h)).into())
+        })
     }
 
     fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {

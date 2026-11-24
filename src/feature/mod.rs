@@ -25,3 +25,4 @@ pub mod stats;
 pub mod window_anim;
 pub mod workspaces;
 pub mod xwayland;
+pub mod zoom;
