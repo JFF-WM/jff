@@ -36,6 +36,12 @@ impl CloseWatch {
         self.protected.insert(pid);
     }
 
+    /// Whether `pid` is a process jff never kills (xwayland-satellite): it owns windows that
+    /// are not its own.
+    pub fn is_protected(&self, pid: u32) -> bool {
+        self.protected.contains(&pid)
+    }
+
     /// Whether a kill of `pid` is allowed: not jff, not a protected process, not pid 0 or 1.
     fn may_kill(&self, pid: u32) -> bool {
         pid > 1 && pid != std::process::id() && !self.protected.contains(&pid)

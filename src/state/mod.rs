@@ -105,6 +105,7 @@ use crate::primitives::layout;
 use crate::protocol::color_management::ColorManagement;
 use crate::protocol::color_representation::ColorRepresentationManager;
 use crate::protocol::ext_foreign_toplevel::ExtForeignToplevel;
+use crate::protocol::ext_foreign_toplevel_pidfd::ExtForeignToplevelPidfd;
 use crate::protocol::fixes::Fixes;
 use crate::protocol::foreign_toplevel::ForeignToplevel;
 use crate::protocol::gamma_control::GammaControl;
@@ -274,6 +275,9 @@ pub struct JffState {
     pub wlr_screencopy: WlrScreencopy,
     /// ext-foreign-toplevel-list-v1 (the read-only list of open windows).
     pub ext_foreign_toplevel: ExtForeignToplevel,
+    /// ext-foreign-toplevel-pidfd-v1: a pidfd for each window of the list above
+    /// (`protocol/ext_foreign_toplevel_pidfd.rs`).
+    pub ext_foreign_toplevel_pidfd: ExtForeignToplevelPidfd,
     pub foreign_toplevel: ForeignToplevel,
     /// ext-workspace-v1 (the workspaces, for bars).
     pub ext_workspace: ExtWorkspace,
@@ -580,6 +584,7 @@ impl JffState {
         let image_copy = ImageCopy::new(&display_handle);
         let wlr_screencopy = WlrScreencopy::new(&display_handle);
         let ext_foreign_toplevel = ExtForeignToplevel::new(&display_handle);
+        let ext_foreign_toplevel_pidfd = ExtForeignToplevelPidfd::new(&display_handle);
         let foreign_toplevel = ForeignToplevel::new(&display_handle);
         let ext_workspace = ExtWorkspace::new(&display_handle);
         let session_lock = SessionLock::new(&display_handle);
@@ -716,6 +721,7 @@ impl JffState {
             image_copy,
             wlr_screencopy,
             ext_foreign_toplevel,
+            ext_foreign_toplevel_pidfd,
             foreign_toplevel,
             ext_workspace,
             session_lock,
@@ -800,10 +806,12 @@ impl JffState {
     }
 
     pub fn insert_client(&mut self, stream: std::os::unix::net::UnixStream) {
-        if let Err(err) = self
-            .display_handle
-            .insert_client(stream, Arc::new(ClientState::default()))
-        {
+        let data = ClientState {
+            // Taken now, from the socket, so the pid can't have been reused yet.
+            pidfd: crate::protocol::ext_foreign_toplevel_pidfd::peer_pidfd(&stream),
+            ..ClientState::default()
+        };
+        if let Err(err) = self.display_handle.insert_client(stream, Arc::new(data)) {
             tracing::warn!("error inserting client: {err}");
         }
     }
@@ -816,6 +824,9 @@ pub struct ClientState {
     /// Set when the client connected through a socket made by wp_security_context_v1, that is
     /// from inside a sandbox. Such clients don't see the privileged globals.
     pub security_context: Option<SecurityContext>,
+    /// A pidfd of the process that connected (`SO_PEERPIDFD`, Linux 6.5+), for
+    /// ext-foreign-toplevel-pidfd-v1. `None` on an older kernel.
+    pub pidfd: Option<std::os::fd::OwnedFd>,
 }
 
 /// Did this client connect from inside a sandbox (a wp_security_context_v1 socket)?

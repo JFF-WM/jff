@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="ext_foreign_toplevel_pidfd_v1">
+  <copyright>
+    Copyright © 2026 Phosh.mobi e.V.
+    Copyright © 2026 Julian Orth
+
+    Permission to use, copy, modify, distribute, and sell this
+    software and its documentation for any purpose is hereby granted
+    without fee, provided that the above copyright notice appear in
+    all copies and that both that copyright notice and this permission
+    notice appear in supporting documentation, and that the name of
+    the copyright holders not be used in advertising or publicity
+    pertaining to distribution of the software without specific,
+    written prior permission.  The copyright holders make no
+    representations about the suitability of this software for any
+    purpose.  It is provided "as is" without express or implied
+    warranty.
+
+    THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
+    SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+    FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
+    SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
+    AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+    ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+    THIS SOFTWARE.
+  </copyright>
+
+  <description summary="Get process identifier">
+    This protocol allows compositors and clients to associate
+    ext_foreign_toplevel_pidfd_handle_v1 objects with PIDFDs, file descriptors
+    referring to tasks.
+
+    The key words "must", "must not", "required", "shall", "shall not",
+    "should", "should not", "recommended",  "may", and "optional" in this
+    document are to be interpreted as described in IETF RFC 2119.
+
+    Warning! The protocol described in this file is currently in the testing
+    phase. Backward compatible changes may be added together with the
+    corresponding interface version bump. Backward incompatible changes can
+    only be done by creating a new major version of the extension.
+  </description>
+
+  <interface name="ext_foreign_toplevel_pidfd_list_v1" version="1">
+    <description summary="toplevel list extension">
+      This interface describes a global that can act as an extension to a
+      ext_foreign_toplevel_list_v1 object.
+
+      When this global is bound, it is initially not associated with a
+      ext_foreign_toplevel_list_v1. The client must send the set_list request to
+      set the underlying toplevel list.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy this object">
+        If the set_list request was used, this request should only be sent after
+        the client has received the ext_foreign_toplevel_list_v1.finished event
+        of the underlying toplevel list.
+
+        See ext_foreign_toplevel_list_v1.destroy.
+      </description>
+    </request>
+
+    <request name="set_list">
+      <description summary="set the underlying toplevel list">
+        The client can send this request to associate this object with a
+        ext_foreign_toplevel_list_v1 object.
+
+        This request must not be sent more than once for this object. Otherwise
+        the list_set error is emitted.
+
+        Each ext_foreign_toplevel_list_v1 can be used at most once as an
+        argument to this request. Otherwise the has_extension error is emitted.
+
+        After processing this request, the compositor will start emitting
+        toplevel events.
+      </description>
+      <arg name="list" type="object" interface="ext_foreign_toplevel_list_v1"/>
+    </request>
+
+    <event name="toplevel">
+      <description summary="a pidfd handle has been created">
+        The compositor sends this event to create a
+        ext_foreign_toplevel_pidfd_handle_v1 extending a
+        ext_foreign_toplevel_handle_v1.
+
+        The compositor can send this event at any time, however, each
+        ext_foreign_toplevel_handle_v1 appears at most once in this event.
+
+        The ext_foreign_toplevel_handle_v1 argument was created by the
+        underlying list.
+
+        The compositor will not send this event after the
+        ext_foreign_toplevel_list_v1.finished event of the underlying list; or
+        before the set_list request has been processed.
+      </description>
+      <arg name="id" type="new_id" interface="ext_foreign_toplevel_pidfd_handle_v1"/>
+      <arg name="parent" type="object" interface="ext_foreign_toplevel_handle_v1"
+           summary="the underlying handle"/>
+    </event>
+
+    <enum name="error">
+      <entry name="list_set" value="1"
+             summary="set_list was called multiple times"/>
+      <entry name="has_extension" value="2"
+             summary="set_list was called with a toplevel list that was already used"/>
+    </enum>
+  </interface>
+
+  <interface name="ext_foreign_toplevel_pidfd_handle_v1" version="1">
+    <description summary="toplevel handle extension">
+      This object is an extension for a toplevel handle. The compositor uses it
+      to send additional properties for the handle.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy this object">
+        Destroys this object.
+      </description>
+    </request>
+
+    <event name="pidfd">
+      <description summary="the handle has a pidfd">
+        This event sets the PIDFD of the handle. The PIDFD is double-buffered
+        state. See ext_foreign_toplevel_handle_v1.done.
+
+        The file descriptor refers to a PIDFD.
+      </description>
+      <arg name="fd" type="fd"/>
+    </event>
+
+    <event name="no_fd">
+      <description summary="the handle has no pidfd">
+        This event unsets the PIDFD of the handle. The PIDFD is double-buffered
+        state. See ext_foreign_toplevel_handle_v1.done.
+      </description>
+    </event>
+  </interface>
+
+</protocol>

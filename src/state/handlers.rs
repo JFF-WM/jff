@@ -169,6 +169,7 @@ impl SecurityContextHandler for JffState {
             .loop_handle
             .insert_source(source, move |stream, _, state| {
                 let data = ClientState {
+                    pidfd: crate::protocol::ext_foreign_toplevel_pidfd::peer_pidfd(&stream),
                     security_context: Some(security_context.clone()),
                     ..ClientState::default()
                 };

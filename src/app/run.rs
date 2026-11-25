@@ -335,6 +335,7 @@ pub fn run() -> anyhow::Result<()> {
         state.publish_events();
         state.publish_foreign_toplevels();
         state.publish_ext_foreign_toplevels();
+        state.publish_ext_foreign_toplevel_pidfds();
         state.publish_ext_workspaces();
         state.refresh_capture_colors();
         state.service_image_copy();

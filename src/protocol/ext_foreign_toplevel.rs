@@ -23,7 +23,7 @@ use crate::state::{is_sandboxed, JffState};
 pub struct ExtForeignToplevel {
     list: ForeignToplevelListState,
     /// The windows on the list, by window id.
-    toplevels: Vec<(u64, ForeignToplevelHandle)>,
+    pub(crate) toplevels: Vec<(u64, ForeignToplevelHandle)>,
 }
 
 impl ExtForeignToplevel {
