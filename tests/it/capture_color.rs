@@ -1,8 +1,8 @@
 //! Tests for `jff_wm::primitives::capture_color`.
 
 use jff_wm::primitives::capture_color::{frame_description_fits, preferred};
-use jff_wm::primitives::color::{ImageDescription, Luminance, NamedPrimaries, NamedTf};
 use jff_wm::primitives::color::TransferFunction;
+use jff_wm::primitives::color::{ImageDescription, Luminance, NamedPrimaries, NamedTf};
 
 fn hdr(peak: u32) -> ImageDescription {
     ImageDescription {

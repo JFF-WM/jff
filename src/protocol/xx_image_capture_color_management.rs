@@ -144,7 +144,9 @@ impl JffState {
     /// monitor went into or out of HDR mode. Cheap, runs after every round of requests and
     /// every pass of the event loop.
     pub fn refresh_capture_colors(&mut self) {
-        self.xx_capture_color.sources.retain(|object| object.is_alive());
+        self.xx_capture_color
+            .sources
+            .retain(|object| object.is_alive());
         for object in &self.xx_capture_color.sources {
             let Some(data) = object.data::<SourceColors>() else {
                 continue;

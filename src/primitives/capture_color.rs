@@ -13,7 +13,8 @@ use super::gamut::is_plain_srgb;
 /// an HDR one (a 10-bit format of a monitor in HDR mode): `hdr` is the description of that
 /// monitor, `None` for any other source (and for a monitor not in HDR mode).
 pub fn preferred(hdr: Option<ImageDescription>) -> ImageDescription {
-    hdr.filter(is_pq_bt2020).unwrap_or_else(ImageDescription::srgb)
+    hdr.filter(is_pq_bt2020)
+        .unwrap_or_else(ImageDescription::srgb)
 }
 
 /// Whether the picture of a frame can be said to be `description`. `hdr_picture`: the frame is
