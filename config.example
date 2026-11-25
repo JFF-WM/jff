@@ -16,7 +16,7 @@
 // top-level nodes, which are otherwise silently ignored. An unknown key INSIDE a known block
 // is an error.
 //
-// Flags (`maximize-new-windows`, `focus-follows-mouse`, `warp-mouse-to-focus`, `no-client-decorations`, `numlock`, `include-cursor`,
+// Flags (`maximize-new-windows`, `maximize-fill`, `focus-follows-mouse`, `warp-mouse-to-focus`, `no-client-decorations`, `numlock`, `include-cursor`,
 // `copy-to-clipboard`, `enable` in `log`, `hdr`, ...) accept a bare name (`numlock`),
 // `#true` / `#false`, `"true"` / `"false"`, `"yes"` / `"no"` or `"on"` / `"off"`.
 // Colors are written as "#rgb", "#rgba", "#rrggbb" or "#rrggbbaa".
@@ -52,6 +52,12 @@ workspace-wall {
 
 // Maximize new windows when they open (on by default). A window-rule can override it.
 maximize-new-windows #true
+
+// A maximized window fills all the room panels (layer-shell surfaces with an exclusive zone)
+// leave free, or the whole monitor when there are none: no gap around it, no border and
+// square corners. On by default. `#false` brings back the `gaps` around it, its border and
+// its rounded corners. Snapped windows and tiling containers keep their gaps either way.
+maximize-fill #true
 
 // Draw windows without client-side decorations (titlebars) where the app allows it.
 no-client-decorations #true
@@ -182,7 +188,8 @@ global-hotkeys #true
 // Looks
 // ---------------------------------------------------------------------------------------------
 
-// Gap in px around maximized windows and between snapped ones: 0 to 512, 0 by default.
+// Gap in px around snapped windows and tiling containers: 0 to 512, 0 by default. Maximized
+// windows ignore it unless `maximize-fill` is off.
 gaps 10
 
 // Corner radius of windows in px: 0 to 256, 0 by default.

@@ -176,7 +176,7 @@ pub(crate) fn thumb_elements(
             .to_physical_precise_round(scale);
     // The thumbnail's corners shrink with it: its rectangle on screen and the radius times the
     // scale. Fullscreen windows are square, as they are live.
-    let rounding = if is_fullscreen(window) {
+    let rounding = if is_flush(window) {
         None
     } else {
         Rounding::new(
@@ -369,7 +369,7 @@ pub fn overview_elements(
         .and_then(|i| plan.thumbs.get(i))
         .filter(|_| outline_width > 0)
     {
-        let radius = if is_fullscreen(window) {
+        let radius = if is_flush(window) {
             0
         } else {
             (f64::from(plan.radius) * thumb.scale).round() as i32

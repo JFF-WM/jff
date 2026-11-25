@@ -679,7 +679,7 @@ impl JffState {
             self.desk.set_output_where(|w| *w == first, &output.name());
         }
         self.desk.raise_where(|w| *w == first);
-        let area = self.usable_rect(target);
+        let area = self.container_area(target);
         self.tile_and_configure(id, area);
         true
     }
@@ -776,7 +776,7 @@ impl JffState {
             }) else {
                 continue;
             };
-            let area = self.usable_rect(rect);
+            let area = self.container_area(rect);
             if area != old {
                 self.tile_and_configure(id, area);
             }
@@ -1142,6 +1142,13 @@ impl JffState {
     /// The rectangle a container started by a snap fills: the usable area of `monitor`, the same
     /// as any other container.
     fn snapped_area(&self, monitor: Rect) -> Rect {
+        self.container_area(monitor)
+    }
+
+    /// The rectangle a container fills on the monitor at `monitor`: what panels leave free,
+    /// kept `gaps` (or the border width) away from the edges. `maximize-fill` does not touch
+    /// it: the windows of a container are tiles with borders, not maximized windows.
+    fn container_area(&self, monitor: Rect) -> Rect {
         geom::inset_rect(self.panel_free_rect(monitor), self.config.maximize_inset())
     }
 

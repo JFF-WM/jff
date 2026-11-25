@@ -83,7 +83,7 @@ use crate::render::effects::border::BorderPaint;
 use crate::render::effects::framebuffer_effect::WallpaperSnapshot;
 use crate::render::effects::gamut;
 use crate::render::effects::hdr as hdr_frame;
-use crate::render::effects::rounded::is_fullscreen;
+use crate::render::effects::rounded::is_flush;
 use crate::render::elements::JffElement;
 use crate::state::JffState;
 
@@ -1372,7 +1372,7 @@ impl JffState {
             ),
             size,
             // A fullscreen window has square corners.
-            corner_radius: if is_fullscreen(window) {
+            corner_radius: if is_flush(window) {
                 0
             } else {
                 (f64::from(radius) * scale_factor).round() as i32

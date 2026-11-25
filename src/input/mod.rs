@@ -1217,6 +1217,7 @@ impl JffState {
                 let old_input = self.config.input().clone();
                 let old_cursor = self.config.cursor().clone();
                 self.config = config;
+                crate::render::effects::rounded::set_maximize_fill(self.config.maximize_fill());
                 crate::logging::apply(self.config.log());
                 self.osd.set_family(&self.config.osd().font);
                 let offered = !self.config.color_management().off;

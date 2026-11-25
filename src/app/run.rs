@@ -164,6 +164,7 @@ pub fn run() -> anyhow::Result<()> {
     // The log file is a config setting, so it can only start now. What was logged before this
     // (reading the file) went to stderr only.
     crate::logging::apply(config.log());
+    crate::render::effects::rounded::set_maximize_fill(config.maximize_fill());
 
     // Remember the file as it is read now, so saving it later is noticed.
     let mut config_watch = ConfigWatch::new(Config::stamp());

@@ -25,7 +25,7 @@ use smithay::wayland::compositor::{with_states, SurfaceAttributes, SurfaceData};
 use super::blur::BlurOptions;
 use super::border::{border_element, BorderPaint};
 use super::framebuffer_effect::{FramebufferEffect, FramebufferEffectElement, WallpaperSnapshot};
-use super::rounded::{is_fullscreen, Rounding};
+use super::rounded::{is_flush, is_fullscreen, Rounding};
 use super::surface_alpha::multiplier_of;
 use super::{gamut, yuv};
 use crate::config;
@@ -425,7 +425,7 @@ pub fn window_elements(
 
     // A fullscreen window covers the monitor with square corners, and stays eligible for
     // direct scanout.
-    let rounding = if is_fullscreen(window) {
+    let rounding = if is_flush(window) {
         None
     } else {
         Rounding::new(
@@ -575,7 +575,7 @@ fn scaled_window(
     )
         .into();
     let slot: Point<i32, Physical> = place.to_physical_precise_round(scale);
-    let rounding = if is_fullscreen(window) {
+    let rounding = if is_flush(window) {
         None
     } else {
         Rounding::new(

@@ -453,3 +453,29 @@ fn zoom_actions_can_be_bound_and_are_there_by_default() {
         Some(&Action::ZoomReset)
     );
 }
+
+#[test]
+fn maximized_windows_fill_their_area_unless_told_otherwise() {
+    let config = Config::parse("").unwrap();
+    assert!(config.maximize_fill());
+    assert_eq!(config.maximized_inset(), 0);
+
+    // The gap and the border are still there for snapped windows and containers.
+    let config = Config::parse("gaps 10\nborder { width 3; }").unwrap();
+    assert!(config.maximize_fill());
+    assert_eq!(config.maximized_inset(), 0);
+    assert_eq!(config.maximize_inset(), 10);
+
+    let config = Config::parse("gaps 10\nmaximize-fill #false").unwrap();
+    assert!(!config.maximize_fill());
+    assert_eq!(config.maximized_inset(), 10);
+
+    let config = Config::parse("maximize-fill #false\nborder { width 4; }").unwrap();
+    assert_eq!(config.maximized_inset(), 4);
+
+    assert!(Config::parse("maximize-fill #true")
+        .unwrap()
+        .maximize_fill());
+    assert!(Config::parse("maximize-fill \"maybe\"").is_err());
+    assert!(jff_wm::config::TOP_LEVEL_NODES.contains(&"maximize-fill"));
+}

@@ -22,6 +22,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
@@ -320,6 +321,31 @@ impl Rounding {
 pub fn is_fullscreen(window: &Window) -> bool {
     window.toplevel().is_some_and(|t| {
         t.with_pending_state(|s| s.states.contains(xdg_toplevel::State::Fullscreen))
+    })
+}
+
+/// `maximize-fill`: whether a maximized window is drawn flush, see [`set_maximize_fill`].
+static MAXIMIZE_FILL: AtomicBool = AtomicBool::new(true);
+
+/// Tell the renderer whether maximized windows are drawn flush (no border, no rounded
+/// corners). Set from the config when it is read, and again when it is reloaded, so the
+/// many places that draw a window need not carry the setting around.
+pub fn set_maximize_fill(on: bool) {
+    MAXIMIZE_FILL.store(on, Ordering::Relaxed);
+}
+
+/// Whether `window` is drawn flush against its area, with no border and square corners: a
+/// fullscreen window always, a maximized one with `maximize-fill` (on by default).
+///
+/// Unlike [`is_fullscreen`] this says nothing about direct scanout or colour passthrough,
+/// which stay for fullscreen windows only.
+pub fn is_flush(window: &Window) -> bool {
+    window.toplevel().is_some_and(|t| {
+        t.with_pending_state(|s| {
+            s.states.contains(xdg_toplevel::State::Fullscreen)
+                || (MAXIMIZE_FILL.load(Ordering::Relaxed)
+                    && s.states.contains(xdg_toplevel::State::Maximized))
+        })
     })
 }
 

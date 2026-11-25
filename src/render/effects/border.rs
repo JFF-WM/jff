@@ -48,7 +48,7 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Transform};
 
-use super::rounded::{is_fullscreen, make_ring_px, ring_area, RingMotion, RingStyle};
+use super::rounded::{is_flush, make_ring_px, ring_area, RingMotion, RingStyle};
 use super::surface_alpha::window_multiplier;
 use crate::config::{Border, BorderAnimation, BorderLook};
 use crate::primitives::alpha;
@@ -280,7 +280,7 @@ pub fn border_element(
     paint: Option<BorderPaint>,
 ) -> Option<BorderElement> {
     let paint = paint.filter(|p| p.style.on())?;
-    if geo.size.w <= 0 || geo.size.h <= 0 || is_fullscreen(window) {
+    if geo.size.w <= 0 || geo.size.h <= 0 || is_flush(window) {
         return None;
     }
     let id = window.toplevel()?.wl_surface().id();

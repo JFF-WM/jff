@@ -81,7 +81,7 @@ use crate::render::effects::blur::BlurOptions;
 use crate::render::effects::framebuffer_effect::{FramebufferEffectElement, WallpaperSnapshot};
 use crate::render::effects::gamut;
 use crate::render::effects::ripple::ripple_element;
-use crate::render::effects::rounded::{is_fullscreen, ring_element, Rounding};
+use crate::render::effects::rounded::{is_flush, ring_element, Rounding};
 use crate::render::elements::JffElement;
 use crate::state::JffState;
 

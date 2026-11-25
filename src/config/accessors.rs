@@ -25,6 +25,23 @@ impl Config {
         self.gaps.max(self.border.width)
     }
 
+    /// Whether a maximized window fills the area panels leave free edge to edge (`maximize-fill`,
+    /// on by default): no gap around it, no border, square corners. Snapped windows and
+    /// containers keep their gaps.
+    pub fn maximize_fill(&self) -> bool {
+        self.maximize_fill
+    }
+
+    /// Pixels kept free on each side of a maximized window: none with `maximize-fill`,
+    /// otherwise [`Config::maximize_inset`].
+    pub fn maximized_inset(&self) -> i32 {
+        if self.maximize_fill {
+            0
+        } else {
+            self.maximize_inset()
+        }
+    }
+
     /// Pixels between two snapped windows: `gaps`, but at least twice the border width, since
     /// each window's border is drawn outside it and the two rings must not touch.
     pub fn snap_gap(&self) -> i32 {
@@ -38,8 +55,8 @@ impl Config {
         self.popup_radius.unwrap_or(self.radius)
     }
 
-    /// Pixels kept free on each side of a maximized window (0 by default). Fullscreen windows
-    /// ignore it.
+    /// The `gaps` setting in pixels (0 by default): kept around snapped windows and containers,
+    /// and around maximized ones when `maximize-fill` is off. Fullscreen windows ignore it.
     pub fn gaps(&self) -> i32 {
         self.gaps
     }

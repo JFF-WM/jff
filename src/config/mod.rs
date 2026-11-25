@@ -3,7 +3,7 @@
 //! Looked up at `$JFF_CONFIG`, then `$XDG_CONFIG_HOME/jff/config.kdl`, then
 //! `~/.config/jff/config.kdl`. When none exists, the built-in [`DEFAULT_CONFIG`] is used.
 //!
-//! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9, per-output }` for a workspace of its own on every monitor), `maximize-new-windows`,
+//! The format is one KDL document. Top-level nodes: `workspaces` (`workspaces 9`, or `workspaces { count 9, per-output }` for a workspace of its own on every monitor), `maximize-new-windows`, `maximize-fill` (on by default: a maximized window fills the room panels leave free, with no gap, no border and square corners, off gives it `gaps`, its border and its corners back),
 //! `global-hotkeys` (xx-hotkey-v1: clients bind their own hotkeys, off by default), `window-animations { … }` (`open \"fade\"|\"zoom\"|\"slide\"|\"pop\"|\"none\"`, `open-ms`, `close-ms`), `no-client-decorations`, `drag-modifier`, `gaps`, `radius`, `popup-radius`, `border { … }`, `screenshot { … }`,
 //! `log { … }` (`enable`, `path "FILE-OR-FOLDER/"`, `level "info"|"debug"`: write jff's log to a file, off by default),
 //! `keyboard { … }`, `blur { … }` (`passes`, `offset`, `all-windows`, `all-layers`, `behind-windows`, `ignore-layer \"NS\"`, `only-layer \"NS\"`: blur only those layer namespaces, whole surface, on any layer, `layer-radius N` / `layer-radius \"NS\" N`: corner radius of the blur behind layer surfaces, all of them or one namespace, `ignore-window \"APP-ID\"`: no blur for that app, `only-window \"APP-ID\"`: blur only those apps, whole window), `osd { … }`, `close-kill { … }` (`enable`, `seconds N`: a window that is still open `N` seconds (5 by default, 1 to 3600, fractions are fine) after it was asked to close, by a bind, the overview, a taskbar or `jff msg close`, has its process killed with SIGKILL and a toast says why, off by default, the process is that of the window's Wayland client, so every window of that process goes with it, X11 windows are never killed, they all share the process of xwayland-satellite), `switcher { … }`, `overview { … }` (`selection-color "#RRGGBBAA"`, `selection-width N`: the outline of the selected thumbnail in the overview and the switcher, `selection-width 0` for none, `animation-ms N`: how long the overview takes to open and close, 0 for none, `border N` / `border-color \"#RRGGBBAA\"`: the border around the workspace squares (the stage's frames and the workspace wall's squares), width 0 for none, `backdrop-color \"#RRGGBBAA\"`: a colour over the whole monitor behind the stage's frames, over the wallpaper and its blur, without alpha it is a static colour, `search-background-color \"#RRGGBBAA\"` / `search-font-color \"#RRGGBBAA\"`: the fill and the text colour of the search box and the app grid, `container-background-color "#RRGGBBAA"`: the fill of a tiling container's cell, over the blur when `blur` is on, `#00000000` for the blur alone, `container-border-width N` / `container-border-color "#RRGGBBAA"`: the border of that cell, width 0 for none, `container-font-color \"#RRGGBBAA\"`: the colour of the name written on that cell, `container-radius N`: its corner radius, fill, border and blur, half of `radius` by default), `workspace-wall` (`workspace-wall`, or a block with `height N`, `thumbnails`, `follow-window`: dragging a thumbnail in the overview shows a square per workspace to drop it on, and by default the workspace it was dropped on is shown and the window focused, `follow-window #false` only sends it), `hot-corner { … }` (`size`, `dwell-ms`, `touch-size`: the corner a finger swipes out of to do the same on a touchscreen, 0 for none, `monitor \"NAME\"`, `hot-corner 0` or no block: off, while on, the pointer can't change monitor through the corner's `size` px of edge), `zoom { … }` (the screen magnifier: `step N`: how much one `zoom-in` or `zoom-out` multiplies the zoom by, 1.2 by default, `max N`: the most `zoom-in` zooms, 20 by default, `tracking "proportional"|"centered"|"push"|"disabled"`: how the part shown follows the pointer, `pointer "scale"|"keep"|"hide"`: what the pointer looks like while zoomed, `animation-ms N`: how long a change of the zoom takes, 200 by default, 0 for none, `scroll-modifier "Super"|"Alt"|"Ctrl"|"Shift"|"none"`: scrolling the wheel with it held zooms, Super by default), `autostart` / `sh-autostart` lines, `outputs { output "NAME" { … } }`,
@@ -65,7 +65,7 @@
 //! - `split` (in `output`) takes a quoted string (`"auto"` / `"horizontal"` / `"vertical"`): how a
 //!   window that joins a tiling container on that monitor is split off, `"vertical"` for a portrait
 //!   monitor (one above the other). `"auto"`, the default, cuts the leaf along its longer side.
-//! - `maximize-new-windows`, `focus-new-windows`, `warp-mouse-to-focus`, `focus-follows-mouse`, `no-client-decorations`, `numlock`, `include-cursor`,
+//! - `maximize-new-windows`, `maximize-fill`, `focus-new-windows`, `warp-mouse-to-focus`, `focus-follows-mouse`, `no-client-decorations`, `numlock`, `include-cursor`,
 //!   `copy-to-clipboard` and `enable` (in `log`) accept a bare name (`numlock`), `true` / `false`, `"true"` /
 //!   `"false"`, `"yes"` / `"no"`, or `"on"` / `"off"`.
 //! - `clipboard { … }` (`off`, `history N`: how many copies are kept, 1 to 500, 1 by default,
@@ -110,7 +110,7 @@ pub const DEFAULT_WORKSPACES: usize = 9;
 /// Upper bound for `workspaces`.
 pub const MAX_WORKSPACES: usize = 64;
 
-/// Default gap (px) around maximized windows: none.
+/// Default gap (px) around snapped windows and containers (and maximized ones with `maximize-fill` off): none.
 pub const DEFAULT_GAPS: i32 = 0;
 /// Upper bound for `gaps`.
 pub const MAX_GAPS: i32 = 512;
@@ -194,6 +194,7 @@ binds {
 pub const TOP_LEVEL_NODES: &[&str] = &[
     "workspaces",
     "maximize-new-windows",
+    "maximize-fill",
     "focus-new-windows",
     "warp-mouse-to-focus",
     "focus-follows-mouse",
@@ -1699,6 +1700,8 @@ pub struct Config {
     /// Every monitor has its own shown workspace, `workspaces { per-output }`.
     workspaces_per_output: bool,
     maximize_new_windows: bool,
+    /// `maximize-fill`: a maximized window fills the area panels leave free, edge to edge, with no gap, no border and square corners. On by default.
+    maximize_fill: bool,
     /// `focus-new-windows`: a new window takes the keyboard. Off means strict focus stealing prevention. On by default.
     focus_new_windows: bool,
     /// `warp-mouse-to-focus`: the pointer follows the keyboard focus. Off by default.
@@ -1859,6 +1862,7 @@ impl Default for Config {
                 workspaces: DEFAULT_WORKSPACES,
                 workspaces_per_output: false,
                 maximize_new_windows: true,
+                maximize_fill: true,
                 focus_new_windows: true,
                 warp_mouse_to_focus: false,
                 focus_follows_mouse: false,
@@ -2138,6 +2142,7 @@ impl Config {
         };
 
         let maximize_new_windows = parse_flag(&doc, "maximize-new-windows", true)?;
+        let maximize_fill = parse_flag(&doc, "maximize-fill", true)?;
         let focus_new_windows = parse_flag(&doc, "focus-new-windows", true)?;
         let warp_mouse_to_focus = parse_flag(&doc, "warp-mouse-to-focus", false)?;
         let focus_follows_mouse = parse_flag(&doc, "focus-follows-mouse", false)?;
@@ -2351,6 +2356,7 @@ impl Config {
             workspaces,
             workspaces_per_output,
             maximize_new_windows,
+            maximize_fill,
             focus_new_windows,
             warp_mouse_to_focus,
             focus_follows_mouse,
