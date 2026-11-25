@@ -37,7 +37,7 @@ use smithay::backend::renderer::Frame;
 use smithay::desktop::Window;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::utils::user_data::UserDataMap;
-use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Transform};
+use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Size, Transform};
 
 use crate::primitives::gamut::Conversion;
 use crate::primitives::yuv::Correction;
@@ -587,9 +587,54 @@ pub fn make_ring(
     color: [f32; 4],
     motion: RingMotion,
 ) -> Option<PixelShaderElement> {
-    let program = ring_program(renderer)?;
     // the uniforms are in frame pixels, the area in logical ones
     let scale = super::frame_scale::get() as f32;
+    build_ring(
+        renderer,
+        area,
+        border as f32 * scale,
+        radius as f32 * scale,
+        motion.margin as f32 * scale,
+        color,
+        motion,
+    )
+}
+
+/// A ring whose size, `border`, `radius` and `margin` are all in frame pixels, for an element
+/// that is placed on the pixel grid itself (the window borders). The shader measures in the
+/// element's own size, so a size in frame pixels is what keeps `border` and `radius` the
+/// pixels they say. The element's rectangle on screen is not taken from the one made here:
+/// whoever wraps it reports its own `geometry` and `location`.
+pub fn make_ring_px(
+    renderer: &mut GlesRenderer,
+    size: Size<i32, Physical>,
+    border: i32,
+    radius: i32,
+    margin: i32,
+    color: [f32; 4],
+    motion: RingMotion,
+) -> Option<PixelShaderElement> {
+    build_ring(
+        renderer,
+        Rectangle::from_size((size.w, size.h).into()),
+        border as f32,
+        radius as f32,
+        margin as f32,
+        color,
+        motion,
+    )
+}
+
+fn build_ring(
+    renderer: &mut GlesRenderer,
+    area: Rectangle<i32, Logical>,
+    border: f32,
+    radius: f32,
+    margin: f32,
+    color: [f32; 4],
+    motion: RingMotion,
+) -> Option<PixelShaderElement> {
+    let program = ring_program(renderer)?;
     // colors are sRGB in the config, an HDR output wants them in its working space
     let color = super::gamut::tint(color);
     let motion = RingMotion {
@@ -602,14 +647,14 @@ pub fn make_ring(
         None,
         1.0,
         vec![
-            Uniform::new("border", border as f32 * scale),
-            Uniform::new("radius", radius as f32 * scale),
+            Uniform::new("border", border),
+            Uniform::new("radius", radius),
             Uniform::new("color", color),
             Uniform::new("color2", motion.color2),
             Uniform::new("phase", motion.phase),
             Uniform::new("animated", motion.amount),
             Uniform::new("style", motion.style.uniform()),
-            Uniform::new("margin", motion.margin as f32 * scale),
+            Uniform::new("margin", margin),
             Uniform::new("paper", if motion.paper { 1.0f32 } else { 0.0 }),
         ],
         Kind::Unspecified,

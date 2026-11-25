@@ -47,6 +47,7 @@ mod outputs;
 mod overview_grid;
 mod overview_mode;
 mod pacing;
+mod pixel_snap;
 mod popup_grab;
 mod region;
 mod render_device;

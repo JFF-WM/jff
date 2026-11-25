@@ -27,6 +27,7 @@ pub mod layout;
 pub mod layout_memory;
 pub mod layout_template;
 pub mod overview_grid;
+pub mod pixel_snap;
 pub mod region;
 pub mod scroll_steps;
 pub mod stats;

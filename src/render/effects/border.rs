@@ -1,10 +1,17 @@
 //! Window borders.
 //!
 //! A border is a hollow rounded ring just outside the window's geometry, drawn with the same
-//! shader as the overview's selection outline (`rounded::make_ring`). It sits behind the
+//! shader as the overview's selection outline (`rounded::make_ring_px`). It sits behind the
 //! window and its blur, and its outer corners are `radius + width` so the curves stay
 //! concentric with the window's own corners. Fullscreen windows have none, so direct scanout
 //! is untouched, and with no `border { }` block nothing here runs.
+//!
+//! The ring is laid out on the frame's pixel grid, not in logical pixels. The window's rectangle
+//! is snapped edge by edge (`primitives::pixel_snap`), the ring is that rectangle grown by the
+//! border in whole frame pixels, and the shader is given the size of that ring in frame pixels
+//! along with the border, radius and margin. At a fractional scale this keeps the border the
+//! same thickness on every side and the same on every window, and its curves concentric with
+//! the window's (the window's radius is `frame_scale::px(radius)`, so is the ring's).
 //!
 //! Each window keeps a small state: whether it had focus the last time it was drawn, the colour
 //! and animation strength the current fade started from, and the ring it was last given. When
@@ -41,11 +48,12 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Transform};
 
-use super::rounded::{is_fullscreen, make_ring, ring_area, RingMotion, RingStyle};
+use super::rounded::{is_fullscreen, make_ring_px, ring_area, RingMotion, RingStyle};
 use super::surface_alpha::window_multiplier;
 use crate::config::{Border, BorderAnimation, BorderLook};
 use crate::primitives::alpha;
 use crate::primitives::overview_grid::{ease_out_cubic, progress};
+use crate::primitives::pixel_snap::{grow, snap_rect, thickness};
 
 /// What a window's border looks like right now, from the config and the focus.
 #[derive(Clone, Copy, Debug)]
@@ -158,9 +166,49 @@ fn scale_120() -> u32 {
     (super::frame_scale::get() * 120.0).round() as u32
 }
 
-/// Logical pixels as the frame pixels a damage band has to cover.
-fn band_px(value: i32) -> i32 {
-    (f64::from(value) * super::frame_scale::get()).ceil() as i32
+/// A ring in frame pixels: where it is on screen and how thick, how round and how far out it
+/// reaches, all whole pixels.
+#[derive(Clone, Copy, Debug)]
+struct RingPixels {
+    /// The ring's rectangle: the window's, snapped, grown by the border and the margin.
+    outer: Rectangle<i32, Physical>,
+    /// Ring thickness, at least one pixel.
+    border: i32,
+    /// Corner radius of the window inside the ring, the same pixels the window is rounded by.
+    radius: i32,
+    /// Room around the ring for smoke, bloom, curtains or the paper's shadow.
+    margin: i32,
+}
+
+impl RingPixels {
+    /// The ring around `window` (frame coordinates, logical) for a `border` and a `margin` in
+    /// logical pixels and a corner `radius`, at the scale of the frame being built.
+    fn new(window: Rectangle<i32, Logical>, border: i32, radius: i32, margin: i32) -> Self {
+        let scale = super::frame_scale::get();
+        let border = thickness(border, scale);
+        let margin = super::frame_scale::px(margin);
+        let inner = snap_rect(
+            (window.loc.x, window.loc.y, window.size.w, window.size.h),
+            scale,
+        );
+        let (x, y, w, h) = grow(inner, border + margin);
+        Self {
+            outer: Rectangle::new((x, y).into(), (w, h).into()),
+            border,
+            radius: super::frame_scale::px(radius),
+            margin,
+        }
+    }
+
+    /// How far in from the outer edge the straight sides of the ring reach, for the damage.
+    fn edge(&self) -> i32 {
+        self.border + 1 + self.margin
+    }
+
+    /// How far in the corners reach, for the damage.
+    fn reach(&self) -> i32 {
+        self.radius + self.border + 1 + self.margin
+    }
 }
 
 struct State {
@@ -341,7 +389,16 @@ pub fn border_element(
         return Some(element);
     }
 
-    let inner = make_ring(renderer, key.area, width, radius, key.color, key.motion)?;
+    let ring = RingPixels::new(geo, width, radius, key.motion.margin);
+    let inner = make_ring_px(
+        renderer,
+        ring.outer.size,
+        ring.border,
+        ring.radius,
+        ring.margin,
+        key.color,
+        key.motion,
+    )?;
     // The id stays, the commit moves on: Smithay then repaints the ring's band, not the whole
     // rectangle it would if the element were a new one.
     let (element_id, mut commit) =
@@ -351,8 +408,9 @@ pub fn border_element(
         id: element_id,
         commit,
         inner,
-        edge: band_px(width + 1 + key.motion.margin),
-        reach: band_px(radius + width + 1 + key.motion.margin),
+        outer: ring.outer,
+        edge: ring.edge(),
+        reach: ring.reach(),
     };
     STATES.with(|states| {
         if let Some(state) = states.borrow_mut().get_mut(&id) {
@@ -416,7 +474,16 @@ pub fn container_border_element(
     if let Some(element) = cached {
         return Some(element);
     }
-    let inner = make_ring(renderer, key.area, key.width, radius, key.color, key.motion)?;
+    let ring = RingPixels::new(area, style.width, radius, 0);
+    let inner = make_ring_px(
+        renderer,
+        ring.outer.size,
+        ring.border,
+        ring.radius,
+        ring.margin,
+        key.color,
+        key.motion,
+    )?;
     let (element_id, mut commit) =
         previous.unwrap_or_else(|| (Id::new(), CommitCounter::default()));
     commit.increment();
@@ -424,8 +491,9 @@ pub fn container_border_element(
         id: element_id,
         commit,
         inner,
-        edge: band_px(style.width + 1),
-        reach: band_px(radius + style.width + 1),
+        outer: ring.outer,
+        edge: ring.edge(),
+        reach: ring.reach(),
     };
     CONTAINER_RINGS.with(|rings| {
         rings.borrow_mut().insert(id, (key, element.clone()));
@@ -444,6 +512,9 @@ pub struct BorderElement {
     id: Id,
     commit: CommitCounter,
     inner: PixelShaderElement,
+    /// Where the ring is on screen, in frame pixels. `inner` is only the shader and its size,
+    /// which is this rectangle's: the placement is ours, snapped to the pixel grid.
+    outer: Rectangle<i32, Physical>,
     /// How far in from the outer edge the straight sides of the ring reach, in pixels.
     edge: i32,
     /// How far in the corners of the ring reach, in pixels.
@@ -459,8 +530,8 @@ impl Element for BorderElement {
         self.commit
     }
 
-    fn location(&self, scale: Scale<f64>) -> Point<i32, Physical> {
-        self.inner.location(scale)
+    fn location(&self, _scale: Scale<f64>) -> Point<i32, Physical> {
+        self.outer.loc
     }
 
     fn src(&self) -> Rectangle<f64, Buffer> {
@@ -471,20 +542,20 @@ impl Element for BorderElement {
         self.inner.transform()
     }
 
-    fn geometry(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
-        self.inner.geometry(scale)
+    fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.outer
     }
 
     fn damage_since(
         &self,
-        scale: Scale<f64>,
+        _scale: Scale<f64>,
         commit: Option<CommitCounter>,
     ) -> DamageSet<i32, Physical> {
         if commit == Some(self.commit) {
             return DamageSet::default();
         }
         // Every change repaints the whole band: the colours change everywhere.
-        let size = self.inner.geometry(scale).size;
+        let size = self.outer.size;
         let rects: Vec<Rectangle<i32, Physical>> =
             band_rects((size.w, size.h), self.edge, self.reach)
                 .into_iter()
