@@ -422,7 +422,7 @@ fn zoom_actions_can_be_bound_and_are_there_by_default() {
     use jff_wm::primitives::zoom::Pan;
 
     let config = Config::parse(
-        "binds { Alt+Z { zoom-in; } Alt+X { zoom-out; } Alt+C { zoom-reset; } Alt+H { zoom-pan-left; } }",
+        "binds {\n    Alt+z { zoom-in; }\n    Alt+x { zoom-out; }\n    Alt+c { zoom-reset; }\n    Alt+h { zoom-pan-left; }\n}\n",
     )
     .unwrap();
     let mods = |alt: bool| {

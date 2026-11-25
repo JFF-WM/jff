@@ -1143,7 +1143,8 @@ fn the_snapshot_has_every_group_by_default() {
         format!(
             "{{\"event\":\"snapshot\",\"windows\":[{},{}],\"workspace\":2,\"count\":9,\
                  \"focused\":2,\"outputs\":[{},{}],\"overview\":false,\"screenshot\":false,\
-                 \"locked\":false,\"popups\":[],\"layers\":[]}}",
+                 \"locked\":false,\"popups\":[],\"layers\":[],\"dbus_annotations\":[],\
+                 \"keyboard\":{{\"active\":null,\"layouts\":[]}}}}",
             s.windows[0].to_json(),
             s.windows[1].to_json(),
             s.outputs[0].to_json(),
