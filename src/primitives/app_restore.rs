@@ -2,7 +2,8 @@
 //! Wayland.
 //!
 //! The list has a line for every open window: the app id, the workspace (0-based) and the name
-//! of the monitor it is on, separated by tabs. An app with windows on two workspaces has two
+//! of the monitor it is on, then (when known) the pid and the pidfs id of its process,
+//! separated by tabs. The id tells the same process from a recycled pid on the next start. An app with windows on two workspaces has two
 //! lines. Lines are sorted, so the file only changes when a window comes, goes or moves. Text
 //! the app chooses (its id) and the monitor name are escaped (`\\`, `\t`, `\n`, `\r`). A line
 //! with only an app id is fine (no place known), and a line that doesn't parse is skipped.
@@ -18,6 +19,39 @@ pub struct Placement {
     pub workspace: Option<usize>,
     /// The monitor's name. Empty: not known.
     pub output: String,
+    /// The process behind the window, with `proc_id` its identity. Written only when the
+    /// kernel gives pidfds unique ids (pidfs, Linux 6.9+), so that after a restart a pid that
+    /// was recycled is told from the process that really was there. `None`: not known.
+    pub pid: Option<u32>,
+    /// The pidfs inode of the process's pidfd: never reused, unlike the pid.
+    pub proc_id: Option<u64>,
+    /// The window's title when last seen. Tells apart the windows of one app (Firefox) when
+    /// they are placed again. Empty: not known.
+    pub title: String,
+    /// The tiling container the window was in, by name. Empty: not in one.
+    pub container: String,
+    /// Where the window was among the leaves of that container, in tree order.
+    pub slot: Option<usize>,
+    /// The arrangement of that container as `Template::to_text` writes it, the same on every
+    /// line of the container. Empty: not known.
+    pub layout: String,
+    /// Whether the window was maximized (including a maximized container member).
+    pub maximized: bool,
+}
+
+/// Whether the process a window belonged to is still there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessState {
+    Alive,
+    Dead,
+    /// No identity was saved, or the kernel can't say.
+    Unknown,
+}
+
+/// Whether an app is still running, from the state of the processes its saved windows had: one
+/// that is alive is enough. Dead and unknown both mean the app has to be started again.
+pub fn app_survived(states: impl IntoIterator<Item = ProcessState>) -> bool {
+    states.into_iter().any(|s| s == ProcessState::Alive)
 }
 
 /// What to remember out of the places of the open windows: windows without an app id dropped
@@ -37,6 +71,36 @@ pub fn sorted(placements: impl IntoIterator<Item = Placement>) -> Vec<Placement>
         .collect();
     list.sort();
     list
+}
+
+/// What to trust of a saved list after a restart: when the machine was rebooted since it was
+/// written (or that cannot be told), the pids and pidfs ids in it belong to another boot. Both
+/// counters start over at boot and move in step, so an old pid and id can match an unrelated
+/// live process and make a dead app look alive. They are dropped, the rest of the line stays.
+pub fn without_stale_identity(mut list: Vec<Placement>, same_boot: bool) -> Vec<Placement> {
+    if !same_boot {
+        for place in &mut list {
+            place.pid = None;
+            place.proc_id = None;
+        }
+    }
+    list
+}
+
+/// Which of the saved `titles` (in the order they are given out) belongs to a window titled
+/// `title`: the first one that is the same, else the first one. `None` when there are none.
+pub fn pick_by_title<'a>(titles: impl IntoIterator<Item = &'a str>, title: &str) -> Option<usize> {
+    let title = title.trim();
+    let titles: Vec<&str> = titles.into_iter().collect();
+    if titles.is_empty() {
+        return None;
+    }
+    if !title.is_empty() {
+        if let Some(i) = titles.iter().position(|t| t.trim() == title) {
+            return Some(i);
+        }
+    }
+    Some(0)
 }
 
 /// The apps in the list, each once, sorted: what is started.
@@ -89,6 +153,37 @@ pub fn format_apps(placements: &[Placement]) -> String {
         }
         out.push('\t');
         out.push_str(&escape(&p.output));
+        out.push('\t');
+        if let Some(pid) = p.pid {
+            out.push_str(&pid.to_string());
+        }
+        out.push('\t');
+        if let Some(id) = p.proc_id {
+            out.push_str(&id.to_string());
+        }
+        if !p.title.is_empty() || !p.container.is_empty() {
+            out.push('\t');
+            out.push_str(&escape(&p.title));
+        }
+        if !p.container.is_empty() {
+            out.push('\t');
+            out.push_str(&escape(&p.container));
+            out.push('\t');
+            if let Some(slot) = p.slot {
+                out.push_str(&slot.to_string());
+            }
+            out.push('\t');
+            out.push_str(&escape(&p.layout));
+        }
+        if p.maximized {
+            let fields = 5
+                + usize::from(!p.title.is_empty() || !p.container.is_empty())
+                + if p.container.is_empty() { 0 } else { 3 };
+            for _ in fields..10 {
+                out.push('\t');
+            }
+            out.push_str("true");
+        }
         out.push('\n');
     }
     out
@@ -98,7 +193,9 @@ pub fn format_apps(placements: &[Placement]) -> String {
 pub fn parse_apps(text: &str) -> Vec<Placement> {
     let parsed = text.lines().filter_map(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() > 3 {
+        // Up to ten fields: app id, workspace, monitor, pid, process id, title, container, slot,
+        // layout, maximized. A maximized window writes all ten, so ten has to parse.
+        if fields.len() > 10 {
             return None;
         }
         let workspace = match fields.get(1).map(|f| f.trim()) {
@@ -109,6 +206,13 @@ pub fn parse_apps(text: &str) -> Vec<Placement> {
             app_id: unescape(fields[0]),
             workspace,
             output: fields.get(2).map(|f| unescape(f)).unwrap_or_default(),
+            pid: fields.get(3).and_then(|f| f.trim().parse().ok()),
+            proc_id: fields.get(4).and_then(|f| f.trim().parse().ok()),
+            title: fields.get(5).map(|f| unescape(f)).unwrap_or_default(),
+            container: fields.get(6).map(|f| unescape(f)).unwrap_or_default(),
+            slot: fields.get(7).and_then(|f| f.trim().parse().ok()),
+            layout: fields.get(8).map(|f| unescape(f)).unwrap_or_default(),
+            maximized: fields.get(9).is_some_and(|f| *f == "true" || *f == "1"),
         })
     });
     sorted(parsed)

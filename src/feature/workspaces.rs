@@ -58,6 +58,7 @@ impl JffState {
         // The windows of apps with a session are saved as they are, before every frame.
         self.session_flush();
         // With `restore-apps`, the apps that are open, for the next session.
+        self.app_restore_enforce();
         self.app_restore_flush();
         // Before the monitors are looked at: a member that left its zone's monitor is out of
         // the zone by then.

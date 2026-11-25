@@ -582,6 +582,25 @@ fn window_app_id_finds_its_entry() {
 }
 
 #[test]
+fn window_app_id_can_match_the_desktop_exec_program() {
+    let firefox_esr = DesktopEntry {
+        id: "firefox-esr".to_owned(),
+        name: "Firefox ESR".to_owned(),
+        exec: "/usr/lib/firefox-esr/firefox %u".to_owned(),
+        ..DesktopEntry::default()
+    };
+    let brave = DesktopEntry {
+        id: "com.brave.Browser".to_owned(),
+        name: "Brave Browser".to_owned(),
+        exec: "/opt/brave.com/brave/brave-browser %U".to_owned(),
+        ..DesktopEntry::default()
+    };
+    let entries = [firefox_esr, brave];
+    assert_eq!(entry_for_app_id(&entries, "firefox"), Some(0));
+    assert_eq!(entry_for_app_id(&entries, "brave-browser"), Some(1));
+}
+
+#[test]
 fn browser_web_apps_are_found_by_their_long_id() {
     let youtube = parse_desktop_entry(
         "msedge-agimnkijcaahngcdmfeangaknmldooml-Default",

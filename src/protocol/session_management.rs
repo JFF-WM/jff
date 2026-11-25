@@ -696,6 +696,26 @@ impl JffState {
         );
     }
 
+    /// The workspace and the monitor `surface` is on, for `restore-apps`. Unlike
+    /// [`JffState::session_snapshot`] it does not need a usable saved size, which a maximized or
+    /// snapped window (a browser, say) may not have. `None` until the window has shown something.
+    pub(crate) fn session_place(&self, surface: &WlSurface) -> Option<(usize, String)> {
+        let entry = self.desk.all_top_down().find(|e| {
+            e.window
+                .toplevel()
+                .is_some_and(|t| t.wl_surface() == surface)
+        })?;
+        if !entry.fitted {
+            return None;
+        }
+        let size = entry.window.geometry().size;
+        let rects = self.output_rects();
+        let output = layout::nearest(layout::center(entry.pos, (size.w, size.h)), &rects)
+            .and_then(|i| self.outputs.get(i))
+            .map_or_else(|| entry.output.clone(), |output| output.name());
+        Some((entry.workspace, output))
+    }
+
     /// The state of `surface` as it should be saved. `None` until the window has shown
     /// something: before that its place and size are just a guess.
     pub(crate) fn session_snapshot(&self, surface: &WlSurface) -> Option<SavedWindow> {

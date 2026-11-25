@@ -16,7 +16,7 @@
 
 use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 use std::os::unix::io::AsRawFd;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use smithay::reexports::wayland_server::backend::GlobalId;
 use smithay::reexports::wayland_server::{
@@ -32,7 +32,9 @@ use super::ext_foreign_toplevel_pidfd_bindings::server::ext_foreign_toplevel_pid
     self, ExtForeignToplevelPidfdListV1,
 };
 use crate::ipc::WindowId;
+use crate::primitives::app_restore::ProcessState;
 use crate::state::{is_sandboxed, ClientState, JffState};
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 
 /// `SO_PEERPIDFD` from `<asm-generic/socket.h>`, Linux 6.5. Written out so an older `libc`
 /// crate still builds.
@@ -70,6 +72,80 @@ fn open_pidfd(pid: u32) -> Option<OwnedFd> {
     }
     // SAFETY: on success the kernel made a new descriptor that nothing else owns.
     Some(unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) })
+}
+
+/// The pidfs inode of a pidfd: a 64-bit id the kernel never gives to a second process.
+pub fn pidfd_inode(fd: &impl AsRawFd) -> Option<u64> {
+    // SAFETY: `stat` is plain data and `fstat` fills it for an open descriptor.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+        return None;
+    }
+    Some(st.st_ino as u64)
+}
+
+/// Whether pidfds have their own inode each (pidfs, Linux 6.9+). Before that every pidfd shares
+/// one anonymous inode, which would call a recycled pid "the same process". Told by comparing
+/// the pidfds of two different processes.
+fn pidfs_supported() -> bool {
+    static OK: OnceLock<bool> = OnceLock::new();
+    *OK.get_or_init(|| {
+        let id = |pid: u32| open_pidfd(pid).and_then(|fd| pidfd_inode(&fd));
+        let me = std::process::id();
+        let Some(mine) = id(me) else {
+            return false;
+        };
+        // Any other process will do: the parent first (same user almost always), pid 1 as the
+        // fallback. Without a second process to compare with, the feature stays off.
+        // SAFETY: `getppid` takes no arguments and cannot fail.
+        let parent = unsafe { libc::getppid() } as u32;
+        [parent, 1]
+            .into_iter()
+            .filter(|&pid| pid != 0 && pid != me)
+            .find_map(id)
+            .is_some_and(|other| other != mine)
+    })
+}
+
+/// Whether the process `pid` with pidfs id `proc_id` is still running. No `/proc`: a new pidfd
+/// for the pid has to carry the same id (else the pid was recycled, so the process is gone), and
+/// then `poll` says whether it exited (readable) or not.
+pub fn process_state(pid: u32, proc_id: Option<u64>) -> ProcessState {
+    let Some(proc_id) = proc_id else {
+        return ProcessState::Unknown;
+    };
+    if !pidfs_supported() {
+        return ProcessState::Unknown;
+    }
+    // SAFETY: `pidfd_open` only reads its two integer arguments.
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    if raw < 0 {
+        return if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            ProcessState::Dead
+        } else {
+            ProcessState::Unknown
+        };
+    }
+    // SAFETY: on success the kernel made a new descriptor that nothing else owns.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw as libc::c_int) };
+    match pidfd_inode(&fd) {
+        Some(id) if id == proc_id => {}
+        // A different process has the pid now.
+        Some(_) => return ProcessState::Dead,
+        None => return ProcessState::Unknown,
+    }
+    let mut poll = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid `pollfd`, timeout 0 so it never blocks.
+    let rc = unsafe { libc::poll(&mut poll, 1, 0) };
+    match rc {
+        r if r > 0 && poll.revents & libc::POLLIN != 0 => ProcessState::Dead,
+        r if r >= 0 => ProcessState::Alive,
+        _ => ProcessState::Unknown,
+    }
 }
 
 /// What jff keeps for `ext_foreign_toplevel_pidfd_list_v1` objects.
@@ -182,6 +258,25 @@ impl JffState {
             }
         }
         self.ext_foreign_toplevel_pidfd.lists = lists;
+    }
+
+    /// The pid and pidfs id of the process behind the window of `surface`, for the list
+    /// `restore-apps` keeps. `None` for Xwayland windows (the client is xwayland-satellite), and
+    /// when the kernel has no unique pidfd ids.
+    pub(crate) fn window_process_identity(&self, surface: &WlSurface) -> Option<(u32, u64)> {
+        if !pidfs_supported() {
+            return None;
+        }
+        let client = surface.client()?;
+        let pid = u32::try_from(client.get_credentials(&self.display_handle).ok()?.pid).ok()?;
+        if self.close_watch.is_protected(pid) {
+            return None;
+        }
+        let id = match client.get_data::<ClientState>()?.pidfd.as_ref() {
+            Some(fd) => pidfd_inode(fd)?,
+            None => pidfd_inode(&open_pidfd(pid)?)?,
+        };
+        Some((pid, id))
     }
 
     /// The pidfd of the process that owns window `id`, `None` when there is no window, no

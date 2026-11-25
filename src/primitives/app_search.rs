@@ -209,7 +209,8 @@ pub fn parse_desktop_entry(id: &str, source: &str, text: &str, env: &Env) -> Opt
 /// Windows only say an app id, so this guesses from the strongest evidence down: the desktop
 /// file's ID, its `StartupWMClass=`, its icon name, the last part of a reverse-DNS ID
 /// (`org.gnome.Nautilus` for `nautilus`) or the app id's own last part (`org.mozilla.firefox`
-/// for `firefox`), then its name, and last any long opaque token of the app id (a browser's
+/// for `firefox`), the executable named by `Exec=`, then its name, and last any long opaque token
+/// of the app id (a browser's
 /// web app id, as in `crx__<id>`, `chrome-<id>-Default`) found in the entry's ID, class or
 /// command (`--app-id=<id>`). Case is ignored. `None` when nothing fits.
 pub fn entry_for_app_id(entries: &[DesktopEntry], app_id: &str) -> Option<usize> {
@@ -223,12 +224,24 @@ pub fn entry_for_app_id(entries: &[DesktopEntry], app_id: &str) -> Option<usize>
     }
     let tail = |text: &str| text.rsplit('.').next().unwrap_or(text).to_lowercase();
     let wanted_tail = tail(&wanted);
-    let tiers: [&dyn Fn(&DesktopEntry) -> bool; 6] = [
+    let tiers: [&dyn Fn(&DesktopEntry) -> bool; 7] = [
         &|e| e.id.to_lowercase() == wanted,
         &|e| !e.wm_class.is_empty() && e.wm_class.to_lowercase() == wanted,
         &|e| !e.icon.is_empty() && e.icon.to_lowercase() == wanted,
         &|e| tail(&e.id) == wanted,
         &|e| e.id.to_lowercase() == wanted_tail,
+        // Some desktop files are named after a package or distribution variant
+        // (for example firefox-esr.desktop), while the window reports the
+        // executable's app id ("firefox"). Match the actual Exec program too.
+        &|e| {
+            exec_argv(e)
+                .first()
+                .and_then(|program| std::path::Path::new(program).file_name())
+                .is_some_and(|program| {
+                    let program = program.to_string_lossy().to_lowercase();
+                    program == wanted || program == wanted_tail
+                })
+        },
         &|e| e.name.to_lowercase() == wanted,
     ];
     if let Some(found) = tiers

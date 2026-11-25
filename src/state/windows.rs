@@ -124,6 +124,8 @@ impl JffState {
         // in a window on its own workspace). A window the app put back itself, a dialog and one
         // a client placed in a zone are left to what places them. What the window's rule says
         // about the monitor and workspace gives way, the rest of it stays.
+        let mut restore_named: Option<(WindowRule, String)> = None;
+        let mut restore_maximized = false;
         if restored.is_none() && !dialog && !zoned {
             if let Some(place) = self.app_restore_place(root) {
                 let target = WindowRule {
@@ -139,6 +141,10 @@ impl JffState {
                     place.output
                 );
                 self.apply_rule_monitor_and_workspace(root, &target);
+                restore_maximized = place.maximized;
+                if !place.container.is_empty() {
+                    restore_named = Some((target.clone(), place.container.clone()));
+                }
                 if let Some(rule) = rule.as_mut() {
                     rule.output = None;
                     rule.workspace = None;
@@ -177,13 +183,24 @@ impl JffState {
                 );
             }
         }
+        let from_restore = restore_named.is_some();
+        let named = restore_named.or(named);
         if let (Some((rule, name)), Some(window)) = (named.as_ref(), window.as_ref()) {
             self.focus_before_open.remove(root);
             if self.open_in_named_container(window, rule, name) {
+                if from_restore {
+                    self.app_restore_container_joined(root, name);
+                }
+                if restore_maximized {
+                    self.set_mode(&toplevel, WindowMode::Maximized);
+                }
                 return;
             }
         }
         if window.is_some_and(|window| self.join_container_on_map(&window)) {
+            if restore_maximized {
+                self.set_mode(&toplevel, WindowMode::Maximized);
+            }
             return;
         }
         if let Some(saved) = restored.as_ref() {
@@ -196,6 +213,10 @@ impl JffState {
                 self.session_finish_restore(&toplevel, saved);
                 return;
             }
+        }
+        if restore_maximized {
+            self.set_mode(&toplevel, WindowMode::Maximized);
+            return;
         }
         let mut ruled_floating = false;
         if let (None, Some(rule)) = (restored.as_ref(), rule.as_ref()) {

@@ -9,6 +9,11 @@
 //! same way the overview finds the app of a window, `primitives::app_search::entry_for_app_id`)
 //! and started once, however many windows it had.
 //!
+//! Each line also keeps the pid and the pidfs id of the window's process (pidfd, Linux 6.9+).
+//! At the start an app whose process is still running (a fresh pidfd with the same id that
+//! `poll` says has not exited) is not started again, one whose process exited, or whose pid was
+//! recycled, is. No `/proc`.
+//!
 //! The places are handed out as the windows open: the first window an app opens takes the
 //! first place saved for its app id, the next one the next, and so on, for [`GRACE`] after the
 //! start (this takes in the apps that `autostart` starts, and apps that open more than one
@@ -18,7 +23,7 @@
 //! app. A monitor that is not connected any more leaves the window where it opens by default.
 //! Windows an app puts back itself (xdg-session-management) keep the place that gives them.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -26,12 +31,16 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::IsAlive;
 
 use crate::config::Action;
+use crate::desk::WindowId;
 use crate::feature::app_index::AppIndex;
 use crate::feature::osd::toplevel_names;
 use crate::primitives::app_restore::{
-    app_ids, format_apps, is_autostarted, parse_apps, shell_line_command, sorted, Placement,
+    app_ids, app_survived, format_apps, is_autostarted, parse_apps, pick_by_title,
+    shell_line_command, sorted, without_stale_identity, Placement, ProcessState,
 };
 use crate::primitives::app_search::entry_for_app_id;
+use crate::primitives::layout_template::Template;
+use crate::protocol::ext_foreign_toplevel_pidfd::process_state;
 use crate::state::JffState;
 
 /// How often the restore looks whether the list of installed apps is ready.
@@ -41,6 +50,25 @@ pub const GIVE_UP: Duration = Duration::from_secs(10);
 /// How long after the start the saved places are handed to new windows, and how long an app that
 /// was started by the restore stays on the list without a window.
 const GRACE: Duration = Duration::from_secs(60);
+/// How long after a window got its saved place it is kept there: browsers can publish their
+/// real window title well after the first buffer, so keep matching and correcting placements
+/// for the full restore grace period.
+const ENFORCE: Duration = GRACE;
+
+/// A window the restore gave a saved place to.
+struct Assigned {
+    surface: WlSurface,
+    place: Placement,
+    since: Instant,
+    /// Where the window was when the restore last looked at it. A window found somewhere else
+    /// than here and than its place was moved by the user, not left behind by a late title.
+    seen: Option<(usize, String)>,
+    /// The user moved the window: the restore leaves its workspace and monitor alone.
+    released: bool,
+    /// Its place changed after it was put somewhere (a late title swapped places): its container
+    /// has to be put right once, not only its monitor and workspace.
+    refit: bool,
+}
 
 #[derive(Default)]
 pub struct AppRestore {
@@ -54,7 +82,7 @@ pub struct AppRestore {
     /// When the restore started waiting for the list of installed apps.
     waiting_since: Option<Instant>,
     /// The places not given to a window yet, by app id, in the order they are given out.
-    places: HashMap<String, VecDeque<Placement>>,
+    places: HashMap<String, Vec<Placement>>,
     /// Until when `places` are given out.
     places_until: Option<Instant>,
     /// Apps the restore started that have not shown a window yet, and when they were started.
@@ -62,8 +90,54 @@ pub struct AppRestore {
     /// The session is ending: the file is not touched any more.
     frozen: bool,
     /// Windows that were put in a saved place, so `container-template` can tell a window the
-    /// restore brought back from one the user opened.
-    placed: Vec<WlSurface>,
+    /// restore brought back from one the user opened, and so they can be kept there.
+    placed: Vec<Assigned>,
+    /// The windows that joined a container the restore is rebuilding, by container name, with
+    /// the place each had in it.
+    joined: HashMap<String, Vec<(WlSurface, usize)>>,
+    /// The arrangement saved for each container, by container name.
+    layouts: HashMap<String, String>,
+}
+
+fn container_key(name: &str, workspace: Option<usize>, output: &str) -> String {
+    format!(
+        "{name}\0{}\0{output}",
+        workspace.map_or_else(|| "?".to_owned(), |w| w.to_string())
+    )
+}
+
+fn workspace_path() -> Option<PathBuf> {
+    state_path().map(|path| path.with_file_name("last-workspace"))
+}
+
+fn boot_path() -> Option<PathBuf> {
+    state_path().map(|path| path.with_file_name("boot-id"))
+}
+
+/// The kernel's id of this boot. `None` when it can't be read.
+fn current_boot_id() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+}
+
+/// Whether the saved list was written in this boot, and note this boot for the next start.
+/// Unknown counts as another boot, so a stale pid never keeps an app from starting.
+fn same_boot_as_saved() -> bool {
+    let now = current_boot_id();
+    let path = boot_path();
+    let before = path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| text.trim().to_owned());
+    if let (Some(path), Some(now)) = (path.as_ref(), now.as_ref()) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, format!("{now}\n"));
+    }
+    matches!((before, now), (Some(before), Some(now)) if before == now)
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -107,7 +181,20 @@ impl JffState {
         if !self.config.restore_apps() {
             return;
         }
-        let loaded = load();
+        if let Some(path) = workspace_path() {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if let Some((output, workspace)) = text.trim_end().split_once('\t') {
+                    if let Ok(workspace) = workspace.parse::<usize>() {
+                        if !output.is_empty() && self.outputs.iter().any(|o| o.name() == output) {
+                            self.switch_workspace_on(output, workspace);
+                        } else {
+                            self.switch_workspace(workspace);
+                        }
+                    }
+                }
+            }
+        }
+        let loaded = without_stale_identity(load(), same_boot_as_saved());
         let apps = app_ids(&loaded);
         tracing::info!(
             "restore-apps: {} window(s) of {} app(s) from the last session",
@@ -124,7 +211,15 @@ impl JffState {
                     .places
                     .entry(place.app_id.clone())
                     .or_default()
-                    .push_back(place.clone());
+                    .push(place.clone());
+            }
+        }
+        for place in &loaded {
+            if !place.container.is_empty() && !place.layout.is_empty() {
+                self.app_restore.layouts.insert(
+                    container_key(&place.container, place.workspace, &place.output),
+                    place.layout.clone(),
+                );
             }
         }
         self.app_restore.places_until = Some(Instant::now() + GRACE);
@@ -152,23 +247,281 @@ impl JffState {
             }
             None => return None,
         }
-        let app_id = toplevel_names(root).0;
+        let (app_id, title) = toplevel_names(root);
         let key = app_id.trim();
         let places = self.app_restore.places.get_mut(key)?;
-        let place = places.pop_front();
+        let index = pick_by_title(places.iter().map(|p| p.title.as_str()), &title)?;
+        let place = places.remove(index);
         if places.is_empty() {
             self.app_restore.places.remove(key);
         }
-        if place.is_some() {
-            self.app_restore.placed.push(root.clone());
+        self.app_restore.placed.push(Assigned {
+            surface: root.clone(),
+            place: place.clone(),
+            since: Instant::now(),
+            seen: None,
+            released: false,
+            refit: false,
+        });
+        Some(place)
+    }
+
+    /// The window `root` has joined container `name`, which the restore is rebuilding: lay the
+    /// container out as it was, with the windows that are in it in the places they had.
+    pub(crate) fn app_restore_container_joined(&mut self, root: &WlSurface, name: &str) {
+        let Some(place) = self
+            .app_restore
+            .placed
+            .iter()
+            .find(|a| a.surface == *root)
+            .map(|a| a.place.clone())
+        else {
+            return;
+        };
+        let Some(slot) = place.slot else {
+            return;
+        };
+        let key = container_key(name, place.workspace, &place.output);
+        // It may have been counted in another container before its place changed.
+        for list in self.app_restore.joined.values_mut() {
+            list.retain(|(surface, _)| surface != root);
         }
-        place
+        self.app_restore
+            .joined
+            .entry(key.clone())
+            .or_default()
+            .push((root.clone(), slot));
+        let Some(template) = self
+            .app_restore
+            .layouts
+            .get(&key)
+            .and_then(|text| Template::parse(text).ok())
+        else {
+            return;
+        };
+        let Some(id) = self
+            .desk
+            .find_by(|w| w.toplevel().is_some_and(|t| t.wl_surface() == root))
+            .and_then(|e| e.container)
+        else {
+            return;
+        };
+        let mut joined = self
+            .app_restore
+            .joined
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        joined.retain(|(surface, _)| surface.alive());
+        joined.sort_by_key(|(_, slot)| *slot);
+        let prefer: Vec<WindowId> = joined
+            .iter()
+            .filter_map(|(surface, _)| {
+                self.desk
+                    .find_by(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
+                    .map(|e| e.id)
+            })
+            .collect();
+        let gap = self.config.snap_gap();
+        match self
+            .desk
+            .apply_container_layout_ordered(id, &template, |_| None, &prefer, gap)
+        {
+            Ok(_) => self.retile_container(id),
+            Err(why) => tracing::warn!("restore-apps: container {name:?} not laid out: {why:?}"),
+        }
     }
 
     /// The windows `restore-apps` put back that are still open, oldest first.
     pub(crate) fn app_restore_placed(&mut self) -> Vec<WlSurface> {
-        self.app_restore.placed.retain(|surface| surface.alive());
-        self.app_restore.placed.clone()
+        self.app_restore.placed.retain(|a| a.surface.alive());
+        self.app_restore
+            .placed
+            .iter()
+            .map(|a| a.surface.clone())
+            .collect()
+    }
+
+    /// Keep the windows the restore placed where their saved place says, for [`ENFORCE`] after
+    /// they were placed, until the user moves one (a window found somewhere other than its
+    /// place and its last known spot is let go). Runs before every frame, cheap once the time
+    /// is over. A window whose title turns out to be the one saved for another place of its app (Firefox sets it after
+    /// the first buffer) swaps places with the window that holds that place, or takes it from
+    /// the places not given out. A window that is somewhere else is moved there.
+    pub fn app_restore_enforce(&mut self) {
+        if !self.config.restore_apps() {
+            return;
+        }
+        self.app_restore.placed.retain(|a| a.surface.alive());
+        let active: Vec<usize> = (0..self.app_restore.placed.len())
+            .filter(|&i| self.app_restore.placed[i].since.elapsed() < ENFORCE)
+            .collect();
+        if active.is_empty() {
+            return;
+        }
+        // The title the window has now, against the one its place was saved with.
+        let titles: Vec<String> = active
+            .iter()
+            .map(|&i| toplevel_names(&self.app_restore.placed[i].surface).1)
+            .collect();
+        for (n, &i) in active.iter().enumerate() {
+            let title = titles[n].trim();
+            let held = self.app_restore.placed[i].place.title.trim().to_owned();
+            if title.is_empty() || title == held {
+                continue;
+            }
+            let app_id = self.app_restore.placed[i].place.app_id.clone();
+            // A place nobody has, saved with this title.
+            let free = self
+                .app_restore
+                .places
+                .get(&app_id)
+                .and_then(|places| places.iter().position(|p| p.title.trim() == title));
+            if let Some(j) = free {
+                let new = self.app_restore.places.get_mut(&app_id).unwrap().remove(j);
+                let old = std::mem::replace(&mut self.app_restore.placed[i].place, new);
+                self.app_restore
+                    .places
+                    .entry(app_id)
+                    .or_default()
+                    .insert(0, old);
+                self.app_restore.placed[i].refit = true;
+                continue;
+            }
+            // A place a window of the app holds that does not fit that window.
+            let swap = active.iter().enumerate().find(|&(m, &k)| {
+                k != i
+                    && self.app_restore.placed[k].place.app_id == app_id
+                    && self.app_restore.placed[k].place.title.trim() == title
+                    && titles[m].trim() != title
+            });
+            if let Some((_, &k)) = swap {
+                let (a, b) = (
+                    self.app_restore.placed[i].place.clone(),
+                    self.app_restore.placed[k].place.clone(),
+                );
+                self.app_restore.placed[i].place = b;
+                self.app_restore.placed[k].place = a;
+                self.app_restore.placed[i].refit = true;
+                self.app_restore.placed[k].refit = true;
+            }
+        }
+        // Move every window that is not where its place says, unless the user moved it.
+        for &i in &active {
+            if self.app_restore.placed[i].released {
+                continue;
+            }
+            let (root, place) = {
+                let a = &self.app_restore.placed[i];
+                (a.surface.clone(), a.place.clone())
+            };
+            if self.zones_is_member(&root) {
+                continue;
+            }
+            // Its place changed: put its container right as well, once.
+            if self.app_restore.placed[i].refit {
+                self.app_restore.placed[i].refit = false;
+                self.app_restore_refit(&root, &place);
+                if let Some(here) = self.session_place(&root) {
+                    self.app_restore.placed[i].seen = Some(here);
+                }
+                continue;
+            }
+            // Before its first fit the first commit places it.
+            let Some((now_workspace, now_output)) = self.session_place(&root) else {
+                continue;
+            };
+            let output_known =
+                !place.output.is_empty() && self.outputs.iter().any(|o| o.name() == place.output);
+            let wrong_output = output_known && now_output != place.output;
+            let wrong_workspace = place.workspace.is_some_and(|w| w != now_workspace);
+            let here = (now_workspace, now_output.clone());
+            if !wrong_output && !wrong_workspace {
+                self.app_restore.placed[i].seen = Some(here);
+                continue;
+            }
+            // Somewhere new that is not where its place says and not where it was last
+            // seen: the user moved it. Stop keeping it.
+            if self.app_restore.placed[i]
+                .seen
+                .as_ref()
+                .is_some_and(|seen| *seen != here)
+            {
+                tracing::info!(
+                    "restore-apps: {:?} was moved by the user, left there",
+                    place.app_id
+                );
+                self.app_restore.placed[i].released = true;
+                continue;
+            }
+            self.app_restore.placed[i].seen = Some(here);
+            tracing::info!(
+                "restore-apps: {:?} was on workspace {} of {:?}, moving to {:?} of {:?}",
+                place.app_id,
+                now_workspace,
+                now_output,
+                place.workspace,
+                place.output
+            );
+            let target = crate::config::WindowRule {
+                output: output_known
+                    .then(|| crate::config::RuleOutput::Named(place.output.clone())),
+                workspace: place.workspace,
+                ..Default::default()
+            };
+            self.apply_rule_monitor_and_workspace(&root, &target);
+        }
+    }
+
+    /// A window got another place than the one it joined a container for (its title came late and
+    /// swapped places): take it out of the container it is in when that is not the one its place
+    /// names, then bring it to the monitor and workspace of its place and into that container,
+    /// laid out the way it was saved.
+    fn app_restore_refit(&mut self, root: &WlSurface, place: &Placement) {
+        let Some((window, current)) = self
+            .desk
+            .find_by(|w| w.toplevel().is_some_and(|t| t.wl_surface() == root))
+            .map(|e| (e.window.clone(), e.container))
+        else {
+            return;
+        };
+        let in_name = current
+            .and_then(|id| self.desk.container(id))
+            .and_then(|c| c.name().map(str::to_owned));
+        if current.is_some()
+            && !place.container.is_empty()
+            && in_name.as_deref() == Some(place.container.as_str())
+        {
+            return;
+        }
+        let output_known =
+            !place.output.is_empty() && self.outputs.iter().any(|o| o.name() == place.output);
+        let target = crate::config::WindowRule {
+            output: output_known.then(|| crate::config::RuleOutput::Named(place.output.clone())),
+            workspace: place.workspace,
+            ..Default::default()
+        };
+        if let Some(from) = current {
+            if self.desk.leave_container(|w| w == &window) {
+                tracing::info!(
+                    "restore-apps: {:?} left container {in_name:?}, its place is elsewhere",
+                    place.app_id
+                );
+                self.retile_container(from);
+            }
+        }
+        if !place.container.is_empty()
+            && self.open_in_named_container(&window, &target, &place.container)
+        {
+            self.app_restore_container_joined(root, &place.container);
+        } else {
+            self.apply_rule_monitor_and_workspace(root, &target);
+        }
+        if place.maximized {
+            if let Some(toplevel) = window.toplevel() {
+                self.set_mode(toplevel, crate::desk::WindowMode::Maximized);
+            }
+        }
     }
 
     /// Whether the restore is starting the app with this app id and its window has not shown
@@ -236,10 +589,17 @@ impl JffState {
                 continue;
             }
             started_entries.push(entry.id.clone());
-            // Counts as open for a while, whoever starts it.
+            // Counts as open for a while, whoever starts it. This holds for a survivor too: one
+            // that never opens a window keeps its saved places until `GRACE` runs out, so they
+            // do not go to another app.
             self.app_restore
                 .starting
                 .push((app_id.clone(), Instant::now()));
+            // Its process outlived the last compositor: starting it again would run it twice.
+            if self.app_restore_survived(&app_id) {
+                tracing::info!("restore-apps: {} is still running, not started", entry.name);
+                continue;
+            }
             if AppIndex::command_of(entry).is_some_and(|argv| is_autostarted(&argv, &autostarted)) {
                 tracing::info!("restore-apps: {} is in autostart already", entry.name);
                 continue;
@@ -258,6 +618,21 @@ impl JffState {
         true
     }
 
+    /// Whether a process of the app is still running, by `poll` on a pidfd (see
+    /// `process_state`). Dead, recycled or unknown all lead to a restart.
+    fn app_restore_survived(&self, app_id: &str) -> bool {
+        app_survived(
+            self.app_restore
+                .loaded
+                .iter()
+                .filter(|place| place.app_id == app_id)
+                .map(|place| match place.pid {
+                    Some(pid) => process_state(pid, place.proc_id),
+                    None => ProcessState::Unknown,
+                }),
+        )
+    }
+
     /// The place of every window that is open now and has shown something (before that its
     /// place is a guess).
     fn open_placements(&self) -> Vec<Placement> {
@@ -274,12 +649,83 @@ impl JffState {
                 Some(surface.clone())
             })
             .collect();
+        // The container of each, with its place in it and its arrangement.
+        let mut container_facts: HashMap<crate::desk::ContainerId, (String, String)> =
+            HashMap::new();
+        let taken: Vec<String> = self
+            .desk
+            .containers()
+            .filter_map(|c| c.name().map(str::to_owned))
+            .collect();
+        for container in self.desk.containers() {
+            let name = match container.name() {
+                Some(name) => name.to_owned(),
+                None => {
+                    let mut name = format!("restore-{}", container.id().get());
+                    while taken.contains(&name) {
+                        name.push('\'');
+                    }
+                    name
+                }
+            };
+            let layout = Template::from_tree(container.tree(), |_| None)
+                .map(|t| t.to_text())
+                .unwrap_or_default();
+            container_facts.insert(container.id(), (name, layout));
+        }
+        let starting = !self.app_restore.starting.is_empty();
         sorted(windows.iter().filter_map(|surface| {
-            let saved = self.session_snapshot(surface)?;
+            let (workspace, output) = self.session_place(surface)?;
+            let (pid, proc_id) = self.window_process_identity(surface).unzip();
+            let (mut container, mut slot, mut layout) = (String::new(), None, String::new());
+            let mut maximized = self
+                .desk
+                .mode_of(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
+                == crate::desk::WindowMode::Maximized;
+            let entry = self.desk.all_top_down().find(|e| {
+                e.window
+                    .toplevel()
+                    .is_some_and(|t| t.wl_surface() == surface)
+            });
+            if let Some(entry) = entry {
+                if let Some(id) = entry.container {
+                    if let Some((name, text)) = container_facts.get(&id) {
+                        container = name.clone();
+                        layout = text.clone();
+                        let wid = Some(entry.id);
+                        slot = self.desk.container(id).and_then(|c| {
+                            c.tree().leaves().iter().position(|leaf| Some(*leaf) == wid)
+                        });
+                    }
+                }
+            }
+            // While the container is still being rebuilt it is not all there: what the restore
+            // put the window in keeps being written, so the windows that have not come yet
+            // are not lost from the arrangement.
+            if starting {
+                if let Some(a) = self
+                    .app_restore
+                    .placed
+                    .iter()
+                    .find(|a| a.surface == *surface && !a.place.container.is_empty())
+                {
+                    container = a.place.container.clone();
+                    slot = a.place.slot;
+                    layout = a.place.layout.clone();
+                    maximized = a.place.maximized;
+                }
+            }
             Some(Placement {
                 app_id: toplevel_names(surface).0,
-                workspace: Some(saved.workspace),
-                output: saved.output,
+                workspace: Some(workspace),
+                output,
+                pid,
+                proc_id,
+                title: toplevel_names(surface).1.trim().chars().take(200).collect(),
+                container,
+                slot,
+                layout,
+                maximized,
             })
         }))
     }
@@ -288,10 +734,27 @@ impl JffState {
     /// nothing changed. Does nothing without `restore-apps`, while the apps of the last session
     /// have not been started yet, and once the session is ending.
     pub fn app_restore_flush(&mut self) {
-        if !self.config.restore_apps()
-            || self.app_restore.frozen
-            || self.app_restore.pending.is_some()
-        {
+        if !self.config.restore_apps() || self.app_restore.frozen {
+            return;
+        }
+        // Save the active workspace even while apps are still being restored. Otherwise a
+        // session that ends before the restore timer finishes keeps the previous workspace.
+        if let Some(path) = workspace_path() {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(
+                path,
+                format!(
+                    "{}\t{}\n",
+                    self.active_output_name(),
+                    self.current_workspace()
+                ),
+            );
+        }
+        // Do not rewrite the app list until the startup restore has finished: windows that
+        // have not appeared yet still need their saved placements.
+        if self.app_restore.pending.is_some() {
             return;
         }
         let mut apps = self.open_placements();
