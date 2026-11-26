@@ -801,6 +801,7 @@ impl Tty {
                     content_metadata,
                     content_peak: None,
                     frame: None,
+                    cursor: Default::default(),
                 });
                 lit.queue_redraw();
             }

@@ -29,11 +29,22 @@ use crate::primitives::cursor_hide::CursorHide;
 /// One picture of a cursor, ready to be drawn.
 pub struct Frame {
     pub buffer: MemoryRenderBuffer,
+    /// The same picture as bytes (`Argb8888`, premultiplied), for an HDR monitor, which codes it
+    /// for its own signal before it goes to the cursor plane.
+    pub pixels: Vec<u8>,
+    /// Tells this picture from every other one made in this run.
+    pub serial: u64,
     /// Size of the picture in its own pixels.
     pub size: (i32, i32),
     /// The pixel inside the picture that sits exactly on the pointer position.
     pub hotspot: Point<i32, Logical>,
     delay_ms: u32,
+}
+
+/// A number no other picture has, see [`Frame::serial`].
+fn next_serial() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A themed cursor: one frame, or several for animated ones (like the busy spinner).
@@ -383,6 +394,8 @@ fn load_cursor(theme: &CursorTheme, name: &str, size: i32) -> anyhow::Result<Cur
     let frames: Vec<Frame> = images
         .iter()
         .map(|image| Frame {
+            pixels: image.pixels_rgba.clone(),
+            serial: next_serial(),
             size: (image.width as i32, image.height as i32),
             // The pixels are stored as ARGB words, which is what Argb8888 expects in memory.
             buffer: MemoryRenderBuffer::from_slice(
@@ -449,6 +462,8 @@ fn builtin_arrow() -> Cursor {
     }
 
     let frame = Frame {
+        pixels: pixels.clone(),
+        serial: next_serial(),
         size: (w as i32, h as i32),
         buffer: MemoryRenderBuffer::from_slice(
             &pixels,

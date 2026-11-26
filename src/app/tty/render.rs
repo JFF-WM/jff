@@ -190,6 +190,12 @@ impl JffState {
             }
             None => pointer,
         };
+        // The themed cursor of this frame, kept for an HDR monitor, see `hdr_cursor_plane`.
+        let mut named_cursor: Option<(
+            std::rc::Rc<crate::render::cursor::Cursor>,
+            u32,
+            Point<f64, Physical>,
+        )> = None;
         match self.cursor.render_cursor() {
             RenderCursor::Hidden => {}
             _ if !cursor_near => {}
@@ -225,13 +231,24 @@ impl JffState {
                     None,
                     Kind::Cursor,
                 ) {
-                    Ok(element) => elements.push(element.into()),
+                    Ok(element) => {
+                        elements.push(element.into());
+                        named_cursor = Some((cursor.clone(), millis, loc));
+                    }
                     Err(err) => tracing::warn!("error importing the cursor image: {err:?}"),
                 }
             }
         }
         // Those are the cursor's elements, kept out of the zoomed scene when it is drawn on top.
         let cursor_len = elements.len();
+        // On an HDR monitor the scene is coded for the signal by a final pass, which a plane
+        // can't be put through. A themed cursor is coded on its own instead (`encode_cursor`)
+        // and goes in front of the coded frame, so it can take the cursor plane: moving the
+        // pointer then redraws nothing. Not while zoomed, the cursor is part of the enlarged
+        // picture then. Where the plane can't take it the compositor draws it into the frame
+        // as before, and that is right too: the frame it draws onto is coded already.
+        let hdr_cursor_plane =
+            lit.hdr.is_some() && zoom.is_none() && cursor_len == 1 && named_cursor.is_some();
         // dnd icon: under the cursor, above everything else
         if cursor_near {
             let loc: Point<i32, Physical> =
@@ -635,8 +652,13 @@ impl JffState {
                 | FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
         } else {
             // An HDR monitor: the frame is composited into its own texture and encoded by the
-            // final pass, which a cursor on a plane would skip.
-            FrameFlags::empty()
+            // final pass, which a cursor on a plane would skip. A cursor that is coded on its
+            // own (`hdr_cursor_plane`) may take the plane, nothing else may.
+            if hdr_cursor_plane {
+                FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
+            } else {
+                FrameFlags::empty()
+            }
         };
 
         // Tearing: a fullscreen window covering the monitor that asked for it. The compositor
@@ -660,6 +682,13 @@ impl JffState {
         if let Some(hdr) = lit.hdr.as_mut().filter(|_| hdr_scanout_try.is_none()) {
             let space = hdr.space;
             let pass = hdr.pass;
+            // The cursor leaves the scene, it is added again below, coded.
+            let plane_cursor = if hdr_cursor_plane && !elements.is_empty() {
+                elements.remove(0);
+                named_cursor.take()
+            } else {
+                None
+            };
             let linear = hdr_frame::linearize(&mut *renderer, std::mem::take(&mut elements), space);
             let lights = crate::render::effects::gamut::take_content_light();
             if !hdr
@@ -702,6 +731,31 @@ impl JffState {
                     }
                     elements.push(JffElement::Hdr(element));
                     hdr_states = Some(states);
+                    if let Some((cursor, millis, loc)) = plane_cursor {
+                        let picture = cursor.frame(millis);
+                        let buffer = hdr.cursor.buffer(
+                            picture.serial,
+                            &picture.pixels,
+                            picture.size,
+                            space,
+                            &pass,
+                        );
+                        match MemoryRenderBufferRenderElement::from_buffer(
+                            &mut *renderer,
+                            loc,
+                            buffer,
+                            None,
+                            None,
+                            None,
+                            Kind::Cursor,
+                        ) {
+                            // in front of the frame
+                            Ok(element) => elements.insert(0, element.into()),
+                            Err(err) => {
+                                tracing::warn!("error importing the HDR cursor image: {err:?}")
+                            }
+                        }
+                    }
                 }
                 Some(Err(err)) => {
                     if note_hdr_fault(&mut lit.hdr_fault, HdrFault::Draw) {

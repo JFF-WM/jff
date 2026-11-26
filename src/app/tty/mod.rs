@@ -455,6 +455,8 @@ struct HdrOutput {
     content_peak: Option<f32>,
     /// The offscreen target, made on the first frame and again when the mode or the pass changes.
     frame: Option<HdrFrame>,
+    /// The cursor pictures coded for this output, they go to the cursor plane as they are.
+    cursor: hdr_frame::CursorCache,
 }
 
 /// What a monitor on a secondary GPU shows until the first frame of the primary reaches it.

@@ -1,7 +1,10 @@
 //! HDR output: the frame is composited into a linear fp16 texture and a final pass turns it into the PQ (or HLG) signal.
 
+use std::collections::HashMap;
+
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::{Error as DamageError, OutputDamageTracker};
+use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::{
     Element, Id, Kind, RenderElement, RenderElementPresentationState, RenderElementStates,
@@ -119,6 +122,68 @@ pub fn linearize(
             other => other,
         })
         .collect()
+}
+
+/// A cursor picture (`Argb8888`, premultiplied sRGB) as this output's signal codes it: the same
+/// conversion into the working space and the same final pass the frame goes through, on the CPU
+/// ([`FinalPass::apply`]), so the cursor can sit on a hardware plane, which the pass can't reach.
+/// The result is premultiplied too: the plane blends in code values, as does the primary plane
+/// when it has to draw the cursor itself, because the frame it draws onto is already coded.
+pub fn encode_cursor(pixels: &[u8], space: WorkingSpace, pass: &FinalPass) -> Vec<u8> {
+    let conversion = Conversion::to_working(
+        &space.source(ImageDescription::srgb()),
+        space.sdr_white as f32,
+    );
+    let mut out = Vec::with_capacity(pixels.len());
+    for px in pixels.chunks_exact(4) {
+        let (b, g, r, a) = (px[0], px[1], px[2], px[3]);
+        if a == 0 {
+            out.extend_from_slice(&[0, 0, 0, 0]);
+            continue;
+        }
+        let alpha = f32::from(a) / 255.0;
+        let straight = [r, g, b].map(|c| (f32::from(c) / 255.0 / alpha).min(1.0));
+        let code = pass.apply(conversion.apply(straight));
+        let [r, g, b] = code.map(|c| (c.clamp(0.0, 1.0) * alpha * 255.0).round() as u8);
+        out.extend_from_slice(&[b, g, r, a]);
+    }
+    out
+}
+
+/// The cursor pictures of one HDR output, coded for its signal by [`encode_cursor`]. The output
+/// makes a new one when anything the coding depends on changes.
+#[derive(Default)]
+pub struct CursorCache {
+    buffers: HashMap<u64, MemoryRenderBuffer>,
+}
+
+impl CursorCache {
+    /// Pictures kept before the cache starts over (themes have a few dozen icons).
+    const LIMIT: usize = 128;
+
+    /// The picture `serial` as pixels of `size`, coded once and kept.
+    pub fn buffer(
+        &mut self,
+        serial: u64,
+        pixels: &[u8],
+        size: (i32, i32),
+        space: WorkingSpace,
+        pass: &FinalPass,
+    ) -> &MemoryRenderBuffer {
+        if self.buffers.len() >= Self::LIMIT && !self.buffers.contains_key(&serial) {
+            self.buffers.clear();
+        }
+        self.buffers.entry(serial).or_insert_with(|| {
+            MemoryRenderBuffer::from_slice(
+                &encode_cursor(pixels, space, pass),
+                Fourcc::Argb8888,
+                size,
+                1,
+                Transform::Normal,
+                None,
+            )
+        })
+    }
 }
 
 /// The same rect with its color (premultiplied) in the working space.
