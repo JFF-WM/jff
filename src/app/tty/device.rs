@@ -580,6 +580,7 @@ impl Tty {
             cross: None,
             redraw: RedrawState::Idle,
             last_vblank: None,
+            async_flip: false,
             gamma: None,
             client_gamma: None,
             gamma_pending: false,

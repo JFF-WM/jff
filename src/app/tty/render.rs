@@ -835,6 +835,7 @@ impl JffState {
                         match lit.compositor.queue_frame(feedback) {
                             Ok(()) => {
                                 queued = true;
+                                lit.async_flip = nerd_async;
                                 lit.locked_frame = locked;
                             }
                             Err(err) => tracing::warn!("error queueing frame: {err}"),
@@ -1074,6 +1075,7 @@ impl JffState {
                     match lit.compositor.queue_frame(feedback) {
                         Ok(()) => {
                             queued = true;
+                            lit.async_flip = false;
                             lit.locked_frame = locked;
                         }
                         Err(err) => tracing::warn!("error queueing frame: {err}"),

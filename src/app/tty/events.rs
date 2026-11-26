@@ -99,8 +99,13 @@ impl JffState {
             Ok(mut feedback) => {
                 let refresh = crate::protocol::presentation::refresh_interval(&lit.output)
                     .map_or(Refresh::Unknown, Refresh::Fixed);
-                let mut flags = wp_presentation_feedback::Kind::Vsync
-                    | wp_presentation_feedback::Kind::HwCompletion;
+                // `Vsync` says the presentation was synchronized to the vertical blank, which
+                // a tearing flip (queued async, or seen off the vblank grid) was not.
+                let tearing = lit.async_flip || off_grid == Some(true);
+                let mut flags = wp_presentation_feedback::Kind::HwCompletion;
+                if !tearing {
+                    flags.insert(wp_presentation_feedback::Kind::Vsync);
+                }
                 if hw_time.is_some() {
                     flags.insert(wp_presentation_feedback::Kind::HwClock);
                 }

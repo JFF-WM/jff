@@ -475,6 +475,9 @@ struct TtyOutput {
     redraw: RedrawState,
     /// CLOCK_MONOTONIC time of the last vblank. The frame clock counts on from it.
     last_vblank: Option<Duration>,
+    /// The frame in flight was queued as an async (tearing) flip, so its presentation is not
+    /// vsync'd. Set when the frame is queued, read at its vblank.
+    async_flip: bool,
     /// What the monitor and driver support for VRR.
     vrr_support: VrrSupport,
     /// From the config (`adaptive-sync`), refreshed on reload.
