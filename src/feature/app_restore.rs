@@ -16,7 +16,7 @@
 //!
 //! The places are handed out as the windows open: the first window an app opens takes the
 //! first place saved for its app id, the next one the next, and so on, for [`GRACE`] after the
-//! start (this takes in the apps that `autostart` starts, and apps that open more than one
+//! apps were started (this takes in the apps that `autostart` starts, and apps that open more than one
 //! window). The window is moved there before anything else is decided for it, as a
 //! `window-rule` with `open-on-output` and `open-workspace` would (`fit_to_output_once`), and it
 //! wins over such a rule's monitor and workspace, which are the same for every window of an
@@ -47,13 +47,14 @@ use crate::state::JffState;
 pub const POLL: Duration = Duration::from_millis(100);
 /// How long it waits for that before giving up.
 pub const GIVE_UP: Duration = Duration::from_secs(10);
-/// How long after the start the saved places are handed to new windows, and how long an app that
-/// was started by the restore stays on the list without a window.
-const GRACE: Duration = Duration::from_secs(60);
+/// How long after the apps were started the saved places are handed to new windows, and how long
+/// an app that was started by the restore stays on the list without a window. Short, so a window
+/// the user opens afterwards is never taken for one of the last session's.
+const GRACE: Duration = Duration::from_secs(5);
 /// How long after a window got its saved place it is kept there: browsers can publish their
 /// real window title well after the first buffer, so keep matching and correcting placements
-/// for the full restore grace period.
-const ENFORCE: Duration = GRACE;
+/// of the windows that were placed.
+const ENFORCE: Duration = Duration::from_secs(60);
 
 /// A window the restore gave a saved place to.
 struct Assigned {
@@ -97,6 +98,11 @@ pub struct AppRestore {
     joined: HashMap<String, Vec<(WlSurface, usize)>>,
     /// The arrangement saved for each container, by container name.
     layouts: HashMap<String, String>,
+    /// What the file of the shown workspace says now, so it is only written when it changes.
+    workspace_saved: String,
+    /// The pid and pidfs id of the process of each window, which do not change while the window
+    /// lives, so the syscalls that find them are made once.
+    identities: HashMap<WlSurface, (u32, u64)>,
 }
 
 fn container_key(name: &str, workspace: Option<usize>, output: &str) -> String {
@@ -222,7 +228,9 @@ impl JffState {
                 );
             }
         }
-        self.app_restore.places_until = Some(Instant::now() + GRACE);
+        // Counted from the start of the apps, which `app_restore_poll` does once the list of
+        // installed apps is there: until then the places wait for the apps `autostart` started.
+        self.app_restore.places_until = Some(Instant::now() + GIVE_UP + GRACE);
         self.app_restore.loaded = loaded;
         self.app_restore.pending = Some(apps);
         self.app_restore.waiting_since = Some(Instant::now());
@@ -559,12 +567,14 @@ impl JffState {
                 .map_or(Duration::ZERO, |since| since.elapsed());
             if waited >= GIVE_UP {
                 tracing::warn!("restore-apps: the list of installed apps never came, giving up");
+                self.app_restore.places_until = Some(Instant::now() + GRACE);
                 return true;
             }
             self.app_restore.pending = Some(wanted);
             return false;
         }
 
+        self.app_restore.places_until = Some(Instant::now() + GRACE);
         let autostarted: Vec<Vec<String>> = self
             .config
             .autostart()
@@ -635,7 +645,7 @@ impl JffState {
 
     /// The place of every window that is open now and has shown something (before that its
     /// place is a guess).
-    fn open_placements(&self) -> Vec<Placement> {
+    fn open_placements(&mut self) -> Vec<Placement> {
         let windows: Vec<WlSurface> = self
             .desk
             .all_top_down()
@@ -649,6 +659,18 @@ impl JffState {
                 Some(surface.clone())
             })
             .collect();
+        self.app_restore
+            .identities
+            .retain(|surface, _| surface.alive());
+        for surface in &windows {
+            if !self.app_restore.identities.contains_key(surface) {
+                if let Some(identity) = self.window_process_identity(surface) {
+                    self.app_restore
+                        .identities
+                        .insert(surface.clone(), identity);
+                }
+            }
+        }
         // The container of each, with its place in it and its arrangement.
         let mut container_facts: HashMap<crate::desk::ContainerId, (String, String)> =
             HashMap::new();
@@ -676,7 +698,7 @@ impl JffState {
         let starting = !self.app_restore.starting.is_empty();
         sorted(windows.iter().filter_map(|surface| {
             let (workspace, output) = self.session_place(surface)?;
-            let (pid, proc_id) = self.window_process_identity(surface).unzip();
+            let (pid, proc_id) = self.app_restore.identities.get(surface).copied().unzip();
             let (mut container, mut slot, mut layout) = (String::new(), None, String::new());
             let mut maximized = self
                 .desk
@@ -740,17 +762,19 @@ impl JffState {
         // Save the active workspace even while apps are still being restored. Otherwise a
         // session that ends before the restore timer finishes keeps the previous workspace.
         if let Some(path) = workspace_path() {
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let _ = std::fs::write(
-                path,
-                format!(
-                    "{}\t{}\n",
-                    self.active_output_name(),
-                    self.current_workspace()
-                ),
+            let text = format!(
+                "{}\t{}\n",
+                self.active_output_name(),
+                self.current_workspace()
             );
+            if text != self.app_restore.workspace_saved {
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                if std::fs::write(path, &text).is_ok() {
+                    self.app_restore.workspace_saved = text;
+                }
+            }
         }
         // Do not rewrite the app list until the startup restore has finished: windows that
         // have not appeared yet still need their saved placements.
