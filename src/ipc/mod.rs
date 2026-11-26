@@ -50,6 +50,8 @@
 //! toggle-stats               show or hide the stats overlay (the `toggle-stats` action)
 //! status                     windows and workspace state in one reply (for panels)
 //! outputs                    every monitor: area, scanout, adaptive sync, colors and HDR
+//! output create [WxH]        make a virtual monitor (a transient output, 1920x1080 without a size) that stays until `output remove`, reply `{"ok":true,"output":"TRANSIENT-0","width":1920,"height":1080}`
+//! output remove NAME         remove a virtual monitor `output create` made, its windows move to the other monitors
 //! hotkeys                    the global hotkeys clients bound (xx-hotkey-v1): who, which trigger, whether it is held
 //! keyboard-layouts           the layouts of the keyboard's keymap and the one in use
 //! switch-layout next|prev|N|CODE  make another layout the one in use (N counts from 1, CODE is `us`, `br`, ...)
@@ -623,6 +625,11 @@ pub enum Request {
     HdrGet(String),
     /// `hdr-reset MONITOR`: the HDR settings of a monitor back to the config file's, without reloading the rest.
     HdrReset(String),
+    /// `output create [WxH]`: make a transient output (a virtual monitor, for `wayvnc --output`
+    /// and the like) that stays until `output remove`.
+    OutputCreate(Option<(i32, i32)>),
+    /// `output remove NAME`: end a transient output `output create` made.
+    OutputRemove(String),
     /// `stats`: the numbers of the stats overlay for the focused window, as JSON. Starts
     /// counting if nothing is (for a few seconds after the last request, nothing is drawn).
     Stats,
@@ -637,8 +644,25 @@ pub enum Request {
 
 pub const COMMANDS: &str =
     "windows, status, outputs, focused, window-info, close, maximize, unmaximize, toggle-maximize, \
-     minimize, unminimize, move-to-scratchpad, scratchpad, fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, sticky, unsticky, toggle-sticky, focus, focus-urgent, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
+     output, minimize, unminimize, move-to-scratchpad, scratchpad, fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, sticky, unsticky, toggle-sticky, focus, focus-urgent, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
      screenshot-area, screenshot-fullscreen, screenshot-window, window-thumbnail, move-cursor, click, toggle-overview, clipboard-history, clipboard-select, clipboard-clear, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, hotkeys, keyboard-layouts, switch-layout, watch";
+
+/// The size `output create` was given: `1920x1080`, or the two numbers apart (`1920 1080`).
+fn parse_output_size(words: &[&str]) -> Result<(i32, i32), String> {
+    let not_size = |text: &str| format!("{text:?} is not a size, use 1920x1080");
+    let (width, height) = match words {
+        [one] => one.split_once(['x', 'X']).ok_or_else(|| not_size(*one))?,
+        [width, height] => (*width, *height),
+        _ => return Err("output create takes a size like 1920x1080".to_string()),
+    };
+    let side = |word: &str| {
+        word.parse::<i32>()
+            .ok()
+            .filter(|n| *n >= 1)
+            .ok_or_else(|| not_size(&words.join(" ")))
+    };
+    Ok((side(width)?, side(height)?))
+}
 
 fn parse_workspace_number(word: &str) -> Result<usize, String> {
     word.parse::<usize>()
@@ -778,6 +802,14 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         ("toggle-stats", _) => return Err("toggle-stats takes no arguments".to_string()),
         ("status", []) => return Ok(Request::Status),
         ("status", _) => return Err("status takes no arguments".to_string()),
+        ("output", ["create"]) => return Ok(Request::OutputCreate(None)),
+        ("output", ["create", size @ ..]) if size.len() <= 2 => {
+            return Ok(Request::OutputCreate(Some(parse_output_size(size)?)));
+        }
+        ("output", ["remove", name]) => return Ok(Request::OutputRemove(name.to_string())),
+        ("output", _) => {
+            return Err("output needs create [WxH] or remove NAME".to_string());
+        }
         ("outputs", []) => return Ok(Request::Outputs),
         ("outputs", _) => return Err("outputs takes no arguments".to_string()),
         ("hotkeys", []) => return Ok(Request::Hotkeys),
@@ -1407,6 +1439,18 @@ impl JffState {
             Request::HdrReset(output) => {
                 let report = self.reset_hdr(&output)?;
                 Ok(hdr_report_json(&report))
+            }
+            Request::OutputCreate(size) => {
+                let output = self.create_manual_transient_output(size)?;
+                let (_, _, width, height) = output_rect(&output);
+                Ok(format!(
+                    "{{\"ok\":true,\"output\":{},\"width\":{width},\"height\":{height}}}\n",
+                    json_str(&output.name())
+                ))
+            }
+            Request::OutputRemove(name) => {
+                self.remove_manual_transient_output(&name)?;
+                Ok(format!("{{\"ok\":true,\"output\":{}}}\n", json_str(&name)))
             }
             Request::Stats => {
                 // Counts for a few seconds after this request, drawing nothing. The first
@@ -2544,6 +2588,11 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("workspace N|next|prev", "go to a workspace"),
             ("move-to-workspace N [ID]", "send a window to workspace N"),
             ("outputs", "list the monitors"),
+            (
+                "output create [WxH]",
+                "make a virtual monitor (transient output)",
+            ),
+            ("output remove NAME", "remove a virtual monitor"),
             ("focus-monitor MONITOR", "focus a monitor"),
             ("move-to-monitor MONITOR [ID]", "send a window to a monitor"),
             (

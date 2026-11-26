@@ -32,6 +32,33 @@ fn requests_are_parsed() {
     assert!(parse_request("window-thumbnail 5 0 400").is_err());
     assert!(parse_request("window-thumbnail x").is_err());
     assert_eq!(parse_request("outputs"), Ok(Request::Outputs));
+    assert_eq!(
+        parse_request("output create"),
+        Ok(Request::OutputCreate(None))
+    );
+    assert_eq!(
+        parse_request("output create 1920x1080"),
+        Ok(Request::OutputCreate(Some((1920, 1080))))
+    );
+    assert_eq!(
+        parse_request("output create 1280X720"),
+        Ok(Request::OutputCreate(Some((1280, 720))))
+    );
+    assert_eq!(
+        parse_request("output create 800 600"),
+        Ok(Request::OutputCreate(Some((800, 600))))
+    );
+    assert_eq!(
+        parse_request("output remove TRANSIENT-0"),
+        Ok(Request::OutputRemove("TRANSIENT-0".to_string()))
+    );
+    assert!(parse_request("output").is_err());
+    assert!(parse_request("output create 1920").is_err());
+    assert!(parse_request("output create 0x1080").is_err());
+    assert!(parse_request("output create -5x10").is_err());
+    assert!(parse_request("output create axb").is_err());
+    assert!(parse_request("output create 1 2 3").is_err());
+    assert!(parse_request("output remove").is_err());
     assert_eq!(parse_request("  focused \n"), Ok(Request::Focused));
     assert_eq!(parse_request("window-info"), Ok(Request::Info(None)));
     assert_eq!(parse_request("window-info 7"), Ok(Request::Info(Some(7))));

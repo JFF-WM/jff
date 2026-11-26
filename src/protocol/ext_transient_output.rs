@@ -30,9 +30,9 @@ use crate::state::JffState;
 /// How many transient outputs may exist at once. More are denied.
 const MAX_TRANSIENT_OUTPUTS: usize = 16;
 /// Size when the client doesn't say.
-const DEFAULT_SIZE: (i32, i32) = (1920, 1080);
+pub const DEFAULT_SIZE: (i32, i32) = (1920, 1080);
 /// Largest side of a buffer accepted.
-const MAX_SIDE: i32 = 16384;
+pub const MAX_SIDE: i32 = 16384;
 /// Refresh rate of a transient output, in mHz.
 const REFRESH_MHZ: i32 = 60_000;
 /// Time between the frame cycles.
@@ -44,6 +44,9 @@ pub struct TransientOutputs {
     next: u32,
     /// Outputs that exist (granted, not destroyed yet).
     outputs: Vec<Output>,
+    /// The ones `jff msg output create` made: no client owns them, only `output remove` (or
+    /// jff quitting) ends them.
+    manual: Vec<Output>,
     /// The stand-in for the vblank is running.
     timer_armed: bool,
 }
@@ -54,6 +57,7 @@ impl TransientOutputs {
             _global: display.create_global::<JffState, ExtTransientOutputManagerV1, ()>(1, ()),
             next: 0,
             outputs: Vec::new(),
+            manual: Vec::new(),
             timer_armed: false,
         }
     }
@@ -105,12 +109,95 @@ impl JffState {
         }
     }
 
+    /// Make a transient output of `size`: an output like any other, without a monitor behind
+    /// it. Shared by the protocol and `jff msg output create`. `model` becomes the output's
+    /// description (smithay builds that from make and model, and it can't be changed
+    /// afterwards).
+    fn create_transient_output(
+        &mut self,
+        size: (i32, i32),
+        model: String,
+        serial: String,
+    ) -> Result<Output, String> {
+        if self.transient_outputs.outputs.len() >= MAX_TRANSIENT_OUTPUTS {
+            return Err(format!(
+                "there are {MAX_TRANSIENT_OUTPUTS} transient outputs already"
+            ));
+        }
+        let number = self.transient_outputs.next;
+        self.transient_outputs.next += 1;
+        let output = Output::new(
+            format!("TRANSIENT-{number}"),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "jff".into(),
+                model,
+                serial_number: serial,
+            },
+        );
+        let mode = mode_of(size);
+        output.change_current_state(
+            Some(mode),
+            Some(Transform::Normal),
+            None,
+            Some((0, 0).into()),
+        );
+        output.set_preferred(mode);
+
+        self.add_output(output.clone());
+        self.transient_outputs.outputs.push(output.clone());
+        self.arm_transient_output_timer();
+        Ok(output)
+    }
+
+    /// End a transient output, whoever made it.
+    fn destroy_transient_output(&mut self, output: &Output) {
+        self.transient_outputs.outputs.retain(|o| o != output);
+        self.transient_outputs.manual.retain(|o| o != output);
+        self.remove_output(output);
+    }
+
     fn drop_transient_output(&mut self, data: &TransientOutputData) {
         let Some(output) = data.inner.lock().unwrap().output.take() else {
             return;
         };
-        self.transient_outputs.outputs.retain(|o| *o != output);
-        self.remove_output(&output);
+        self.destroy_transient_output(&output);
+    }
+
+    /// `jff msg output create [WxH]`: a transient output that stays until `output remove`.
+    pub fn create_manual_transient_output(
+        &mut self,
+        size: Option<(i32, i32)>,
+    ) -> Result<Output, String> {
+        let size = size.unwrap_or(DEFAULT_SIZE);
+        if size.0 <= 0 || size.1 <= 0 || size.0 > MAX_SIDE || size.1 > MAX_SIDE {
+            return Err(format!(
+                "{}x{} is not a size, each side is 1 to {MAX_SIDE}",
+                size.0, size.1
+            ));
+        }
+        let output = self.create_transient_output(size, "transient".into(), "Unknown".into())?;
+        self.transient_outputs.manual.push(output.clone());
+        Ok(output)
+    }
+
+    /// `jff msg output remove NAME`: only outputs `output create` made, an output a client
+    /// asked for goes away when that client lets go of it.
+    pub fn remove_manual_transient_output(&mut self, name: &str) -> Result<(), String> {
+        let Some(output) = self
+            .transient_outputs
+            .manual
+            .iter()
+            .find(|o| o.name() == name)
+            .cloned()
+        else {
+            return Err(format!(
+                "{name:?} is not an output made with `output create`"
+            ));
+        };
+        self.destroy_transient_output(&output);
+        Ok(())
     }
 }
 
