@@ -364,6 +364,7 @@ fn stats_snapshot(
     path: nerd::Path,
     scanout_without_overlay: Option<bool>,
     async_flip: bool,
+    cursor: Option<nerd::Cursor>,
 ) -> nerd::Snapshot {
     let (color, format) = surface_scanout_facts(surface);
     let buffer = match format {
@@ -414,6 +415,7 @@ fn stats_snapshot(
         },
         path,
         scanout_without_overlay,
+        cursor,
         vrr: match lit.vrr_support {
             VrrSupport::NotSupported => nerd::Vrr::Unsupported,
             _ if lit.vrr_on => nerd::Vrr::On,

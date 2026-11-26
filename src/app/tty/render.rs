@@ -661,6 +661,8 @@ impl JffState {
             }
         };
 
+        let cursor_plane_allowed = frame_flags.contains(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT);
+
         // Tearing: a fullscreen window covering the monitor that asked for it. The compositor
         // falls back to a vsync flip when the frame can't be flipped async.
         let presentation = if scanout
@@ -809,6 +811,9 @@ impl JffState {
         }
 
         let mut queued = false;
+        // Whether the cursor went to the cursor plane in the frame just built, `None` when no
+        // frame was built.
+        let mut cursor_on_plane: Option<bool> = None;
         // How long the CPU waited for the GPU to finish the frame, if it did.
         let mut gpu_wait = None;
         // The window did not reach the plane: draw the frame again through the HDR path.
@@ -826,6 +831,7 @@ impl JffState {
                 presentation,
             ) {
                 Ok(res) => {
+                    cursor_on_plane = Some(res.cursor_element.is_some());
                     // The window was tried on the plane and the compositor put it in a copy: that
                     // copy is not PQ-encoded for the panel, so it is dropped and the frame is
                     // drawn through the HDR path.
@@ -950,8 +956,33 @@ impl JffState {
                         nerd::Why::PlaneRefused
                     })
                 };
-                let snapshot =
-                    stats_snapshot(surface, win, lit, &self.config, path, nerd_alt, nerd_async);
+                let cursor = cursor_on_plane.map(|on_plane| {
+                    if !cursor_near {
+                        nerd::Cursor::Elsewhere
+                    } else if cursor_len == 0 {
+                        nerd::Cursor::Hidden
+                    } else if on_plane {
+                        nerd::Cursor::Hardware
+                    } else {
+                        nerd::Cursor::Software(if lit.hdr.is_some() && !cursor_plane_allowed {
+                            nerd::CursorWhy::Hdr
+                        } else if zoom.is_some() && cursor_zoomed.is_none() {
+                            nerd::CursorWhy::Zoomed
+                        } else {
+                            nerd::CursorWhy::PlaneRefused
+                        })
+                    }
+                });
+                let snapshot = stats_snapshot(
+                    surface,
+                    win,
+                    lit,
+                    &self.config,
+                    path,
+                    nerd_alt,
+                    nerd_async,
+                    cursor,
+                );
                 self.stats.store(
                     snapshot,
                     std::time::Instant::now(),
@@ -1017,6 +1048,16 @@ impl JffState {
         } else {
             None
         };
+        // The primary draws the cursor into the frame that crosses over, when it is on this monitor.
+        let cursor_near = self.seat.get_pointer().is_some_and(|pointer| {
+            let at = pointer.current_location();
+            layout::contains(
+                layout::grow(output_rect(&output), CURSOR_MARGIN),
+                (at.x, at.y),
+            )
+        });
+        let cursor_shown =
+            cursor_near && !matches!(self.cursor.render_cursor(), RenderCursor::Hidden);
 
         let Backend::Tty(tty) = &mut self.backend else {
             return;
@@ -1165,6 +1206,13 @@ impl JffState {
                     nerd::Path::Composited(nerd::Why::OtherGpu),
                     None,
                     false,
+                    Some(if cursor_shown {
+                        nerd::Cursor::Software(nerd::CursorWhy::OtherGpu)
+                    } else if cursor_near {
+                        nerd::Cursor::Hidden
+                    } else {
+                        nerd::Cursor::Elsewhere
+                    }),
                 );
                 self.stats.store(
                     snapshot,

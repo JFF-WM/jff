@@ -6,8 +6,9 @@ use jff_wm::primitives::color::{ImageDescription, NamedPrimaries, NamedTf, Trans
 use jff_wm::primitives::stats::{
     blame, budget_of, commit_latency, countable_prediction, drift_ms, flip_off_grid, fourcc,
     missed_vblank, modifier_name, primaries_name, sections, tf_name, to_json, Blame, BufferKind,
-    ClientSync, Costs, FrameCost, Latencies, Path, Presented, Row, Snapshot, SyncSummary, Syncs,
-    TearingSummary, Tearings, Ticks, Timing, Tone, Vrr, Why, MODIFIER_INVALID, SYNC_TARGET,
+    ClientSync, Costs, Cursor, CursorWhy, FrameCost, Latencies, Path, Presented, Row, Snapshot,
+    SyncSummary, Syncs, TearingSummary, Tearings, Ticks, Timing, Tone, Vrr, Why, MODIFIER_INVALID,
+    SYNC_TARGET,
 };
 
 fn ms(n: u64) -> Duration {
@@ -141,6 +142,7 @@ fn snapshot() -> Snapshot {
         vrr_policy: "fullscreen",
         path: Path::Direct,
         scanout_without_overlay: None,
+        cursor: Some(Cursor::Hardware),
         vrr: Vrr::On,
         hdr_output: false,
         content_told: None,
@@ -1163,4 +1165,62 @@ fn the_json_carries_the_observed_tearing() {
     assert!(to_json(&snapshot()).contains("\"tearing_observed\":null"));
     let json = to_json(&tearing_with(300, 220));
     assert!(json.contains("\"tearing_observed\":{\"flips\":300,\"off_grid\":220,\"seen\":true}"));
+}
+
+#[test]
+fn a_cursor_on_the_plane_is_good_news() {
+    let row = find(&snapshot(), "Cursor");
+    assert!(row.value.starts_with("hardware plane"), "{}", row.value);
+    assert_eq!(row.tone, Tone::Good);
+}
+
+#[test]
+fn a_software_cursor_says_why() {
+    let mut s = snapshot();
+    for (why, needle) in [
+        (CursorWhy::OtherGpu, "another GPU"),
+        (CursorWhy::Hdr, "HDR"),
+        (CursorWhy::Zoomed, "zoomed"),
+        (CursorWhy::PlaneRefused, "refused"),
+    ] {
+        s.cursor = Some(Cursor::Software(why));
+        let row = find(&s, "Cursor");
+        assert!(row.value.starts_with("software: "), "{}", row.value);
+        assert!(row.value.contains(needle), "{}", row.value);
+        assert_eq!(row.tone, Tone::Warn);
+    }
+}
+
+#[test]
+fn a_cursor_that_is_not_drawn_is_not_a_warning() {
+    let mut s = snapshot();
+    s.cursor = Some(Cursor::Hidden);
+    assert_eq!(find(&s, "Cursor").tone, Tone::Neutral);
+    s.cursor = Some(Cursor::Elsewhere);
+    let row = find(&s, "Cursor");
+    assert!(row.value.contains("another monitor"), "{}", row.value);
+    assert_eq!(row.tone, Tone::Neutral);
+    s.cursor = None;
+    let row = find(&s, "Cursor");
+    assert_eq!(row.value, "no frame drawn yet");
+    assert_eq!(row.tone, Tone::Neutral);
+}
+
+#[test]
+fn the_json_carries_the_cursor_plane() {
+    let mut s = snapshot();
+    assert!(to_json(&s).contains("\"cursor\":{\"plane\":\"hardware\",\"reason\":null}"));
+    s.cursor = Some(Cursor::Software(CursorWhy::PlaneRefused));
+    let json = to_json(&s);
+    assert!(json.contains("\"plane\":\"software\""), "{json}");
+    assert!(
+        json.contains("\"reason\":\"the GPU's cursor plane refused it"),
+        "{json}"
+    );
+    s.cursor = Some(Cursor::Hidden);
+    assert!(to_json(&s).contains("\"plane\":\"hidden\""));
+    s.cursor = Some(Cursor::Elsewhere);
+    assert!(to_json(&s).contains("\"plane\":\"elsewhere\""));
+    s.cursor = None;
+    assert!(to_json(&s).contains("\"cursor\":null"));
 }

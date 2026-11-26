@@ -26,6 +26,9 @@
 //! Tearing is observed, not only requested ([`flip_off_grid`], [`Tearings`]): a flip that waits
 //! for the vblank lands a whole number of refreshes after the one before it, a tearing flip
 //! lands wherever the game committed.
+//!
+//! The mouse cursor is told as well ([`Cursor`]): on its own hardware plane, where moving it
+//! redraws nothing, or drawn by the compositor into the frame, and why.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -685,6 +688,43 @@ impl Why {
     }
 }
 
+/// Why the cursor is drawn into the frame by the compositor and does not sit on a plane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorWhy {
+    /// The monitor is on another GPU: its frame is drawn on the primary and copied across.
+    OtherGpu,
+    /// HDR monitor: the frame is coded by a final pass that a plane would skip.
+    Hdr,
+    /// Zoomed: the cursor is part of the enlarged picture.
+    Zoomed,
+    /// The plane was allowed and still did not take the cursor (no plane, format or size).
+    PlaneRefused,
+}
+
+impl CursorWhy {
+    fn text(self) -> &'static str {
+        match self {
+            Self::OtherGpu => "the monitor is on another GPU, its frame is drawn on the primary",
+            Self::Hdr => "HDR monitor, the final pass codes the whole frame",
+            Self::Zoomed => "zoomed, the cursor is part of the enlarged picture",
+            Self::PlaneRefused => "the GPU's cursor plane refused it (format, size or no plane)",
+        }
+    }
+}
+
+/// How the mouse cursor reaches the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cursor {
+    /// On the cursor plane: moving the pointer redraws nothing.
+    Hardware,
+    /// Drawn into the frame by the compositor.
+    Software(CursorWhy),
+    /// The cursor is hidden (by the client, while typing or after resting) or has no picture.
+    Hidden,
+    /// The pointer is on another monitor, this one draws no cursor.
+    Elsewhere,
+}
+
 /// How the window reached the screen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Path {
@@ -746,6 +786,8 @@ pub struct Snapshot {
     pub path: Path,
     /// Whether direct scanout would be possible without this overlay, when that can be told.
     pub scanout_without_overlay: Option<bool>,
+    /// How the cursor reached the screen in the last frame. `None` before a frame was drawn.
+    pub cursor: Option<Cursor>,
 
     // what the hardware did
     pub vrr: Vrr,
@@ -1087,6 +1129,25 @@ fn latency_rows(s: &Snapshot) -> Vec<Row> {
     rows
 }
 
+/// The line about the mouse cursor: on a hardware plane or drawn by the compositor.
+fn cursor_row(s: &Snapshot) -> Row {
+    match s.cursor {
+        None => row("Cursor", "no frame drawn yet", Tone::Neutral),
+        Some(Cursor::Hardware) => row(
+            "Cursor",
+            "hardware plane: moving it redraws nothing",
+            Tone::Good,
+        ),
+        Some(Cursor::Software(why)) => {
+            row("Cursor", format!("software: {}", why.text()), Tone::Warn)
+        }
+        Some(Cursor::Hidden) => row("Cursor", "hidden: nothing to draw", Tone::Neutral),
+        Some(Cursor::Elsewhere) => {
+            row("Cursor", "the pointer is on another monitor", Tone::Neutral)
+        }
+    }
+}
+
 /// The lines of the overlay, in groups: the frame rates, what the client asked for, what the
 /// compositor decided and what the hardware did.
 pub fn sections(s: &Snapshot) -> Vec<Section> {
@@ -1274,6 +1335,7 @@ pub fn sections(s: &Snapshot) -> Vec<Section> {
             None => {}
         }
     }
+    decided.push(cursor_row(s));
     decided.push(row(
         "Tearing allowed",
         if s.allow_tearing { "yes" } else { "no" },
@@ -1478,6 +1540,19 @@ fn json_tearing(tearing: &Option<TearingSummary>) -> String {
     })
 }
 
+fn json_cursor(cursor: Option<Cursor>) -> String {
+    match cursor {
+        None => "null".to_owned(),
+        Some(Cursor::Hardware) => "{\"plane\":\"hardware\",\"reason\":null}".to_owned(),
+        Some(Cursor::Software(why)) => format!(
+            "{{\"plane\":\"software\",\"reason\":{}}}",
+            json_str(why.text())
+        ),
+        Some(Cursor::Hidden) => "{\"plane\":\"hidden\",\"reason\":null}".to_owned(),
+        Some(Cursor::Elsewhere) => "{\"plane\":\"elsewhere\",\"reason\":null}".to_owned(),
+    }
+}
+
 fn json_latency(latency: &Option<LatencySummary>) -> String {
     let Some(l) = latency else {
         return "null".to_owned();
@@ -1536,7 +1611,7 @@ pub fn to_json(s: &Snapshot) -> String {
     format!(
         "{{\"app_id\":{},\"output\":{},\"client\":{},\"shown\":{},\"display_hz\":{:.2},\"cost\":{},\"sync\":{},\"latency\":{},\"blame\":{},\
          \"client_asked\":{{\"fullscreen\":{},\"tearing\":{},\"game\":{},\"content\":{},\"buffer\":{},\"buffer_modifier\":{},\"sync_protocols\":{},\"buffer_size\":{},\"window_size\":{},\"colors\":{}}},\
-         \"compositor\":{{\"path\":\"{}\",\"reason\":{},\"scanout_without_overlay\":{},\"allow_tearing\":{},\"adaptive_sync_policy\":{}}},\
+         \"compositor\":{{\"path\":\"{}\",\"reason\":{},\"scanout_without_overlay\":{},\"allow_tearing\":{},\"adaptive_sync_policy\":{},\"cursor\":{}}},\
          \"hardware\":{{\"vrr\":\"{}\",\"hdr\":{},\"async_flip\":{},\"tearing_observed\":{},\"content_type_game\":{},\"content_type\":{}}}}}",
         json_str(&s.app_id),
         json_str(&s.output),
@@ -1568,6 +1643,7 @@ pub fn to_json(s: &Snapshot) -> String {
             .map_or("null".to_owned(), |b| b.to_string()),
         s.allow_tearing,
         json_str(s.vrr_policy),
+        json_cursor(s.cursor),
         vrr,
         s.hdr_output,
         s.async_flip,
