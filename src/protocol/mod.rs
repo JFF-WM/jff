@@ -9,6 +9,8 @@ pub mod drm_lease;
 pub mod ext_foreign_toplevel;
 pub mod ext_foreign_toplevel_pidfd;
 pub mod ext_foreign_toplevel_pidfd_bindings;
+pub mod ext_transient_output;
+pub mod ext_transient_output_bindings;
 pub mod fixes;
 pub mod foreign_toplevel;
 pub mod gamma_control;

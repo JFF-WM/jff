@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="ext_transient_output_v1">
+  <copyright>
+    Copyright © 2020 - 2023 Andri Yngvason
+    Copyright © 2026 Simon Ser
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice (including the next
+    paragraph) shall be included in all copies or substantial portions of the
+    Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+  </copyright>
+
+  <description summary="protocol for creating temporary outputs">
+    The transient output protocol can be used by privileged clients to create
+    independent virtual outputs that will be removed from the compositor when
+    the client destroys the object.
+
+    This protocol is intended for use with output capture protocols such as
+    "ext_output_image_capture_source_manager_v1" for remoting use-cases.
+
+    The "wl_output" global created by this protocol is not tied to a particular
+    hardware device.
+  </description>
+
+  <interface name="ext_transient_output_manager_v1" version="1">
+    <description summary="transient output manager">
+      The transient output manager creates short-lived outputs.
+    </description>
+
+    <request name="create">
+      <description summary="create a transient output">
+        Create a new output that is removed when the client side transient
+        output object is destroyed.
+      </description>
+      <arg name="transient_output" type="new_id" interface="ext_transient_output_v1"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager">
+        Destroy the manager.
+
+        All objects created by the manager will remain valid until they are
+        destroyed themselves.
+      </description>
+    </request>
+  </interface>
+
+  <interface name="ext_transient_output_v1" version="1">
+    <description summary="transient output handle">
+      Initially, the transient output is unconfigured. The client should send
+      an initial commit sequence by sending any number of set_* requests
+      followed by a commit request. If the set_buffer_size request is not sent,
+      the compositor will pick a default size, possibly based on user
+      preference or other compositor policy.
+
+      Upon receiving the initial commit, the compositor will either accept or
+      deny the request. If accepted, a created event is sent. Otherwise, a
+      denied event is sent.
+
+      Once created, a transient output may be reconfigured by sending a new
+      commit sequence.
+
+      When the transient output handle is destroyed, the output itself will
+      also be destroyed. The underlying output may be destroyed before the
+      client destroys the transient output handle, in which case the transient
+      output object becomes inert.
+    </description>
+
+    <enum name="error">
+      <entry name="invalid_size" value="1" summary="invalid size"/>
+    </enum>
+
+    <request name="commit">
+      <description summary="commit pending changes">
+        Atomically commit all pending changes.
+
+        The first time this request is sent, the compositor will reply with
+        either a created or a denied event. Subsequent commits update the
+        output configuration.
+      </description>
+    </request>
+
+    <request name="set_app_id">
+      <description summary="set application identifier">
+        Set an application identifier for the transient output.
+
+        The app ID identifies the general class of applications to which
+        the transient output belongs.
+
+        This request is double-buffered, see the commit request.
+      </description>
+      <arg name="app_id" type="string" summary="application identifier"/>
+    </request>
+
+    <request name="set_sink_tag">
+      <description summary="set sink tag">
+        Set an opaque tag identifying the transient output's endpoint.
+
+        The tag identifies the output sink rather than the output path. That
+        is, the tag identifies the destination of the output contents. In other
+        words, the tag should not change if the same destination is reached via
+        a different path (for instance, when plugging a physical display device
+        via a different connector, or when reaching the same machine via a
+        different IP address).
+
+        To the best extent possible, the client should pick a stable and
+        distinct tag. Stable means that the tag should not change between
+        reboots, configuration updates, software upgrades and hardware hotplugs.
+        Distinct means that two separate outputs created by the same
+        application should not share the same tag if possible. In practice,
+        picking strictly unique and stable tags may not be possible (e.g. when
+        derived from an EDID), which is why these requirements are best-effort.
+
+        The tag may be used to store on-disk preferences for the output.
+
+        This request is double-buffered, see the commit request.
+      </description>
+      <arg name="sink_tag" type="string" summary="sink tag"/>
+    </request>
+
+    <request name="set_description">
+      <description summary="set human-readable output description">
+        Set a human-readable description identifying the transient output.
+
+        The description is a UTF-8 string with no convention defined for its
+        contents. The description needs not be unique. Examples might include
+        'Foocorp 11" Display' or 'Remote example.org desktop via VNC'.
+
+        This request is double-buffered, see the commit request.
+      </description>
+      <arg name="description" type="string" summary="output description"/>
+    </request>
+
+    <request name="set_buffer_size">
+      <description summary="set the size of the output buffer">
+        Set the size of the output buffer in pixels.
+
+        This request is double-buffered, see the commit request.
+      </description>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+
+    <event name="created">
+      <description summary="transient output has been created">
+        This event advertises the global name for the wl_output to be used with
+        wl_registry.bind.
+
+        It is sent exactly once, immediately after the transient output is
+        initially configured and the new "wl_output" global is advertised, if
+        and only if the creation of the transient output was allowed.
+
+        The compositor may destroy the underlying output at any point. In this
+        case, this object becomes inert and a wl_registry.global_remove event
+        is sent with the "wl_output" global's name.
+      </description>
+      <arg name="global_name" type="uint"/>
+    </event>
+
+    <event name="denied">
+      <description summary="transient output creation denied">
+        The event informs the client that the compositor denied its request to
+        create a transient output.
+
+        It is sent exactly once, immediately after the transient output is
+        initially configured, if and only if the creation of the transient
+        output was denied.
+
+        After receiving this event, the client should destroy the object.
+      </description>
+    </event>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy transient output">
+        When the transient output object is destroyed by the client, the
+        associated output created by the compositor is also destroyed.
+      </description>
+    </request>
+  </interface>
+</protocol>

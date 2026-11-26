@@ -106,6 +106,7 @@ use crate::protocol::color_management::ColorManagement;
 use crate::protocol::color_representation::ColorRepresentationManager;
 use crate::protocol::ext_foreign_toplevel::ExtForeignToplevel;
 use crate::protocol::ext_foreign_toplevel_pidfd::ExtForeignToplevelPidfd;
+use crate::protocol::ext_transient_output::TransientOutputs;
 use crate::protocol::fixes::Fixes;
 use crate::protocol::foreign_toplevel::ForeignToplevel;
 use crate::protocol::gamma_control::GammaControl;
@@ -373,6 +374,9 @@ pub struct JffState {
     /// ext-transient-seat: clients that ask for a seat of their own to put virtual devices on
     /// (`protocol/transient_seat.rs`).
     pub transient_seats: TransientSeats,
+    /// ext-transient-output: virtual monitors made on request
+    /// (`protocol/ext_transient_output.rs`).
+    pub transient_outputs: TransientOutputs,
     /// wp-color-representation: how a surface's buffer values are encoded, stored only so far
     /// (`protocol/color_representation.rs`).
     pub color_representation_manager: ColorRepresentationManager,
@@ -634,6 +638,7 @@ impl JffState {
                 !is_sandboxed(client)
             });
         let transient_seats = TransientSeats::new(&display_handle);
+        let transient_outputs = TransientOutputs::new(&display_handle);
         let color_representation_manager = ColorRepresentationManager::new(&display_handle);
         let color_management =
             ColorManagement::new(&display_handle, !config.color_management().off);
@@ -766,6 +771,7 @@ impl JffState {
             virtual_pointer_manager,
             virtual_keyboard_state,
             transient_seats,
+            transient_outputs,
             color_representation_manager,
             color_management,
             xx_capture_color,
