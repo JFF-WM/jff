@@ -152,10 +152,14 @@ pub struct JffState {
     pub winit_hdr: crate::app::winit::WinitHdr,
     pub outputs: Vec<Output>,
     /// What `refresh_window_outputs` last told the windows and panels, as a hash of everything
-    /// it depends on (see `window_outputs_signature`), and whether a surface committed since.
+    /// it depends on (see `window_outputs_signature`), and whether a commit that may have changed
+    /// the surfaces came since (see `note_commit_for_outputs`).
     /// It skips the whole pass while neither changed.
     pub window_outputs_sig: AtomicU64,
     pub window_outputs_dirty: AtomicBool,
+    /// `window_list` while the publishers of one event-loop iteration share it: whether
+    /// sharing is on, and the list once someone asked for it (see `share_window_list`).
+    pub window_list_memo: std::sync::Mutex<(bool, Option<Vec<crate::ipc::events::WindowInfo>>)>,
     /// The `wl_output` global of every active output, by output name.
     pub output_globals: HashMap<String, GlobalId>,
     /// Globals of unplugged outputs and who still has to acknowledge their removal: destroyed
@@ -676,6 +680,7 @@ impl JffState {
             window_outputs_sig: AtomicU64::new(0),
             // The first pass always runs.
             window_outputs_dirty: AtomicBool::new(true),
+            window_list_memo: std::sync::Mutex::new((false, None)),
             output_globals,
             retiring_globals: Vec::new(),
             compositor_state,

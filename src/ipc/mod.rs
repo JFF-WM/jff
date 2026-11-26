@@ -1459,6 +1459,45 @@ impl JffState {
     /// Every visible window, top-to-bottom stacking order. `windows`, `status` and the `watch`
     /// snapshot all come from here, so they can't disagree.
     pub(crate) fn window_list(&self) -> Vec<WindowInfo> {
+        {
+            let memo = self
+                .window_list_memo
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let (true, Some(list)) = &*memo {
+                return list.clone();
+            }
+        }
+        let list = self.build_window_list();
+        let mut memo = self
+            .window_list_memo
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if memo.0 {
+            memo.1 = Some(list.clone());
+        }
+        list
+    }
+
+    /// From now until [`Self::stop_sharing_window_list`], `window_list` is built once and
+    /// handed out again: the publishers of one event-loop iteration all want the same list, and
+    /// nothing they do changes a window.
+    pub fn share_window_list(&self) {
+        *self
+            .window_list_memo
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = (true, None);
+    }
+
+    /// Back to building `window_list` on every call.
+    pub fn stop_sharing_window_list(&self) {
+        *self
+            .window_list_memo
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = (false, None);
+    }
+
+    fn build_window_list(&self) -> Vec<WindowInfo> {
         let focused = self.focused_window();
         self.desk
             .all_top_down()
@@ -1691,10 +1730,16 @@ impl JffState {
 
     /// Process id of the client that owns `window`, if the socket can tell.
     fn window_pid(&self, window: &Window) -> Option<u32> {
+        // The pid of a client does not change, and asking the socket is a system call.
+        if let Some(known) = window.user_data().get::<KnownPid>() {
+            return Some(known.0);
+        }
         let surface = window.toplevel()?.wl_surface();
         let client = surface.client()?;
         let creds = client.get_credentials(&self.display_handle).ok()?;
-        u32::try_from(creds.pid).ok()
+        let pid = u32::try_from(creds.pid).ok()?;
+        window.user_data().insert_if_missing(|| KnownPid(pid));
+        Some(pid)
     }
 
     /// Every monitor, as `watch` and `outputs` describe them.
@@ -2013,6 +2058,9 @@ impl Outbox {
         Ok(())
     }
 }
+
+/// The process id of a window's client, kept on the window once the socket has told it.
+struct KnownPid(u32);
 
 /// A client that sent `watch` and gets events (see `JffState::publish_events`).
 pub struct Subscriber {

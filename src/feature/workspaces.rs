@@ -59,7 +59,7 @@ impl JffState {
         self.session_flush();
         // With `restore-apps`, the apps that are open, for the next session.
         self.app_restore_enforce();
-        self.app_restore_flush();
+        self.app_restore_flush_soon();
         // Before the monitors are looked at: a member that left its zone's monitor is out of
         // the zone by then.
         self.zones_sync();

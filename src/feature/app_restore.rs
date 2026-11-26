@@ -103,7 +103,15 @@ pub struct AppRestore {
     /// The pid and pidfs id of the process of each window, which do not change while the window
     /// lives, so the syscalls that find them are made once.
     identities: HashMap<WlSurface, (u32, u64)>,
+    /// When [`JffState::app_restore_flush_soon`] last ran the flush, and whether a timer is
+    /// waiting to run it.
+    last_flush: Option<Instant>,
+    flush_armed: bool,
 }
+
+/// The least time between two looks at the open windows for the file (see
+/// [`JffState::app_restore_flush_soon`]).
+const FLUSH_EVERY: Duration = Duration::from_millis(250);
 
 fn container_key(name: &str, workspace: Option<usize>, output: &str) -> String {
     format!(
@@ -752,8 +760,39 @@ impl JffState {
         }))
     }
 
-    /// Keep the file in step with the open windows. Runs before every frame, and is cheap when
-    /// nothing changed. Does nothing without `restore-apps`, while the apps of the last session
+    /// [`JffState::app_restore_flush`] at most once per `FLUSH_EVERY`: frames ask for it, and a
+    /// video asks sixty times a second. A request that is turned away is made again by a timer
+    /// when the wait is over, so the last change is written on an idle screen too.
+    pub fn app_restore_flush_soon(&mut self) {
+        let now = Instant::now();
+        let waited = self.app_restore.last_flush.map(|at| now.duration_since(at));
+        match waited {
+            Some(waited) if waited < FLUSH_EVERY => {
+                if self.app_restore.flush_armed {
+                    return;
+                }
+                self.app_restore.flush_armed = true;
+                let timer =
+                    smithay::reexports::calloop::timer::Timer::from_duration(FLUSH_EVERY - waited);
+                let armed = self.loop_handle.insert_source(timer, |_, _, state| {
+                    state.app_restore.flush_armed = false;
+                    state.app_restore.last_flush = Some(Instant::now());
+                    state.app_restore_flush();
+                    smithay::reexports::calloop::timer::TimeoutAction::Drop
+                });
+                if armed.is_err() {
+                    self.app_restore.flush_armed = false;
+                }
+            }
+            _ => {
+                self.app_restore.last_flush = Some(now);
+                self.app_restore_flush();
+            }
+        }
+    }
+
+    /// Keep the file in step with the open windows. Cheap when nothing changed, but it still
+    /// looks at every window: callers that run per frame go through `app_restore_flush_soon`. Does nothing without `restore-apps`, while the apps of the last session
     /// have not been started yet, and once the session is ending.
     pub fn app_restore_flush(&mut self) {
         if !self.config.restore_apps() || self.app_restore.frozen {

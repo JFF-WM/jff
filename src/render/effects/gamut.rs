@@ -219,6 +219,52 @@ pub fn srgb_to_working(space: WorkingSpace, rgb: [f32; 3]) -> [f32; 3] {
     .apply(rgb)
 }
 
+type OutputKey = (ImageDescription, ImageDescription, RenderIntent, bool);
+type WorkingKey = (ImageDescription, f32, Option<f32>);
+
+thread_local! {
+    /// What [`Conversion::to_output`] and [`Conversion::to_working_at`] gave for the last
+    /// arguments seen: they work out matrices, and `conversions` asks for the same ones for
+    /// every surface of every window on every frame.
+    static OUTPUT_MEMO: RefCell<Vec<(OutputKey, Option<Conversion>)>> =
+        const { RefCell::new(Vec::new()) };
+    static WORKING_MEMO: RefCell<Vec<(WorkingKey, Conversion)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Entries kept before the memo starts over (a handful of descriptions are ever in use).
+const MEMO_MAX: usize = 64;
+
+fn to_output_memo(key: OutputKey) -> Option<Conversion> {
+    OUTPUT_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if let Some((_, found)) = memo.iter().find(|(known, _)| *known == key) {
+            return *found;
+        }
+        let made = Conversion::to_output(&key.0, &key.1, key.2, key.3);
+        if memo.len() >= MEMO_MAX {
+            memo.clear();
+        }
+        memo.push((key, made));
+        made
+    })
+}
+
+fn to_working_memo(key: WorkingKey) -> Conversion {
+    WORKING_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if let Some((_, found)) = memo.iter().find(|(known, _)| *known == key) {
+            return *found;
+        }
+        let made = Conversion::to_working_at(&key.0, key.1, key.2);
+        if memo.len() >= MEMO_MAX {
+            memo.clear();
+        }
+        memo.push((key, made));
+        made
+    })
+}
+
 /// The conversion each surface of the tree of `root` needs, by its element id: every surface for an HDR frame, else those not shown as they are (plain sRGB ones only with `convert_srgb`).
 pub fn conversions(root: &WlSurface, color: &OutputColor) -> Vec<(Id, Conversion)> {
     let mut found = Vec::new();
@@ -236,11 +282,11 @@ pub fn conversions(root: &WlSurface, color: &OutputColor) -> Vec<(Id, Conversion
                     .map_or_else(ImageDescription::srgb, |color| color.description);
                 found.push((
                     Id::from_wayland_resource(surface),
-                    Conversion::to_working_at(
-                        &space.source(description),
+                    to_working_memo((
+                        space.source(description),
                         space.sdr_white as f32,
                         own.white.map(|white| white as f32),
-                    ),
+                    )),
                 ));
             },
             |_, _, _| true,
@@ -257,7 +303,7 @@ pub fn conversions(root: &WlSurface, color: &OutputColor) -> Vec<(Id, Conversion
                 None => (ImageDescription::srgb(), RenderIntent::Perceptual),
             };
             let conversion =
-                Conversion::to_output(&description, &color.target, intent, color.convert_srgb);
+                to_output_memo((description, color.target, intent, color.convert_srgb));
             if let Some(conversion) = conversion {
                 found.push((Id::from_wayland_resource(surface), conversion));
             }

@@ -585,6 +585,32 @@ impl JffState {
         hasher.finish()
     }
 
+    /// Ask `refresh_window_outputs` for a full pass if the commit of `surface` (in the tree of
+    /// `root`) may have changed what it tells: the surface commits for the first time, or its
+    /// tree has gained or lost a surface since its last commit. A commit that only brings a new
+    /// buffer, as every frame of a video does, asks for nothing: a window that moved or
+    /// resized is seen by the signature.
+    pub fn note_commit_for_outputs(&self, surface: &WlSurface, root: &WlSurface) {
+        let mut surfaces = 0usize;
+        smithay::wayland::compositor::with_surface_tree_downward(
+            root,
+            (),
+            |_, _, _| smithay::wayland::compositor::TraversalAction::DoChildren(()),
+            |_, _, _| surfaces += 1,
+            |_, _, _| true,
+        );
+        let changed = smithay::wayland::compositor::with_states(surface, |states| {
+            let seen = states.data_map.get_or_insert_threadsafe(TreeSeen::default);
+            let mut seen = seen.0.lock().unwrap_or_else(|e| e.into_inner());
+            let changed = *seen != Some(surfaces);
+            *seen = Some(surfaces);
+            changed
+        });
+        if changed {
+            self.window_outputs_dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
     /// Tell every window which monitors it's on (clients use it for scale, and to pause
     /// animations on windows nobody can see). A window on a hidden workspace is on no monitor.
     /// A window nobody can see (on a workspace that is not shown, put away or minimized, or
@@ -592,8 +618,8 @@ impl JffState {
     /// (`xdg_toplevel` state `suspended`), and is told it is not any more when it shows again.
     ///
     /// Runs every frame of every monitor, so it does nothing unless something it reads has
-    /// changed: a surface committed (a new subsurface, popup or panel), or the signature of the
-    /// monitors and the windows' places differs from the last pass.
+    /// changed: a commit that may have changed the surfaces (see `note_commit_for_outputs`), or
+    /// the signature of the monitors and the windows' places differs from the last pass.
     pub fn refresh_window_outputs(&self) {
         let outputs: Vec<(&Output, Rect)> =
             self.outputs.iter().map(|o| (o, output_rect(o))).collect();
@@ -685,6 +711,11 @@ fn set_suspended(toplevel: &smithay::wayland::shell::xdg::ToplevelSurface, suspe
         let _ = toplevel.send_pending_configure();
     }
 }
+
+/// How many surfaces the tree of a surface's root had when the surface last committed
+/// (`None` before its first commit), see `note_commit_for_outputs`.
+#[derive(Default)]
+struct TreeSeen(Mutex<Option<usize>>);
 
 /// What a surface was last told with `wl_surface.preferred_buffer_scale` and
 /// `preferred_buffer_transform`.

@@ -332,11 +332,13 @@ pub fn run() -> anyhow::Result<()> {
         state.update_idle_inhibited();
         state.service_session_lock();
         state.auto_open_overview();
+        state.share_window_list();
         state.publish_events();
         state.publish_foreign_toplevels();
         state.publish_ext_foreign_toplevels();
         state.publish_ext_foreign_toplevel_pidfds();
         state.publish_ext_workspaces();
+        state.stop_sharing_window_list();
         state.refresh_capture_colors();
         state.service_image_copy();
         state.service_wlr_screencopy();

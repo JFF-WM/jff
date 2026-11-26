@@ -84,10 +84,6 @@ impl CompositorHandler for JffState {
         // Imports the attached buffer so the renderer can draw it. Also reached when a barrier
         // or a blocker clears and a held commit applies, outside any client request.
         on_commit_buffer_handler::<Self>(surface);
-        // A commit can map a subsurface or popup, or a panel: it has to hear which monitor it
-        // is on, which the signature of `refresh_window_outputs` cannot see.
-        self.window_outputs_dirty
-            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.queue_redraw_all();
 
         // Popups need their own commit bookkeeping before they can be drawn.
@@ -99,6 +95,11 @@ impl CompositorHandler for JffState {
         while let Some(parent) = get_parent(&root) {
             root = parent;
         }
+
+        // A commit can map a subsurface or popup, or a panel: it has to hear which monitor it
+        // is on, which the signature of `refresh_window_outputs` cannot see. Only that kind of
+        // commit asks for the pass: a video's frames do not.
+        self.note_commit_for_outputs(surface, &root);
 
         // The stats overlay counts the frames of the window it follows (one bool when off).
         self.stats_commit(surface, &root);
