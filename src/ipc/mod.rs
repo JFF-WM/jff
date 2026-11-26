@@ -140,7 +140,7 @@
 //!
 //! `layout-save` replies `{"ok":true,"name":"Dev","layout":"h0.7(_,@browser)","slots":[null,"browser"]}`, `layout-apply` replies `{"ok":true,"name":"Dev","slots":2,"empty":0,"extra":0}`, `layout-list` replies `{"ok":true,"layouts":[{"name":..,"layout":..,"slots":[..]}]}`, a tagged window goes to the slot with its tag, layouts are in `$XDG_STATE_HOME/jff-wm/container-layouts`.
 //!
-//! `clipboard-history` replies `{"ok":true,"enabled":true,"limit":10,"entries":[{"id":3,"time":1767225600,"size":42,"mimes":["text/plain;charset=utf-8"],"preview":"the text, on one line","current":true}]}`.
+//! `clipboard-history` replies `{"ok":true,"enabled":true,"limit":10,"entries":[{"id":3,"time":1767225600,"size":42,"mimes":["text/plain,charset=utf-8"],"preview":"the text, on one line","current":true}]}`.
 //! `id` is what `clipboard-select` takes, `time` is unix seconds, `size` bytes over all the mime types, `preview` the start of the text (`[image/png 12.3 KiB]` for anything else), `current` is true for the newest copy.
 //! The history lives in memory only. A copy that a password manager marks as a secret is never in it.
 //! `clipboard-select` and `clipboard-clear` reply `{"ok":true}`, `clipboard-select` with an id that is not there is an error reply.
@@ -191,7 +191,8 @@
 //!  "focused":3,                            id of the window that has the keyboard, or null
 //!  "outputs":[{"name":"DP-1","x":0,"y":0,"width":1920,"height":1080,"scanout":false,
 //!              "adaptive_sync":false,"color":COLOR,"hdr":HDR},...],
-//!  "overview":false,"screenshot":false,    overview / screenshot selection is open
+//!  "overview":false,"overview_output":null,   overview is open, and on which monitor (null while closed)
+//!  "screenshot":false,                   screenshot selection is open
 //!  "locked":false,                         the session is locked
 //!  "popups":[POPUP,...],                   mapped menus and popovers
 //!  "layers":[LAYER,...],                   mapped panels, bars, launchers, wallpapers
@@ -226,7 +227,7 @@
 //! output-added     name, x, y, width, height, workspace, scanout, adaptive_sync, color, hdr   outputs
 //! output-changed   name, x, y, width, height, workspace, scanout, adaptive_sync, color, hdr   outputs
 //! output-removed   name                                      outputs
-//! overview         open                                      modes
+//! overview         open, output (the monitor it opened or closed on)   modes
 //! screenshot       open (the area selection)                 modes
 //! lock             on                                        modes
 //! popup-opened     id, window, layer, x, y, width, height      popups
@@ -364,7 +365,7 @@
 //! `keyboard`).
 //! `watch windows workspaces` sends
 //! only those events and a snapshot with only matching members (`windows`, `workspace` and
-//! `count`, `focused`, `outputs`, `overview`, `screenshot` and `locked`, `popups`, `layers`,
+//! `count`, `focused`, `outputs`, `overview` and `overview_output`, `screenshot` and `locked`, `popups`, `layers`,
 //! `dbus_annotations`, `keyboard`).
 //! No groups means all of them. An unknown group gets the usual
 //! `{"ok":false,...}` reply and the connection closes.
@@ -1388,8 +1389,10 @@ impl JffState {
                 // reply says what state it ended in.
                 self.toggle_overview();
                 Ok(format!(
-                    "{{\"ok\":true,\"open\":{}}}\n",
-                    self.overview_active()
+                    "{{\"ok\":true,\"open\":{},\"output\":{}}}\n",
+                    self.overview_active(),
+                    self.overview_output_name()
+                        .map_or("null".to_owned(), |name| json_str(&name))
                 ))
             }
             Request::Hdr(change, output) => {
@@ -1756,6 +1759,7 @@ impl JffState {
             focused,
             outputs,
             overview: self.overview_active(),
+            overview_output: self.overview_output_name(),
             screenshot: self.screenshot.is_some(),
             locked: self.session_locked(),
             popups: self.popup_list(),

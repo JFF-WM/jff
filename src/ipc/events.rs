@@ -720,6 +720,8 @@ pub struct Snapshot {
     pub focused: Option<u64>,
     pub outputs: Vec<OutputInfo>,
     pub overview: bool,
+    /// The monitor the open overview is on, `None` while it is closed.
+    pub overview_output: Option<String>,
     pub screenshot: bool,
     pub locked: bool,
     /// Mapped menus, oldest first.
@@ -759,8 +761,13 @@ impl Snapshot {
         }
         if groups.contains(Group::Modes) {
             out.push_str(&format!(
-                ",\"overview\":{},\"screenshot\":{},\"locked\":{}",
-                self.overview, self.screenshot, self.locked
+                ",\"overview\":{},\"overview_output\":{},\"screenshot\":{},\"locked\":{}",
+                self.overview,
+                self.overview_output
+                    .as_deref()
+                    .map_or("null".to_owned(), json_str),
+                self.screenshot,
+                self.locked
             ));
         }
         if groups.contains(Group::Popups) {
@@ -890,6 +897,8 @@ pub enum Event {
     OutputChanged(OutputInfo),
     Overview {
         open: bool,
+        /// The monitor the overview opened on, or closed on.
+        output: Option<String>,
     },
     Screenshot {
         open: bool,
@@ -1047,7 +1056,10 @@ impl Event {
             Event::OutputChanged(output) => {
                 format!("{{\"event\":\"output-changed\",{}}}", output.members())
             }
-            Event::Overview { open } => format!("{{\"event\":\"overview\",\"open\":{open}}}"),
+            Event::Overview { open, output } => format!(
+                "{{\"event\":\"overview\",\"open\":{open},\"output\":{}}}",
+                output.as_deref().map_or("null".to_owned(), json_str)
+            ),
             Event::Screenshot { open } => format!("{{\"event\":\"screenshot\",\"open\":{open}}}"),
             Event::Lock { on } => format!("{{\"event\":\"lock\",\"on\":{on}}}"),
             Event::PopupOpened(popup) => {
@@ -1326,8 +1338,15 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Event> {
         }
     }
 
-    if old.overview != new.overview {
-        events.push(Event::Overview { open: new.overview });
+    if old.overview != new.overview || old.overview_output != new.overview_output {
+        events.push(Event::Overview {
+            open: new.overview,
+            output: if new.overview {
+                new.overview_output.clone()
+            } else {
+                old.overview_output.clone()
+            },
+        });
     }
     if old.screenshot != new.screenshot {
         events.push(Event::Screenshot {

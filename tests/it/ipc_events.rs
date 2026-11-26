@@ -696,21 +696,47 @@ fn overview_and_screenshot() {
     let old = snapshot(vec![]);
     let mut new = old.clone();
     new.overview = true;
+    new.overview_output = Some("DP-1".to_string());
     new.screenshot = true;
     assert_eq!(
         diff(&old, &new),
         vec![
-            Event::Overview { open: true },
+            Event::Overview {
+                open: true,
+                output: Some("DP-1".to_string())
+            },
             Event::Screenshot { open: true }
         ]
     );
     assert_eq!(
         diff(&new, &old),
         vec![
-            Event::Overview { open: false },
+            Event::Overview {
+                open: false,
+                output: Some("DP-1".to_string())
+            },
             Event::Screenshot { open: false }
         ]
     );
+}
+
+#[test]
+fn the_overview_says_which_monitor_it_is_on() {
+    let mut a = snapshot(vec![]);
+    a.overview = true;
+    a.overview_output = Some("DP-1".to_string());
+    let mut b = a.clone();
+    b.overview_output = Some("HDMI-A-1".to_string());
+    assert_eq!(
+        diff(&a, &b),
+        vec![Event::Overview {
+            open: true,
+            output: Some("HDMI-A-1".to_string())
+        }]
+    );
+    assert!(a
+        .to_json(GroupSet::ALL)
+        .contains("\"overview_output\":\"DP-1\""));
 }
 
 #[test]
@@ -811,7 +837,13 @@ fn every_event_belongs_to_its_group() {
             Group::Outputs,
         ),
         (Event::OutputChanged(o), Group::Outputs),
-        (Event::Overview { open: true }, Group::Modes),
+        (
+            Event::Overview {
+                open: true,
+                output: None,
+            },
+            Group::Modes,
+        ),
         (Event::Screenshot { open: true }, Group::Modes),
         (
             Event::KeyboardLayout(KeyboardInfo::default()),
@@ -1057,8 +1089,11 @@ fn events_are_written_as_one_json_line_each() {
                  \"hdr\":{\"requested\":false,\"active\":false,\"reason\":null,\"eotf\":null,\"peak\":null,\"peak_source\":null,\"sdr_white\":203,\"bits\":null,\"night_light\":false,\"content_light\":null,\"scanout\":{\"active\":false,\"reason\":null}}}",
         ),
         (
-            Event::Overview { open: true },
-            "{\"event\":\"overview\",\"open\":true}",
+            Event::Overview {
+                open: true,
+                output: Some("DP-1".to_string()),
+            },
+            "{\"event\":\"overview\",\"open\":true,\"output\":\"DP-1\"}",
         ),
         (
             Event::Screenshot { open: false },
@@ -1142,7 +1177,7 @@ fn the_snapshot_has_every_group_by_default() {
         json,
         format!(
             "{{\"event\":\"snapshot\",\"windows\":[{},{}],\"workspace\":2,\"count\":9,\
-                 \"focused\":2,\"outputs\":[{},{}],\"overview\":false,\"screenshot\":false,\
+                 \"focused\":2,\"outputs\":[{},{}],\"overview\":false,\"overview_output\":null,\"screenshot\":false,\
                  \"locked\":false,\"popups\":[],\"layers\":[],\"dbus_annotations\":[],\
                  \"keyboard\":{{\"active\":null,\"layouts\":[]}}}}",
             s.windows[0].to_json(),
@@ -1164,7 +1199,7 @@ fn an_empty_snapshot_is_valid() {
     assert_eq!(
         s.to_json(GroupSet::ALL),
         "{\"event\":\"snapshot\",\"windows\":[],\"workspace\":1,\"count\":9,\
-             \"focused\":null,\"outputs\":[],\"overview\":false,\"screenshot\":false,\
+             \"focused\":null,\"outputs\":[],\"overview\":false,\"overview_output\":null,\"screenshot\":false,\
              \"locked\":false,\"popups\":[],\"layers\":[],\"dbus_annotations\":[],\
              \"keyboard\":{\"active\":null,\"layouts\":[]}}"
     );
@@ -1180,7 +1215,7 @@ fn the_snapshot_only_has_the_asked_for_groups() {
     );
     assert_eq!(
         s.to_json(GroupSet::from_groups(&[Group::Focus, Group::Modes])),
-        "{\"event\":\"snapshot\",\"focused\":1,\"overview\":false,\"screenshot\":false,\"locked\":false}"
+        "{\"event\":\"snapshot\",\"focused\":1,\"overview\":false,\"overview_output\":null,\"screenshot\":false,\"locked\":false}"
     );
     let json = s.to_json(GroupSet::from_groups(&[Group::Windows]));
     assert!(json.starts_with("{\"event\":\"snapshot\",\"windows\":[{\"id\":1,"));

@@ -692,6 +692,14 @@ impl JffState {
             .is_some_and(|ov| ov.closing.is_none())
     }
 
+    /// The name of the monitor the open overview is on, `None` while it is closed or closing.
+    pub fn overview_output_name(&self) -> Option<String> {
+        self.overview
+            .as_ref()
+            .filter(|ov| ov.closing.is_none())
+            .map(|ov| ov.output.name())
+    }
+
     /// The overview is up and the pointer is on another monitor than its own: the user is
     /// working there, so the overview is not what keys are for (see `keyboard_key`).
     pub fn overview_pointer_elsewhere(&self) -> bool {
