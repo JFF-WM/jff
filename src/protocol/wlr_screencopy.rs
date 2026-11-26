@@ -13,8 +13,11 @@
 //! of a whole monitor. A region always goes through `wl_shm`.
 //!
 //! `copy` is answered at the next turn of the event loop. `copy_with_damage` waits until a
-//! frame was sent to the monitor since the last picture handed to this client's manager, and
-//! then reports the whole picture as damage, which the protocol allows.
+//! frame was sent to the monitor since the last picture handed to this client, and then
+//! reports what changed since that picture, as boxes worked out from the render elements (a
+//! `DamageTrack` for each client and monitor, see `capture.rs`). When nothing changed in the
+//! part the client asked for (all of the monitor, or its region), it keeps waiting and nothing
+//! is drawn or read back.
 //!
 //! Hidden from sandboxed clients, like the other capture protocols.
 
@@ -29,6 +32,7 @@ use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
+use smithay::utils::{Buffer as BufferCoords, Rectangle};
 use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::shm::with_buffer_contents;
 
@@ -39,7 +43,7 @@ use super::wlr_screencopy_bindings::server::zwlr_screencopy_manager_v1::{
     self, ZwlrScreencopyManagerV1,
 };
 use crate::feature::outputs::frame_size;
-use crate::feature::screenshot::Captured;
+use crate::feature::screenshot::{Captured, DamageTrack};
 use crate::protocol::image_copy::write_shm;
 use crate::protocol::presentation::monotonic_now;
 use crate::state::{is_sandboxed, JffState};
@@ -83,8 +87,23 @@ pub struct WlrScreencopy {
     pending: Vec<PendingFrame>,
     /// How many frames were sent to each monitor (by name).
     drawn: Vec<(String, u64)>,
-    /// The `drawn` count at the last picture handed out for each monitor.
-    served: Vec<(String, u64)>,
+    /// What each client's `copy_with_damage` last got, to tell it what changed since. The
+    /// oldest are dropped, a client that comes back starts with a whole picture.
+    tracks: Vec<WlrTrack>,
+}
+
+/// How many clients' (and monitors') damage is kept at once.
+const MAX_TRACKS: usize = 16;
+
+/// What one client was last given of one monitor.
+struct WlrTrack {
+    client: ClientId,
+    output: String,
+    /// Whether the picture had the cursor in it: a different picture, so its own damage.
+    cursor: bool,
+    /// The `drawn` count of the monitor at that picture.
+    drawn: u64,
+    track: DamageTrack,
 }
 
 impl WlrScreencopy {
@@ -93,7 +112,7 @@ impl WlrScreencopy {
             global: display.create_global::<JffState, ZwlrScreencopyManagerV1, ()>(3, ()),
             pending: Vec::new(),
             drawn: Vec::new(),
-            served: Vec::new(),
+            tracks: Vec::new(),
         }
     }
 
@@ -110,10 +129,45 @@ impl WlrScreencopy {
         list.iter().find(|(n, _)| n == name).map(|(_, c)| *c)
     }
 
-    fn set_served(&mut self, name: &str, count: u64) {
-        match self.served.iter_mut().find(|(n, _)| n == name) {
-            Some((_, c)) => *c = count,
-            None => self.served.push((name.to_string(), count)),
+    /// The `drawn` count of `output` at the last picture `client` got, if it got one.
+    fn track_drawn(&self, client: &ClientId, output: &str, cursor: bool) -> Option<u64> {
+        self.tracks
+            .iter()
+            .find(|t| t.client == *client && t.output == output && t.cursor == cursor)
+            .map(|t| t.drawn)
+    }
+
+    /// Take the damage of `client` out, a new one (whole picture) when it has none. Put it
+    /// back with `put_track`, one that is not put back starts over, which is what a picture
+    /// that did not get through needs.
+    fn take_track(&mut self, client: &ClientId, output: &str, cursor: bool) -> DamageTrack {
+        let found = self
+            .tracks
+            .iter()
+            .position(|t| t.client == *client && t.output == output && t.cursor == cursor);
+        match found {
+            Some(at) => self.tracks.remove(at).track,
+            None => DamageTrack::default(),
+        }
+    }
+
+    fn put_track(
+        &mut self,
+        client: ClientId,
+        output: String,
+        cursor: bool,
+        drawn: u64,
+        track: DamageTrack,
+    ) {
+        self.tracks.push(WlrTrack {
+            client,
+            output,
+            cursor,
+            drawn,
+            track,
+        });
+        if self.tracks.len() > MAX_TRACKS {
+            self.tracks.remove(0);
         }
     }
 }
@@ -341,6 +395,25 @@ fn crop(picture: Captured, region: (i32, i32, i32, i32)) -> Captured {
     }
 }
 
+/// The boxes of `rects` (pixels of the whole picture) that fall in `region` (x, y, width,
+/// height), as boxes of the region's own picture. Empty when none does.
+fn clip_damage(
+    rects: &[Rectangle<i32, BufferCoords>],
+    region: (i32, i32, i32, i32),
+) -> Vec<(i32, i32, i32, i32)> {
+    let (rx, ry, rw, rh) = region;
+    rects
+        .iter()
+        .filter_map(|rect| {
+            let x0 = rect.loc.x.max(rx);
+            let y0 = rect.loc.y.max(ry);
+            let x1 = (rect.loc.x + rect.size.w).min(rx + rw);
+            let y1 = (rect.loc.y + rect.size.h).min(ry + rh);
+            (x1 > x0 && y1 > y0).then_some((x0 - rx, y0 - ry, x1 - x0, y1 - y0))
+        })
+        .collect()
+}
+
 impl JffState {
     /// Answer the copies clients wait for. Runs after every event-loop iteration, does nothing
     /// while no copy is waiting.
@@ -378,31 +451,89 @@ impl JffState {
         };
         let name = output.name();
         let drawn = WlrScreencopy::count(&self.wlr_screencopy.drawn, &name).unwrap_or(0);
-        if pending.with_damage
-            && WlrScreencopy::count(&self.wlr_screencopy.served, &name) == Some(drawn)
-        {
-            return Some(pending);
-        }
-
-        let result = match get_dmabuf(&pending.buffer).ok().cloned() {
-            Some(mut dmabuf) if whole => self.copy_wlr_dmabuf(&output, cursor, &mut dmabuf),
-            Some(_) => Err("a region can only be copied into a wl_shm buffer".to_string()),
-            None => self
-                .capture_output(&output, cursor)
-                .map(|picture| crop(picture, region))
-                .and_then(|picture| write_shm(&pending.buffer, &picture)),
+        // `copy_with_damage` is told what changed since the last picture this client got of
+        // the monitor, so what it got is kept for it. A plain `copy` says nothing of damage.
+        let client = if pending.with_damage {
+            pending.frame.client().map(|client| client.id())
+        } else {
+            None
         };
-        if let Err(why) = result {
-            tracing::warn!("wlr-screencopy: {why}");
-            pending.frame.failed();
-            return None;
+        if let Some(client) = &client {
+            if self.wlr_screencopy.track_drawn(client, &name, cursor) == Some(drawn) {
+                return Some(pending);
+            }
+        }
+        let mut track = match &client {
+            Some(client) => self.wlr_screencopy.take_track(client, &name, cursor),
+            None => DamageTrack::default(),
+        };
+
+        // `Ok(Some(boxes))`: the buffer holds the picture, `boxes` (x, y, width, height in
+        // pixels of the buffer) changed. `Ok(None)`: nothing changed, nothing was drawn.
+        let whole_box = vec![(0, 0, region.2, region.3)];
+        let result: Result<Option<Vec<(i32, i32, i32, i32)>>, String> =
+            match get_dmabuf(&pending.buffer).ok().cloned() {
+                Some(mut dmabuf) if whole && client.is_some() => self
+                    .capture_output_into_tracked(&output, cursor, &mut dmabuf, &mut track)
+                    .map(|changed| {
+                        changed.map(|rects| {
+                            rects
+                                .iter()
+                                .map(|r| (r.loc.x, r.loc.y, r.size.w, r.size.h))
+                                .collect()
+                        })
+                    }),
+                Some(mut dmabuf) if whole => self
+                    .copy_wlr_dmabuf(&output, cursor, &mut dmabuf)
+                    .map(|()| Some(whole_box.clone())),
+                Some(_) => Err("a region can only be copied into a wl_shm buffer".to_string()),
+                None if client.is_some() => self
+                    .capture_output_tracked(&output, cursor, &mut track)
+                    .and_then(|changed| {
+                        let Some((picture, rects)) = changed else {
+                            return Ok(None);
+                        };
+                        // Only what changed inside the part the client asked for counts.
+                        let clipped = clip_damage(&rects, region);
+                        if clipped.is_empty() {
+                            return Ok(None);
+                        }
+                        write_shm(&pending.buffer, &crop(picture, region)).map(|()| Some(clipped))
+                    }),
+                None => self
+                    .capture_output(&output, cursor)
+                    .map(|picture| crop(picture, region))
+                    .and_then(|picture| write_shm(&pending.buffer, &picture))
+                    .map(|()| Some(whole_box.clone())),
+            };
+        let boxes = match result {
+            // the picture did not get through: the next one is whole
+            Err(why) => {
+                tracing::warn!("wlr-screencopy: {why}");
+                pending.frame.failed();
+                return None;
+            }
+            // nothing changed for this client: it keeps waiting for the next frame
+            Ok(None) => {
+                if let Some(client) = client {
+                    self.wlr_screencopy
+                        .put_track(client, name, cursor, drawn, track);
+                }
+                return Some(pending);
+            }
+            Ok(Some(boxes)) => boxes,
+        };
+        if let Some(client) = client {
+            self.wlr_screencopy
+                .put_track(client, name, cursor, drawn, track);
         }
 
-        self.wlr_screencopy.set_served(&name, drawn);
         let frame = &pending.frame;
         frame.flags(zwlr_screencopy_frame_v1::Flags::empty());
         if pending.with_damage && frame.version() >= 2 {
-            frame.damage(0, 0, region.2 as u32, region.3 as u32);
+            for (x, y, w, h) in boxes {
+                frame.damage(x as u32, y as u32, w as u32, h as u32);
+            }
         }
         let now = monotonic_now();
         let secs = now.as_secs();

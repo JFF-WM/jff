@@ -225,6 +225,94 @@ struct OutputFrame {
     _color_scope: gamut::Scope,
 }
 
+/// More damage boxes than this are sent as the one box around all of them.
+const MAX_DAMAGE_RECTS: usize = 16;
+
+/// What changed in a monitor's picture since the last frame a capture session (or a client of
+/// `wlr-screencopy`) was given, worked out from the render elements and not from pixels.
+///
+/// It holds an `OutputDamageTracker` that is only ever asked for damage, never drawn with: each
+/// ask compares the elements with the ones of the ask before, so a frame that is skipped (the
+/// client was not waiting) does not lose damage. The first ask, a new size or scale, and an ask
+/// after `reset` give the whole picture.
+#[derive(Default)]
+pub struct DamageTrack {
+    tracker: Option<(Size<i32, Physical>, f64, OutputDamageTracker)>,
+}
+
+impl DamageTrack {
+    /// Forget what was seen: the next ask gives the whole picture. For when a frame was given
+    /// by some other way, or did not get through.
+    pub fn reset(&mut self) {
+        self.tracker = None;
+    }
+
+    /// The boxes (pixels of the picture, at most `MAX_DAMAGE_RECTS`) where `elements` differ
+    /// from the last ask. Empty when nothing does.
+    fn advance<E: Element>(
+        &mut self,
+        size: (i32, i32),
+        scale: f64,
+        elements: &[E],
+    ) -> Vec<Rectangle<i32, BufferCoords>> {
+        let physical: Size<i32, Physical> = size.into();
+        let whole = || vec![Rectangle::<i32, BufferCoords>::from_size(size.into())];
+        let fresh = !matches!(
+            &self.tracker,
+            Some((s, sc, _)) if *s == physical && *sc == scale
+        );
+        if fresh {
+            self.tracker = Some((
+                physical,
+                scale,
+                OutputDamageTracker::new(physical, scale, Transform::Normal),
+            ));
+        }
+        let Some((_, _, tracker)) = self.tracker.as_mut() else {
+            return whole();
+        };
+        // age 1: compared with the ask before, whatever buffer the picture goes into
+        let asked = match tracker.damage_output(1, elements) {
+            Ok((damage, _states)) => Ok(damage.map(|d| clamp_damage(d, size)).unwrap_or_default()),
+            Err(_) => Err(()),
+        };
+        match asked {
+            // nothing was there to compare with: the first picture is all of it
+            Ok(_) if fresh => whole(),
+            Ok(damage) => damage,
+            Err(()) => {
+                self.tracker = None;
+                whole()
+            }
+        }
+    }
+}
+
+/// `rects` cut to a picture of `size`, as one box when there are too many.
+fn clamp_damage(
+    rects: &[Rectangle<i32, Physical>],
+    size: (i32, i32),
+) -> Vec<Rectangle<i32, BufferCoords>> {
+    let mut out: Vec<Rectangle<i32, BufferCoords>> = Vec::new();
+    for rect in rects {
+        let x0 = rect.loc.x.max(0);
+        let y0 = rect.loc.y.max(0);
+        let x1 = (rect.loc.x + rect.size.w).min(size.0);
+        let y1 = (rect.loc.y + rect.size.h).min(size.1);
+        if x1 > x0 && y1 > y0 {
+            out.push(Rectangle::new((x0, y0).into(), (x1 - x0, y1 - y0).into()));
+        }
+    }
+    if out.len() > MAX_DAMAGE_RECTS {
+        let x0 = out.iter().map(|r| r.loc.x).min().unwrap_or(0);
+        let y0 = out.iter().map(|r| r.loc.y).min().unwrap_or(0);
+        let x1 = out.iter().map(|r| r.loc.x + r.size.w).max().unwrap_or(0);
+        let y1 = out.iter().map(|r| r.loc.y + r.size.h).max().unwrap_or(0);
+        out = vec![Rectangle::new((x0, y0).into(), (x1 - x0, y1 - y0).into())];
+    }
+    out
+}
+
 /// Make the corners of a `width` by `height` premultiplied RGBA picture transparent, with a
 /// quarter circle of `radius` pixels and a soft edge.
 fn round_corners(rgba: &mut [u8], width: i32, height: i32, radius: i32) {
@@ -588,6 +676,74 @@ impl JffState {
             BACKGROUND,
         )?;
         Ok(size)
+    }
+
+    /// [`JffState::capture_output`], but only when `track` says the picture changed since the
+    /// last time it was asked: then the picture and the boxes that changed. `None` when nothing
+    /// did, and then nothing is drawn or read back.
+    pub(crate) fn capture_output_tracked(
+        &mut self,
+        output: &Output,
+        with_cursor: bool,
+        track: &mut DamageTrack,
+    ) -> Result<Option<(Captured, Vec<Rectangle<i32, BufferCoords>>)>, String> {
+        let frame = self.output_frame(output, with_cursor, None, false)?;
+        let damage = track.advance(frame.size, frame.scale, &frame.elements);
+        if damage.is_empty() {
+            return Ok(None);
+        }
+        let drawn = render_to_rgba(
+            self.backend.renderer(),
+            frame.size,
+            frame.scale,
+            &frame.elements,
+            BACKGROUND,
+        );
+        match drawn {
+            Ok(picture) => Ok(Some((picture, damage))),
+            Err(why) => {
+                // the client did not get this picture: the next one has to be whole
+                track.reset();
+                Err(why)
+            }
+        }
+    }
+
+    /// [`JffState::capture_output_into`], but only when `track` says the picture changed since
+    /// the last time it was asked: then the boxes that changed (the whole buffer is drawn, a
+    /// client's buffers are not all the same one). `None` when nothing changed, and then
+    /// nothing is drawn.
+    pub(crate) fn capture_output_into_tracked(
+        &mut self,
+        output: &Output,
+        with_cursor: bool,
+        dmabuf: &mut Dmabuf,
+        track: &mut DamageTrack,
+    ) -> Result<Option<Vec<Rectangle<i32, BufferCoords>>>, String> {
+        let frame = self.output_frame(output, with_cursor, None, false)?;
+        let size = dmabuf.size();
+        if (size.w, size.h) != frame.size {
+            return Err(format!(
+                "the buffer is {}x{}, the picture {}x{}",
+                size.w, size.h, frame.size.0, frame.size.1
+            ));
+        }
+        let damage = track.advance(frame.size, frame.scale, &frame.elements);
+        if damage.is_empty() {
+            return Ok(None);
+        }
+        if let Err(why) = render_to_dmabuf(
+            self.backend.renderer(),
+            dmabuf,
+            frame.size,
+            frame.scale,
+            &frame.elements,
+            BACKGROUND,
+        ) {
+            track.reset();
+            return Err(why);
+        }
+        Ok(Some(damage))
     }
 
     /// The picture of `cursor` that `look` describes, alone on a transparent background with its

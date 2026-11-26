@@ -19,9 +19,8 @@
 //! (`Argb8888` and `Xrgb8888` in the modifiers the renderer can draw into, and for a monitor in
 //! HDR mode `Argb2101010` and `Abgr2101010` as well, where it can): a client that
 //! allocates its buffer that way gets the monitor drawn straight into it, with no readback or
-//! copy. That picture is always whole: the damage sent with it is all of it, and a frame is
-//! still only drawn when the monitor drew since the last one. Windows and the winit backend stay
-//! on `wl_shm`.
+//! copy. The buffer is always drawn whole (a client's buffers are not all the same one), the
+//! damage sent with it is not: see "Damage". Windows and the winit backend stay on `wl_shm`.
 //!
 //! HDR: the 8-bit formats always get the sRGB picture a screenshot file has, so a client that
 //! knows nothing about HDR is never handed a washed-out one. A client that asks for a 10-bit
@@ -34,9 +33,14 @@
 //! next frame right away would spin. The first frame of a session goes out at once. A later
 //! frame stays pending, without drawing anything, until the source may have changed: a monitor
 //! when a frame was sent to it (`ImageCopy::output_drawn`), a window when any of its surfaces
-//! (or its menus) committed. Only then is the picture drawn and compared with the last one: the
-//! same picture keeps the frame pending, a different one goes out with the box around the
-//! pixels that changed as its damage.
+//! (or its menus) committed. Only then is the damage worked out.
+//!
+//! For a monitor in 8 bits (`wl_shm` or dmabuf) that is done on the render elements, not on
+//! pixels: the session's `DamageTrack` says which boxes changed since the last frame the session
+//! got. No change keeps the frame pending without drawing or reading anything back, a change goes
+//! out with those boxes as its damage. A monitor in HDR mode and a window are drawn, read back
+//! and compared with the last picture (`damage_between`): the same picture keeps the frame
+//! pending, a different one goes out with the box around the pixels that changed.
 //!
 //! Cursor: `paint_cursors` is honored for monitors on the TTY backend (where jff draws the
 //! cursor), a window picture never has one. A client that wants the cursor apart from the
@@ -87,7 +91,7 @@ use std::sync::Arc;
 
 use crate::app::Backend;
 use crate::feature::outputs::{frame_size, output_rect};
-use crate::feature::screenshot::{Captured, HdrCaptured};
+use crate::feature::screenshot::{Captured, DamageTrack, HdrCaptured};
 use crate::ipc::WindowId;
 use crate::primitives::capture_color::frame_description_fits;
 use crate::primitives::cursor_capture::hotspot_in_source;
@@ -107,6 +111,8 @@ pub struct CaptureSession {
     pending: Option<Frame>,
     /// What the source was at when `last` was made: while it is the same, nothing is drawn.
     seen: Option<Seen>,
+    /// What a monitor looked like at the last frame sent through the damage tracker.
+    damage: DamageTrack,
 }
 
 /// One cursor capture session and what jff keeps for it.
@@ -211,6 +217,9 @@ enum Last {
     Hdr(Vec<u16>),
     /// A picture drawn straight into a client's dmabuf: there are no pixels to compare with.
     Dmabuf,
+    /// A picture of a monitor in 8 bits written to a `wl_shm` buffer, whose damage came from
+    /// the session's `DamageTrack`: no pixels are kept.
+    Tracked,
 }
 
 /// A picture on its way into a client's buffer.
@@ -568,12 +577,30 @@ impl JffState {
             return true;
         }
         let cursor = entry.session.draw_cursor();
-        let drawn = if ten_bit {
-            self.capture_output_hdr_into(output, cursor, &mut dmabuf)
-        } else {
-            self.capture_output_into(output, cursor, &mut dmabuf)
-        };
-        match drawn {
+        if !ten_bit {
+            // What changed comes from the render elements. Nothing changed: no draw at all.
+            match self.capture_output_into_tracked(output, cursor, &mut dmabuf, &mut entry.damage) {
+                Ok(Some(damage)) => {
+                    entry.seen = Some(seen);
+                    entry.last = Some(Last::Dmabuf);
+                    frame.success(Transform::Normal, damage, monotonic_now());
+                }
+                Ok(None) => {
+                    entry.seen = Some(seen);
+                    entry.last = Some(Last::Dmabuf);
+                    entry.pending = Some(frame);
+                }
+                Err(why) => {
+                    tracing::warn!("image-copy-capture: {why}");
+                    frame.fail(CaptureFailureReason::Unknown);
+                }
+            }
+            return true;
+        }
+        // The 10-bit picture is not tracked: all of it is damage, and the next 8-bit frame
+        // starts over.
+        entry.damage.reset();
+        match self.capture_output_hdr_into(output, cursor, &mut dmabuf) {
             Ok(size) => {
                 entry.seen = Some(seen);
                 entry.last = Some(Last::Dmabuf);
@@ -586,6 +613,44 @@ impl JffState {
             Err(why) => {
                 tracing::warn!("image-copy-capture: {why}");
                 frame.fail(CaptureFailureReason::Unknown);
+            }
+        }
+        true
+    }
+
+    /// Answer `frame` with a picture of the monitor in 8 bits, written to its `wl_shm` `buffer`.
+    /// What changed comes from the session's `DamageTrack`: when nothing did, nothing is drawn
+    /// or read back and the frame stays pending.
+    fn service_tracked_shm(
+        &mut self,
+        entry: &mut CaptureSession,
+        output: &Output,
+        frame: Frame,
+        buffer: &WlBuffer,
+        cursor: bool,
+        seen: Seen,
+    ) -> bool {
+        let drawn = match self.capture_output_tracked(output, cursor, &mut entry.damage) {
+            Ok(drawn) => drawn,
+            Err(why) => {
+                tracing::warn!("image-copy-capture: {why}");
+                frame.fail(CaptureFailureReason::Unknown);
+                return true;
+            }
+        };
+        // Looked at: until the monitor draws again there is nothing to compare.
+        entry.seen = Some(seen);
+        entry.last = Some(Last::Tracked);
+        let Some((picture, damage)) = drawn else {
+            entry.pending = Some(frame);
+            return true;
+        };
+        match write_shm(buffer, &picture) {
+            Ok(()) => frame.success(Transform::Normal, damage, monotonic_now()),
+            Err(why) => {
+                tracing::warn!("image-copy-capture: {why}");
+                entry.damage.reset();
+                frame.fail(CaptureFailureReason::BufferConstraints);
             }
         }
         true
@@ -822,6 +887,7 @@ impl JffState {
         if !constraints_ok {
             entry.session.update_constraints(wanted);
             entry.last = None;
+            entry.damage.reset();
             if let Some(frame) = entry.pending.take() {
                 frame.fail(CaptureFailureReason::BufferConstraints);
             }
@@ -859,6 +925,16 @@ impl JffState {
             );
             frame.fail(CaptureFailureReason::Unknown);
             return true;
+        }
+        // A monitor in 8 bits: the damage comes from the render elements, no pixels are kept.
+        if !bad_format {
+            if let (Target::Output(output), None) = (&target, ten_bit) {
+                if matches!(entry.last, Some(Last::Tracked)) && entry.seen.as_ref() == Some(&seen) {
+                    entry.pending = Some(frame);
+                    return true;
+                }
+                return self.service_tracked_shm(entry, output, frame, &buffer, cursor, seen);
+            }
         }
         let shm_last = matches!(entry.last, Some(Last::Sdr(_) | Last::Hdr(_)));
         if !bad_format && shm_last && entry.seen.as_ref() == Some(&seen) {
@@ -930,6 +1006,8 @@ impl JffState {
         match written {
             Ok(_) => {
                 frame.success(Transform::Normal, vec![damage], monotonic_now());
+                // this frame did not go through the damage tracker
+                entry.damage.reset();
                 entry.last = Some(match picture {
                     Picture::Sdr(now) => Last::Sdr(now.rgba),
                     Picture::Hdr { picture: now, .. } => Last::Hdr(now.half_rgba),
@@ -1040,6 +1118,7 @@ impl ImageCopyCaptureHandler for JffState {
             last: None,
             pending: None,
             seen: None,
+            damage: DamageTrack::default(),
         });
     }
 
