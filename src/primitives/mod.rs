@@ -31,6 +31,7 @@ pub mod pixel_snap;
 pub mod region;
 pub mod scroll_steps;
 pub mod stats;
+pub mod suspend;
 pub mod swipe;
 pub mod tile_tree;
 pub mod touch;

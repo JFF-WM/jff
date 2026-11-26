@@ -33,9 +33,6 @@ use crate::render::effects::hdr::{self as hdr_frame, HdrFrame};
 use super::pacing::{advance_frame_sequence, frame_sequence, LastCallback};
 use super::{Backend, BACKGROUND};
 
-/// How often a window hidden behind a covering fullscreen window gets a frame callback.
-const HIDDEN_FRAME_INTERVAL: Duration = Duration::from_secs(1);
-
 /// Peak luminance the simulated HDR output has when `hdr-peak` is not set, in cd/m².
 const SIMULATED_PEAK: u32 = 1000;
 
@@ -647,9 +644,9 @@ impl JffState {
                 .first_in_cycle(&name, sequence)
                 .then(|| output.clone())
         };
-        // Windows behind a fullscreen window that covers the monitor can't be seen: they get a
-        // callback once per `HIDDEN_FRAME_INTERVAL` instead of one per refresh, so they stay
-        // alive without competing with the game for the GPU.
+        // Windows behind a fullscreen window that covers the monitor can't be seen: they were
+        // told they are suspended (see `refresh_window_outputs`) and get no callbacks at all,
+        // so they do not compete with the game for the GPU.
         let covered = crate::protocol::layer_shell::fullscreen_covers(&self.desk, rect);
         let mut behind = false;
         for entry in self.desk.top_down() {
@@ -658,15 +655,13 @@ impl JffState {
             if !layout::intersects(area, rect) {
                 continue;
             }
-            let throttle = if covered && behind {
-                HIDDEN_FRAME_INTERVAL
-            } else {
-                Duration::ZERO
-            };
+            if covered && behind {
+                continue;
+            }
             behind = true;
             entry
                 .window
-                .send_frame(output, time, Some(throttle), should_send);
+                .send_frame(output, time, Some(Duration::ZERO), should_send);
         }
         // layers get callbacks regardless of windows
         for layer in smithay::desktop::layer_map_for_output(output).layers() {

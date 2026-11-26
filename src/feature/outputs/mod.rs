@@ -12,16 +12,18 @@ use smithay::desktop::layer_map_for_output;
 use smithay::desktop::space::SpaceElement;
 use smithay::input::pointer::MotionEvent;
 use smithay::output::Output;
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::backend::ClientId;
 use smithay::reexports::wayland_server::{Client, Resource};
 use smithay::utils::{Logical, Point, Rectangle, Size, Transform, SERIAL_COUNTER};
 use smithay::wayland::fractional_scale::with_fractional_scale;
 
 use crate::config::{Config, ModeRequest, OutputConfig, RuleOutput, WindowRule};
-use crate::desk::{Side, WindowMode};
+use crate::desk::{Side, WindowId, WindowMode};
 use crate::primitives::edid::Identity;
 use crate::primitives::geom;
 use crate::primitives::layout::{self, Rect};
+use crate::primitives::suspend::{behind_cover, suspended};
 use crate::state::JffState;
 
 /// Area used when there is no monitor at all.
@@ -503,10 +505,49 @@ impl JffState {
         pointer.frame(self);
     }
 
+    /// The window that covers the monitor at `rect` with a fullscreen window the windows behind
+    /// it can't be seen through (see `fullscreen_covers`): the topmost one there. `None` when
+    /// nothing covers the monitor.
+    fn fullscreen_cover_id(&self, rect: Rect) -> Option<WindowId> {
+        if !crate::protocol::layer_shell::fullscreen_covers(&self.desk, rect) {
+            return None;
+        }
+        self.desk
+            .top_down()
+            .find(|entry| {
+                let size = entry.window.geometry().size;
+                layout::intersects((entry.pos.0, entry.pos.1, size.w, size.h), rect)
+            })
+            .map(|entry| entry.id)
+    }
+
+    /// Whether `entry` is hidden by a fullscreen window on every monitor it is on, `covers`
+    /// being what [`Self::fullscreen_cover_id`] says for each of `outputs`.
+    fn behind_a_cover(
+        &self,
+        entry: &crate::desk::Entry<smithay::desktop::Window>,
+        outputs: &[(&Output, Rect)],
+        covers: &[Option<WindowId>],
+    ) -> bool {
+        let size = entry.window.geometry().size;
+        let area = (entry.pos.0, entry.pos.1, size.w.max(1), size.h.max(1));
+        behind_cover(
+            entry.id,
+            outputs
+                .iter()
+                .zip(covers)
+                .map(|((_, rect), cover)| (layout::intersects(area, *rect), *cover)),
+        )
+    }
+
     /// A hash of what [`Self::refresh_window_outputs`] decides from: every monitor's name, place
     /// and scale, and every window's surface, position, size and whether it is visible. Costs one
     /// pass over the windows and nothing is sent or locked, unlike the pass it guards.
-    fn window_outputs_signature(&self, outputs: &[(&Output, Rect)]) -> u64 {
+    fn window_outputs_signature(
+        &self,
+        outputs: &[(&Output, Rect)],
+        covers: &[Option<WindowId>],
+    ) -> u64 {
         let mut hasher = DefaultHasher::new();
         outputs.len().hash(&mut hasher);
         for (output, rect) in outputs {
@@ -529,12 +570,19 @@ impl JffState {
             entry.pos.hash(&mut hasher);
             (size.w, size.h).hash(&mut hasher);
             self.desk.is_visible(entry).hash(&mut hasher);
+            // Hidden or covered, and not shown yet, decide `suspended`.
+            entry.fitted.hash(&mut hasher);
+            self.behind_a_cover(entry, outputs, covers)
+                .hash(&mut hasher);
         }
         hasher.finish()
     }
 
     /// Tell every window which monitors it's on (clients use it for scale, and to pause
     /// animations on windows nobody can see). A window on a hidden workspace is on no monitor.
+    /// A window nobody can see (on a workspace that is not shown, put away or minimized, or
+    /// behind a fullscreen window that covers its monitor) is also told it is suspended
+    /// (`xdg_toplevel` state `suspended`), and is told it is not any more when it shows again.
     ///
     /// Runs every frame of every monitor, so it does nothing unless something it reads has
     /// changed: a surface committed (a new subsurface, popup or panel), or the signature of the
@@ -543,7 +591,11 @@ impl JffState {
         let outputs: Vec<(&Output, Rect)> =
             self.outputs.iter().map(|o| (o, output_rect(o))).collect();
         let dirty = self.window_outputs_dirty.swap(false, Ordering::Relaxed);
-        let signature = self.window_outputs_signature(&outputs);
+        let covers: Vec<Option<WindowId>> = outputs
+            .iter()
+            .map(|(_, rect)| self.fullscreen_cover_id(*rect))
+            .collect();
+        let signature = self.window_outputs_signature(&outputs, &covers);
         if !dirty && self.window_outputs_sig.load(Ordering::Relaxed) == signature {
             return;
         }
@@ -553,6 +605,10 @@ impl JffState {
             let size = entry.window.geometry().size;
             let area = (entry.pos.0, entry.pos.1, size.w.max(1), size.h.max(1));
             let visible = self.desk.is_visible(entry);
+            if let Some(toplevel) = entry.window.toplevel() {
+                let behind = self.behind_a_cover(entry, &outputs, &covers);
+                set_suspended(toplevel, suspended(visible, entry.fitted, behind));
+            }
             for (output, rect) in &outputs {
                 if visible && layout::intersects(area, *rect) {
                     entry.window.output_enter(output, overlap);
@@ -579,5 +635,22 @@ impl JffState {
                 });
             }
         }
+    }
+}
+
+/// Set or clear the `suspended` state of a toplevel, and send the change at once when the
+/// initial configure has gone out (before it, the state goes along with it).
+fn set_suspended(toplevel: &smithay::wayland::shell::xdg::ToplevelSurface, suspended: bool) {
+    let changed = toplevel.with_pending_state(|state| {
+        let was = state.states.contains(xdg_toplevel::State::Suspended);
+        if suspended {
+            state.states.set(xdg_toplevel::State::Suspended);
+        } else {
+            state.states.unset(xdg_toplevel::State::Suspended);
+        }
+        was != suspended
+    });
+    if changed && toplevel.is_initial_configure_sent() {
+        let _ = toplevel.send_pending_configure();
     }
 }

@@ -56,6 +56,7 @@ mod screenshot_capture;
 mod screenshot_save;
 mod scroll_steps;
 mod stats;
+mod suspend;
 mod swipe;
 mod tile_tree;
 mod toplevel_icon;
