@@ -78,16 +78,27 @@ fn fullscreen_committed(wl_surface: &WlSurface) -> bool {
     })
 }
 
-/// Whether the topmost window on the monitor at `rect` is fullscreen *and* its committed
-/// geometry is exactly the monitor. Only then does it hide everything behind it, so the render
-/// path can leave those elements out and let `DrmCompositor` put the window's buffer straight on
-/// the primary plane (direct scanout). Fullscreen is read from the acked and committed state,
-/// not the pending one, so a window that was asked to go fullscreen but has not acked yet does
-/// not count, whatever its size. A window that was asked and still has its old size doesn't
-/// count either: the windows behind it are still visible. Neither does a window
-/// its client faded (wp_alpha_modifier_v1) or a `window-rule` gave an `opacity`: what is behind
-/// shows through, so the compositor has to blend it.
-pub fn fullscreen_covers(desk: &Desk<Window>, rect: Rect) -> bool {
+/// Like [`fullscreen_committed`], and a maximized window counts too when `maximize-fill` draws it
+/// flush (no border, square corners). Only for what may go to the primary plane.
+fn flush_committed(wl_surface: &WlSurface) -> bool {
+    let fill = crate::render::effects::rounded::maximize_fill();
+    with_states(wl_surface, |states| {
+        let mut cached = states.cached_state.get::<ToplevelCachedState>();
+        cached
+            .current()
+            .last_acked
+            .as_ref()
+            .is_some_and(|configure| {
+                let acked = &configure.state.states;
+                acked.contains(xdg_toplevel::State::Fullscreen)
+                    || (fill && acked.contains(xdg_toplevel::State::Maximized))
+            })
+    })
+}
+
+/// [`fullscreen_covers`] and [`flush_covers`]: the topmost window is exactly the monitor, opaque,
+/// and `committed` says its acked state qualifies.
+fn covers_with(desk: &Desk<Window>, rect: Rect, committed: fn(&WlSurface) -> bool) -> bool {
     let Some(entry) = desk.top_down().find(|entry| {
         let size = entry.window.geometry().size;
         layout::intersects((entry.pos.0, entry.pos.1, size.w, size.h), rect)
@@ -103,7 +114,28 @@ pub fn fullscreen_covers(desk: &Desk<Window>, rect: Rect) -> bool {
         && entry
             .window
             .toplevel()
-            .is_some_and(|toplevel| fullscreen_committed(toplevel.wl_surface()))
+            .is_some_and(|toplevel| committed(toplevel.wl_surface()))
+}
+
+/// Whether the topmost window on the monitor at `rect` is fullscreen *and* its committed
+/// geometry is exactly the monitor. Only then does it hide everything behind it, so the render
+/// path can leave those elements out and let `DrmCompositor` put the window's buffer straight on
+/// the primary plane (direct scanout). Fullscreen is read from the acked and committed state,
+/// not the pending one, so a window that was asked to go fullscreen but has not acked yet does
+/// not count, whatever its size. A window that was asked and still has its old size doesn't
+/// count either: the windows behind it are still visible. Neither does a window
+/// its client faded (wp_alpha_modifier_v1) or a `window-rule` gave an `opacity`: what is behind
+/// shows through, so the compositor has to blend it.
+pub fn fullscreen_covers(desk: &Desk<Window>, rect: Rect) -> bool {
+    covers_with(desk, rect, fullscreen_committed)
+}
+
+/// Whether a window that is drawn flush covers the monitor at `rect` exactly and opaquely: a
+/// fullscreen one, or a maximized one with `maximize-fill` where no panel keeps room free. Its
+/// buffer may go to the primary plane (see the SDR frame flags in `app/tty/render.rs`). Unlike
+/// `fullscreen_covers` it says nothing about VRR, tearing, content type or HDR.
+pub fn flush_covers(desk: &Desk<Window>, rect: Rect) -> bool {
+    covers_with(desk, rect, flush_committed)
 }
 
 /// The surface of the fullscreen window covering the monitor at `rect` (see `fullscreen_covers`), `None` without one and for windows that are not xdg toplevels.

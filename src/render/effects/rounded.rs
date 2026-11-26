@@ -334,6 +334,11 @@ pub fn set_maximize_fill(on: bool) {
     MAXIMIZE_FILL.store(on, Ordering::Relaxed);
 }
 
+/// `maximize-fill` as last set, see [`set_maximize_fill`].
+pub fn maximize_fill() -> bool {
+    MAXIMIZE_FILL.load(Ordering::Relaxed)
+}
+
 /// Whether `window` is drawn flush against its area, with no border and square corners: a
 /// fullscreen window always, a maximized one with `maximize-fill` (on by default).
 ///

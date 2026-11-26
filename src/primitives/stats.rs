@@ -643,8 +643,9 @@ impl ClientSync {
 /// Why the window is not on the primary plane as it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Why {
+    /// Neither fullscreen nor maximized with `maximize-fill`.
     NotFullscreen,
-    /// Fullscreen, but not exactly the monitor or not opaque.
+    /// Fullscreen, or maximized with `maximize-fill`, but not exactly the monitor or not opaque.
     NotCovering,
     /// This overlay. It is drawn over the window, so the frame has to be composited.
     StatsOverlay,
@@ -665,9 +666,10 @@ pub enum Why {
 impl Why {
     fn text(&self) -> String {
         match self {
-            Self::NotFullscreen => "the window is not fullscreen".into(),
+            Self::NotFullscreen => "the window is not fullscreen or maximized".into(),
             Self::NotCovering => {
-                "fullscreen, but not an opaque window exactly the monitor's size".into()
+                "not an opaque window exactly the monitor's size (a panel, a gap or an opacity)"
+                    .into()
             }
             Self::StatsOverlay => "this overlay is drawn over the window".into(),
             Self::Overview => "the overview is open".into(),

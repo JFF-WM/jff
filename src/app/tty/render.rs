@@ -320,6 +320,9 @@ impl JffState {
         // frame then holds only that window (plus cursor and overlay layer), so DrmCompositor
         // can show the client's buffer on the primary plane without a copy.
         let mut direct_scanout = false;
+        // A maximized window drawn flush that fills the monitor: its buffer may take the primary
+        // plane, but the frame is built as usual (toasts, panels and popups stay).
+        let mut flush_scanout = false;
         // An HDR output whose fullscreen window is tried on the primary plane this frame.
         let mut hdr_scanout_try: Option<Tried> = None;
         // Blur is of the wallpaper alone unless `behind-windows` is set: a copy of the frame
@@ -358,13 +361,24 @@ impl JffState {
             // An HDR output composites into its own texture, so a window goes to the plane only
             // when `hdr_scanout::decide` says its buffer can reach the panel as it is.
             let covering = overview_here.is_none() && fullscreen_covers(&self.desk, rect);
-            nerd_covering = covering;
             nerd_overview = overview_here.is_some();
             // A zoomed frame is drawn from a texture of its own, so a window can't go to the plane.
             direct_scanout = hdr_space.is_none() && covering && !nerd_overlay && zoom.is_none();
+            // `ALLOW_PRIMARY_PLANE_SCANOUT` takes only a buffer in the swapchain's format, and
+            // an opaque client buffer is exported as XRGB, which never matches the ARGB
+            // swapchain. A maximized window that fills the monitor needs `_ANY` like a
+            // fullscreen one, or it is never scanned out.
+            let flush_cover = overview_here.is_none() && flush_covers(&self.desk, rect);
+            flush_scanout = hdr_space.is_none()
+                && !direct_scanout
+                && flush_cover
+                && !nerd_overlay
+                && zoom.is_none();
+            // The overlay's verdict counts a maximized window that fills the monitor too.
+            nerd_covering = covering || flush_cover;
             if nerd_overlay && hdr_space.is_none() {
                 // without the overlay the frame would be tried on the plane
-                nerd_alt = Some(covering);
+                nerd_alt = Some(nerd_covering);
             }
             let mut scanout_blocked = None;
             // The light levels the connector should state: the client's while its buffer goes to the plane.
@@ -638,6 +652,13 @@ impl JffState {
             // Only a buffer in the swapchain's format, and no plane for the cursor: its pixels
             // would not be taken as PQ.
             FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT
+        } else if flush_scanout {
+            // A maximized window filling an SDR monitor: its buffer may go to the primary plane
+            // in any format, a toast or panel above it may take an overlay plane, and the
+            // cursor its own. When one of them cannot, the compositor draws the frame.
+            FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY
+                | FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT
+                | FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
         } else if hdr_space.is_none() {
             // A composited frame on an SDR monitor. Elements may go to the primary, overlay
             // and cursor planes. The cursor on its own plane means moving the pointer neither
@@ -931,6 +952,11 @@ impl JffState {
                 );
             }
             if self.stats.due(std::time::Instant::now()) {
+                // fullscreen, or maximized and drawn flush: either may go to the plane
+                let nerd_flush = self
+                    .focused_window
+                    .as_ref()
+                    .is_some_and(crate::render::effects::rounded::is_flush);
                 let path = if lit.scanning_out {
                     nerd::Path::Direct
                 } else {
@@ -940,7 +966,7 @@ impl JffState {
                         nerd::Why::Screenshot
                     } else if nerd_overview {
                         nerd::Why::Overview
-                    } else if !win.fullscreen {
+                    } else if !(win.fullscreen || nerd_flush) {
                         nerd::Why::NotFullscreen
                     } else if !nerd_covering {
                         nerd::Why::NotCovering

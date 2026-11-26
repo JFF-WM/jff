@@ -107,7 +107,7 @@ use crate::primitives::zoom::PointerStyle;
 use crate::protocol::color_management::WorkingSpace;
 use crate::protocol::content_type::Content;
 use crate::protocol::layer_shell::{
-    below_windows_elements, fullscreen_covers, fullscreen_surface, layer_elements,
+    below_windows_elements, flush_covers, fullscreen_covers, fullscreen_surface, layer_elements,
     layer_popup_elements, layers_above, layers_shown, BELOW_WINDOWS,
 };
 use crate::protocol::session_lock::LOCKED_BACKGROUND;
