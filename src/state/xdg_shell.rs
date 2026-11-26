@@ -104,8 +104,11 @@ impl XdgShellHandler for JffState {
         } else if self.overview_active() {
             // A window that opens on another monitor than the overview's (where the pointer
             // is) is no reason to close it: it opens there, as it would with no overview, and
-            // gets the keyboard when the overview ends.
-            if !self.overview_stays_for(&window, &output) {
+            // takes the keyboard (`focus-new-windows`), which the overview does not hold while
+            // the pointer is on that other monitor.
+            if self.overview_stays_for(&window, &output) {
+                self.focus_window(&window);
+            } else {
                 self.end_overview(Some(window.clone()));
             }
         } else {

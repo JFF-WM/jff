@@ -396,7 +396,9 @@ impl JffState {
                 .lock_keyboard_surface()
                 .map_or(KeyboardFocus::Nobody, KeyboardFocus::Layer);
         }
-        if self.overview_active() {
+        // With the pointer on another monitor than the overview's the keyboard is not the
+        // overview's: it goes the normal way, so a window started there is typed into at once.
+        if self.overview_active() && !self.overview_pointer_elsewhere() {
             // A panel's popover raised in the overview (a search field in it, say) owns the keys
             // while its grab lasts: the overview's own search must not read them. The grab ends
             // by itself (an outside click, Escape in the popover) or with the overview.
