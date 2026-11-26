@@ -102,7 +102,12 @@ impl XdgShellHandler for JffState {
             self.mark_urgent(&window);
             tracing::debug!("new toplevel left unfocused (focus-new-windows off)");
         } else if self.overview_active() {
-            self.end_overview(Some(window.clone()));
+            // A window that opens on another monitor than the overview's (where the pointer
+            // is) is no reason to close it: it opens there, as it would with no overview, and
+            // gets the keyboard when the overview ends.
+            if !self.overview_stays_for(&window, &output) {
+                self.end_overview(Some(window.clone()));
+            }
         } else {
             self.focus_window(&window);
         }

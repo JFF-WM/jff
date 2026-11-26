@@ -692,6 +692,16 @@ impl JffState {
             .is_some_and(|ov| ov.closing.is_none())
     }
 
+    /// The overview is up and the pointer is on another monitor than its own: the user is
+    /// working there, so the overview is not what keys are for (see `keyboard_key`).
+    pub fn overview_pointer_elsewhere(&self) -> bool {
+        let (Some(ov), Some(pointer)) = (self.overview.as_ref(), self.seat.get_pointer()) else {
+            return false;
+        };
+        let at = pointer.current_location();
+        !layout::contains(output_rect(&ov.output), (at.x, at.y))
+    }
+
     /// Serial of the pointer grab the open overview holds, to tell it from somebody else's.
     pub fn overview_grab_serial(&self) -> Option<Serial> {
         self.overview

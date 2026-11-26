@@ -485,6 +485,10 @@ impl JffState {
                     if overview {
                         // The overview key again closes it. Quitting still works.
                         let configured = sym.and_then(|sym| state.config.action_for(mods, sym));
+                        // With the pointer on another monitor the user is working there, and
+                        // the overview is no barrier for the bindings: they run as usual
+                        // (Alt+Return starts a terminal on that monitor, the overview stays).
+                        let elsewhere = state.overview_pointer_elsewhere();
                         return match configured {
                             // Closes it, also with something typed (Escape only clears
                             // that first).
@@ -492,6 +496,7 @@ impl JffState {
                             Some(Action::Quit) => Bind::Action(Action::Quit),
                             // The screen can be zoomed with the overview open.
                             Some(action) if action.is_zoom() => Bind::Action(action.clone()),
+                            Some(action) if elsewhere && !inhibited => Bind::Action(action.clone()),
                             // Anything else that types a character goes to the search.
                             _ => {
                                 let sym = handle.modified_sym();

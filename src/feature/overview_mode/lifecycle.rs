@@ -3,6 +3,21 @@
 use super::*;
 
 impl JffState {
+    /// A window opened on the monitor `output` while the overview is up. True when the overview
+    /// is on another monitor and stays open: `window` is then what the keyboard goes back to
+    /// when the overview is left without picking one. False (nothing changed) for the window
+    /// switcher, an overview that is closing, and a window on the overview's own monitor, which
+    /// the overview closes in favour of.
+    pub fn overview_stays_for(&mut self, window: &Window, output: &str) -> bool {
+        let Some(ov) = self.overview.as_mut().filter(|ov| {
+            ov.closing.is_none() && ov.switcher.is_none() && ov.output.name() != output
+        }) else {
+            return false;
+        };
+        ov.previous_focus = Some(window.clone());
+        true
+    }
+
     pub fn toggle_overview(&mut self) {
         if self.overview_active() {
             self.end_overview(None);
