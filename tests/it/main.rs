@@ -49,6 +49,7 @@ mod overview_mode;
 mod pacing;
 mod pixel_snap;
 mod popup_grab;
+mod preferred_buffer;
 mod region;
 mod render_device;
 mod screenshot_area;

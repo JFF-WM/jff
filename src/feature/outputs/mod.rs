@@ -5,6 +5,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use smithay::backend::input::{AbsolutePositionEvent, InputBackend, InputTime};
@@ -14,8 +15,11 @@ use smithay::input::pointer::MotionEvent;
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::backend::ClientId;
+use smithay::reexports::wayland_server::protocol::wl_output::Transform as WireTransform;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, Resource};
 use smithay::utils::{Logical, Point, Rectangle, Size, Transform, SERIAL_COUNTER};
+use smithay::wayland::compositor::{send_surface_state, SurfaceData};
 use smithay::wayland::fractional_scale::with_fractional_scale;
 
 use crate::config::{Config, ModeRequest, OutputConfig, RuleOutput, WindowRule};
@@ -23,6 +27,7 @@ use crate::desk::{Side, WindowId, WindowMode};
 use crate::primitives::edid::Identity;
 use crate::primitives::geom;
 use crate::primitives::layout::{self, Rect};
+use crate::primitives::preferred_buffer::follow_monitor;
 use crate::primitives::suspend::{behind_cover, suspended};
 use crate::state::JffState;
 
@@ -558,6 +563,8 @@ impl JffState {
                 .fractional_scale()
                 .to_bits()
                 .hash(&mut hasher);
+            // A monitor that turns tells its windows the transform to draw in.
+            (WireTransform::from(output.current_transform()) as u32).hash(&mut hasher);
         }
         for entry in self.desk.all_top_down() {
             // A window with no toplevel (X11) is told apart by its place alone.
@@ -623,15 +630,39 @@ impl JffState {
                     entry.window.output_leave(output);
                 }
             }
+            // wl_surface.preferred_buffer_scale and preferred_buffer_transform, for every
+            // surface of the window (subsurfaces, popups): clients without wp_fractional_scale
+            // use the whole number, and a client that draws in the transform of a turned monitor
+            // can go to the plane as it is.
+            let home = outputs.iter().position(|(o, _)| o.name() == entry.output);
+            let followed = follow_monitor(
+                outputs.iter().map(|(output, rect)| {
+                    (
+                        visible && layout::intersects(area, *rect),
+                        output.current_scale().fractional_scale(),
+                    )
+                }),
+                home,
+            );
+            if let Some((output, _)) = followed.and_then(|i| outputs.get(i)) {
+                let scale = output.current_scale().integer_scale();
+                let transform = output.current_transform();
+                entry.window.with_surfaces(|surface, states| {
+                    send_preferred(surface, states, scale, transform);
+                });
+            }
         }
         // Panels and wallpapers learn the scale of their monitor as well.
         for output in &self.outputs {
             let scale = output.current_scale().fractional_scale();
+            let whole = output.current_scale().integer_scale();
+            let transform = output.current_transform();
             for layer in layer_map_for_output(output).layers() {
-                layer.with_surfaces(|_, states| {
+                layer.with_surfaces(|surface, states| {
                     with_fractional_scale(states, |fractional| {
                         fractional.set_preferred_scale(scale)
                     });
+                    send_preferred(surface, states, whole, transform);
                 });
             }
         }
@@ -653,4 +684,32 @@ fn set_suspended(toplevel: &smithay::wayland::shell::xdg::ToplevelSurface, suspe
     if changed && toplevel.is_initial_configure_sent() {
         let _ = toplevel.send_pending_configure();
     }
+}
+
+/// What a surface was last told with `wl_surface.preferred_buffer_scale` and
+/// `preferred_buffer_transform`.
+#[derive(Default)]
+struct LastPreferred(Mutex<Option<(i32, u32)>>);
+
+/// Tell `surface` the whole-number scale and the transform it should draw in, when that is not
+/// what it was told last. `refresh_window_outputs` runs for every commit, and the events would
+/// otherwise go out each time.
+fn send_preferred(
+    surface: &WlSurface,
+    data: &SurfaceData,
+    scale: i32,
+    transform: smithay::utils::Transform,
+) {
+    let now = (scale, WireTransform::from(transform) as u32);
+    let last = data
+        .data_map
+        .get_or_insert_threadsafe(LastPreferred::default);
+    let Ok(mut last) = last.0.lock() else {
+        return;
+    };
+    if *last == Some(now) {
+        return;
+    }
+    *last = Some(now);
+    send_surface_state(surface, data, scale, transform);
 }
