@@ -366,6 +366,15 @@ impl JffState {
                     self.overview_drop();
                     return;
                 }
+                // A click on another monitor leaves the overview: it closes, like on empty
+                // space of its own monitor.
+                let released_at = pointer.current_location();
+                if self.overview.as_ref().is_some_and(|ov| {
+                    !layout::contains(output_rect(&ov.output), (released_at.x, released_at.y))
+                }) {
+                    self.end_overview(None);
+                    return;
+                }
                 if button == BTN_LEFT {
                     if let Some(row) = self.overview_app_at(pointer.current_location()) {
                         self.set_pick(Pick::App(row));

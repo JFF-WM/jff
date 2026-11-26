@@ -763,6 +763,12 @@ impl JffState {
 
     /// The side (`-1` left, `1` right) of the neighbouring workspace under `p`, if any.
     fn overview_peek_at(&self, p: Point<f64, Logical>) -> Option<i32> {
+        // The frames of the neighbours reach past the overview's monitor, onto the next one
+        // when it sits beside it. Only the part on its own monitor is the overview's: a click
+        // on the other monitor is a click elsewhere, not a step to that workspace.
+        if !layout::contains(output_rect(&self.overview.as_ref()?.output), (p.x, p.y)) {
+            return None;
+        }
         self.overview_peeks()
             .into_iter()
             .find(|(_, _, cell)| layout::contains(*cell, (p.x, p.y)))
