@@ -34,6 +34,23 @@ use crate::state::JffState;
 /// Area used when there is no monitor at all.
 const NO_OUTPUT: Rect = (0, 0, 800, 600);
 
+/// Create the `wl_output` global of `output`. A client that was given one monitor
+/// (`ClientState::single_output`) only sees the global of that one, every other client sees
+/// all of them. The monitors present at startup and the ones plugged in later both go through
+/// here, so the filter applies to all of them.
+pub fn advertise_output(
+    display: &smithay::reexports::wayland_server::DisplayHandle,
+    output: &Output,
+) -> smithay::reexports::wayland_server::backend::GlobalId {
+    let name = output.name();
+    output.create_global_with_filter::<JffState, _>(display, move |client: &Client| {
+        client
+            .get_data::<crate::state::ClientState>()
+            .and_then(|state| state.single_output.as_deref())
+            .is_none_or(|only| only == name)
+    })
+}
+
 const EDGE_MARGIN: f64 = 2.0;
 
 /// The longest an unplugged monitor's global stays around for clients to react first. Clients
@@ -336,7 +353,7 @@ impl JffState {
 
     /// Start using a monitor: advertise it, lay it out with the others.
     pub fn add_output(&mut self, output: Output) {
-        let global = output.create_global::<Self>(&self.display_handle);
+        let global = advertise_output(&self.display_handle, &output);
         self.output_globals.insert(output.name(), global);
         self.outputs.push(output);
         self.relayout_outputs();

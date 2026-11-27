@@ -578,7 +578,12 @@ impl JffState {
         // Advertise the outputs to clients. A global stays alive until it's removed.
         let output_globals = outputs
             .iter()
-            .map(|output| (output.name(), output.create_global::<Self>(&display_handle)))
+            .map(|output| {
+                (
+                    output.name(),
+                    crate::feature::outputs::advertise_output(&display_handle, output),
+                )
+            })
             .collect();
 
         // wp_presentation, with CLOCK_MONOTONIC as the presentation clock.
@@ -817,9 +822,11 @@ impl JffState {
     }
 
     pub fn insert_client(&mut self, stream: std::os::unix::net::UnixStream) {
+        let single_output = self.single_output_for(&stream);
         let data = ClientState {
             // Taken now, from the socket, so the pid can't have been reused yet.
             pidfd: crate::protocol::ext_foreign_toplevel_pidfd::peer_pidfd(&stream),
+            single_output,
             ..ClientState::default()
         };
         if let Err(err) = self.display_handle.insert_client(stream, Arc::new(data)) {
@@ -838,6 +845,96 @@ pub struct ClientState {
     /// A pidfd of the process that connected (`SO_PEERPIDFD`, Linux 6.5+), for
     /// ext-foreign-toplevel-pidfd-v1. `None` on an older kernel.
     pub pidfd: Option<std::os::fd::OwnedFd>,
+    /// The only monitor this client is shown, by name, fixed when it connects: a game with
+    /// `JFF_SINGLE_OUTPUT` in its environment (or Wine, with `wine-single-output`) has no
+    /// other monitor to open on. `None` for everybody else, they see all of them.
+    pub single_output: Option<String>,
+}
+
+/// What a client's `JFF_SINGLE_OUTPUT` asks for.
+enum SingleOutput {
+    /// All monitors (unset, `0` or empty).
+    All,
+    /// The monitor in use when the client connects (`1`).
+    Current,
+    /// That monitor, by name (`DP-1`).
+    Named(String),
+}
+
+/// The pid of the process at the other end of `stream` (`SO_PEERCRED`).
+fn peer_pid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` and `len` outlive the call, and `len` is the size of `cred`.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    (rc == 0 && cred.pid > 0).then_some(cred.pid as u32)
+}
+
+/// What the process `pid` asks for with `JFF_SINGLE_OUTPUT` in its environment: `0` (or empty)
+/// all monitors, `1` the one in use, anything else the monitor of that name. Without the
+/// variable, a Wine process (the executable's name starts with `wine`) gets the monitor in use
+/// when `wine_default` is set, and everything else sees all of them.
+fn single_output_request(pid: u32, wine_default: bool) -> SingleOutput {
+    let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+    for entry in environ.split(|byte| *byte == 0) {
+        if let Some(value) = entry.strip_prefix(b"JFF_SINGLE_OUTPUT=") {
+            return match value {
+                b"" | b"0" => SingleOutput::All,
+                b"1" => SingleOutput::Current,
+                name => SingleOutput::Named(String::from_utf8_lossy(name).into_owned()),
+            };
+        }
+    }
+    let is_wine = std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .and_then(|exe| exe.file_name().map(|n| n.to_string_lossy().to_lowercase()))
+        .is_some_and(|name| name.starts_with("wine"));
+    if wine_default && is_wine {
+        SingleOutput::Current
+    } else {
+        SingleOutput::All
+    }
+}
+
+impl JffState {
+    /// The one monitor a client connecting on `stream` is shown, if it asked for one (see
+    /// [`ClientState::single_output`]). Always `None` with fewer than two monitors, and when
+    /// the monitor it named doesn't exist (it sees all of them, and the log says so), so a
+    /// client is never left without a monitor.
+    fn single_output_for(&self, stream: &std::os::unix::net::UnixStream) -> Option<String> {
+        if self.outputs.len() < 2 {
+            return None;
+        }
+        let pid = peer_pid(stream)?;
+        let name = match single_output_request(pid, self.config.wine_single_output()) {
+            SingleOutput::All => return None,
+            SingleOutput::Current => self.output_at_pointer()?.name(),
+            SingleOutput::Named(name) => {
+                if self.outputs.iter().all(|output| output.name() != name) {
+                    tracing::warn!(
+                        "pid {pid}: JFF_SINGLE_OUTPUT={name} is not a monitor, showing all of them"
+                    );
+                    return None;
+                }
+                name
+            }
+        };
+        tracing::info!("pid {pid} is shown only the monitor {name}");
+        Some(name)
+    }
 }
 
 /// Did this client connect from inside a sandbox (a wp_security_context_v1 socket)?

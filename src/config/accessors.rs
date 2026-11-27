@@ -309,6 +309,11 @@ impl Config {
         self.force_tearing
     }
 
+    /// Whether a Wine process is shown only the monitor in use when it connects.
+    pub fn wine_single_output(&self) -> bool {
+        self.wine_single_output
+    }
+
     /// What the PC's power button does.
     pub fn power_key(&self) -> PowerKey {
         self.power_key

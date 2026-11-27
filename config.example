@@ -184,6 +184,13 @@ global-hotkeys #true
 // page flips, even when it never asked for tearing (games under Wine don't). Off by default.
 // force-tearing #true
 
+// A game that is shown one monitor can't open on, span or size itself for another one. A
+// client gets that with `JFF_SINGLE_OUTPUT` in its environment (for Steam, in the launch
+// options: `JFF_SINGLE_OUTPUT=DP-1 %command%`): `DP-1` (a monitor's name) shows it only that
+// monitor, `1` only the one in use when it starts (under the pointer), `0` all of them. With
+// this on, every Wine process gets `1` unless it sets the variable. Off by default.
+// wine-single-output #true
+
 // The PC's power button: "suspend" (default), "power-off", "ignore", or "system" (leave it to
 // logind). Needs systemd-inhibit and systemctl. `suspend` and `power-off` also work in binds.
 // power-key "suspend"

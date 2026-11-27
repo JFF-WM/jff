@@ -201,6 +201,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "edge-warp",
     "allow-tearing",
     "force-tearing",
+    "wine-single-output",
     "power-key",
     "global-hotkeys",
     "render-device",
@@ -1720,6 +1721,9 @@ pub struct Config {
     /// shown with async page flips, whether it asked for it or not (games under Wine never
     /// do). Off by default.
     force_tearing: bool,
+    /// `wine-single-output`: a Wine process is shown only the monitor in use when it connects,
+    /// as if it had `JFF_SINGLE_OUTPUT=1`. Off by default.
+    wine_single_output: bool,
     /// `global-hotkeys`: clients may bind their own global hotkeys (xx-hotkey-v1). Off by default.
     global_hotkeys: bool,
     /// `power-key`: what the PC's power button does. Suspend by default.
@@ -1874,6 +1878,7 @@ impl Default for Config {
                 edge_warp: false,
                 allow_tearing: false,
                 force_tearing: false,
+                wine_single_output: false,
                 global_hotkeys: false,
                 power_key: PowerKey::default(),
                 render_device: None,
@@ -2155,6 +2160,7 @@ impl Config {
         let edge_warp = parse_flag(&doc, "edge-warp", false)?;
         let allow_tearing = parse_flag(&doc, "allow-tearing", false)?;
         let force_tearing = parse_flag(&doc, "force-tearing", false)?;
+        let wine_single_output = parse_flag(&doc, "wine-single-output", false)?;
         let global_hotkeys = parse_flag(&doc, "global-hotkeys", false)?;
         let power_key = match doc.get("power-key") {
             None => PowerKey::default(),
@@ -2370,6 +2376,7 @@ impl Config {
             edge_warp,
             allow_tearing,
             force_tearing,
+            wine_single_output,
             global_hotkeys,
             power_key,
             render_device,
