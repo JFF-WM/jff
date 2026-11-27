@@ -184,6 +184,11 @@ fn terminal_program() -> String {
 
 /// Run `argv` so it outlives us and shares neither our terminal nor our process group.
 pub(crate) fn spawn_detached(argv: &[String], cwd: Option<&str>) -> std::io::Result<()> {
+    spawn_detached_pid(argv, cwd).map(|_| ())
+}
+
+/// [`spawn_detached`], returning the child's pid.
+pub(crate) fn spawn_detached_pid(argv: &[String], cwd: Option<&str>) -> std::io::Result<u32> {
     let Some((program, args)) = argv.split_first() else {
         return Err(std::io::Error::other("empty command"));
     };
@@ -198,6 +203,7 @@ pub(crate) fn spawn_detached(argv: &[String], cwd: Option<&str>) -> std::io::Res
         command.current_dir(dir);
     }
     let mut child = command.spawn()?;
+    let pid = child.id();
     // Nobody else waits for it, a child that exits unwatched becomes a zombie until the
     // compositor does.
     let reaper = std::thread::Builder::new()
@@ -208,7 +214,7 @@ pub(crate) fn spawn_detached(argv: &[String], cwd: Option<&str>) -> std::io::Res
     if let Err(err) = reaper {
         tracing::warn!("app search: cannot start a reaper thread: {err}");
     }
-    Ok(())
+    Ok(pid)
 }
 
 fn home() -> Option<PathBuf> {

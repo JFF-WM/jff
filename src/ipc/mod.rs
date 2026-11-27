@@ -412,7 +412,7 @@ use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use crate::app::Backend;
 use crate::desk::Goto;
 use crate::feature::outputs::output_rect;
-use crate::input::{spawn_command, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
+use crate::input::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use crate::ipc::events::{
     ClickInfo, ClickTarget, ContainerInfo, ContainerRef, DbusAnnotationInfo, Event, Group,
     GroupSet, KeyboardInfo, LayerInfo, OutputColor, OutputInfo, PopupInfo, Snapshot, WindowInfo,
@@ -1378,15 +1378,18 @@ impl JffState {
                 ))
             }
             Request::SpawnShell(line) => {
-                spawn_command("sh", &["-c".to_string(), line]);
-                Ok("{\"ok\":true}\n".to_string())
+                let argv = vec!["sh".to_string(), "-c".to_string(), line];
+                let pid = crate::feature::app_index::spawn_detached_pid(&argv, None)
+                    .map_err(|err| format!("could not start sh: {err}"))?;
+                Ok(format!("{{\"ok\":true,\"pid\":{pid}}}\n"))
             }
             Request::Spawn(argv) => {
-                let Some((command, args)) = argv.split_first() else {
+                if argv.is_empty() {
                     return Err("spawn needs a program".to_string());
-                };
-                spawn_command(command, args);
-                Ok("{\"ok\":true}\n".to_string())
+                }
+                let pid = crate::feature::app_index::spawn_detached_pid(&argv, None)
+                    .map_err(|err| format!("could not start {}: {err}", argv[0]))?;
+                Ok(format!("{{\"ok\":true,\"pid\":{pid}}}\n"))
             }
             Request::ScreenshotArea => self
                 .start_screenshot_area()
