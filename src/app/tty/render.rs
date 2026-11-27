@@ -688,7 +688,11 @@ impl JffState {
         // falls back to a vsync flip when the frame can't be flipped async.
         let presentation = if scanout
             && self.config.allow_tearing()
-            && crate::protocol::layer_shell::fullscreen_wants_tearing(&self.desk, rect)
+            && crate::protocol::layer_shell::fullscreen_wants_tearing(
+                &self.desk,
+                rect,
+                self.config.force_tearing(),
+            )
         {
             PresentationMode::Async
         } else {

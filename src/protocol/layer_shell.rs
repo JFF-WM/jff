@@ -173,10 +173,14 @@ pub fn fullscreen_content(
 
 /// Whether the fullscreen window covering the monitor at `rect` (see `fullscreen_covers`) asked
 /// to be shown with tearing (wp_tearing_control_v1). False without a covering window, and for
-/// windows that never asked, like X11 ones.
-pub fn fullscreen_wants_tearing(desk: &Desk<Window>, rect: Rect) -> bool {
+/// windows that never asked, like X11 ones. With `force` (`force-tearing`) any covering
+/// fullscreen window counts, asked or not: games under Wine never ask.
+pub fn fullscreen_wants_tearing(desk: &Desk<Window>, rect: Rect, force: bool) -> bool {
     if !fullscreen_covers(desk, rect) {
         return false;
+    }
+    if force {
+        return true;
     }
     let Some(entry) = desk.top_down().find(|entry| {
         let size = entry.window.geometry().size;

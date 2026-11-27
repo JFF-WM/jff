@@ -200,6 +200,7 @@ pub const TOP_LEVEL_NODES: &[&str] = &[
     "focus-follows-mouse",
     "edge-warp",
     "allow-tearing",
+    "force-tearing",
     "power-key",
     "global-hotkeys",
     "render-device",
@@ -1715,6 +1716,10 @@ pub struct Config {
     /// `allow-tearing`: a fullscreen window that asked for it (wp_tearing_control_v1) is shown
     /// with async page flips. Off by default.
     allow_tearing: bool,
+    /// `force-tearing`: with `allow-tearing`, every fullscreen window that covers a monitor is
+    /// shown with async page flips, whether it asked for it or not (games under Wine never
+    /// do). Off by default.
+    force_tearing: bool,
     /// `global-hotkeys`: clients may bind their own global hotkeys (xx-hotkey-v1). Off by default.
     global_hotkeys: bool,
     /// `power-key`: what the PC's power button does. Suspend by default.
@@ -1868,6 +1873,7 @@ impl Default for Config {
                 focus_follows_mouse: false,
                 edge_warp: false,
                 allow_tearing: false,
+                force_tearing: false,
                 global_hotkeys: false,
                 power_key: PowerKey::default(),
                 render_device: None,
@@ -2148,6 +2154,7 @@ impl Config {
         let focus_follows_mouse = parse_flag(&doc, "focus-follows-mouse", false)?;
         let edge_warp = parse_flag(&doc, "edge-warp", false)?;
         let allow_tearing = parse_flag(&doc, "allow-tearing", false)?;
+        let force_tearing = parse_flag(&doc, "force-tearing", false)?;
         let global_hotkeys = parse_flag(&doc, "global-hotkeys", false)?;
         let power_key = match doc.get("power-key") {
             None => PowerKey::default(),
@@ -2362,6 +2369,7 @@ impl Config {
             focus_follows_mouse,
             edge_warp,
             allow_tearing,
+            force_tearing,
             global_hotkeys,
             power_key,
             render_device,

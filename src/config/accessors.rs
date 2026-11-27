@@ -303,6 +303,12 @@ impl Config {
         self.allow_tearing
     }
 
+    /// Whether every fullscreen window covering a monitor is shown with tearing (given
+    /// `allow-tearing`), not only the ones that asked for it.
+    pub fn force_tearing(&self) -> bool {
+        self.force_tearing
+    }
+
     /// What the PC's power button does.
     pub fn power_key(&self) -> PowerKey {
         self.power_key

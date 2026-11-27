@@ -180,6 +180,10 @@ global-hotkeys #true
 // is shown normally. Needs a Smithay with async page flips.
 // allow-tearing #true
 
+// With allow-tearing on: every fullscreen window that covers the monitor is shown with async
+// page flips, even when it never asked for tearing (games under Wine don't). Off by default.
+// force-tearing #true
+
 // The PC's power button: "suspend" (default), "power-off", "ignore", or "system" (leave it to
 // logind). Needs systemd-inhibit and systemctl. `suspend` and `power-off` also work in binds.
 // power-key "suspend"
