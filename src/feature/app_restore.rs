@@ -27,16 +27,18 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use smithay::desktop::Window;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::IsAlive;
 
 use crate::config::Action;
-use crate::desk::WindowId;
+use crate::desk::{ContainerId, WindowId};
 use crate::feature::app_index::AppIndex;
 use crate::feature::osd::toplevel_names;
 use crate::primitives::app_restore::{
-    app_ids, app_survived, format_apps, is_autostarted, parse_apps, pick_by_title,
-    shell_line_command, sorted, without_stale_identity, Placement, ProcessState,
+    app_ids, app_survived, format_apps, is_autostarted, is_unnamed_container_key, parse_apps,
+    pick_by_title, shell_line_command, sorted, unnamed_container_key, without_stale_identity,
+    Placement, ProcessState,
 };
 use crate::primitives::app_search::entry_for_app_id;
 use crate::primitives::layout_template::Template;
@@ -98,6 +100,8 @@ pub struct AppRestore {
     joined: HashMap<String, Vec<(WlSurface, usize)>>,
     /// The arrangement saved for each container, by container name.
     layouts: HashMap<String, String>,
+    /// The containers the restore started without a name, by container name.
+    rebuilt: HashMap<String, ContainerId>,
     /// What the file of the shown workspace says now, so it is only written when it changes.
     workspace_saved: String,
     /// The pid and pidfs id of the process of each window, which do not change while the window
@@ -348,6 +352,69 @@ impl JffState {
         }
     }
 
+    /// `window`, whose surface is `root`, joins the container named `name` that the place the
+    /// restore gave it says, which is laid out as it was saved. Returns false, having changed
+    /// nothing, where [`JffState::open_in_container_by`] does.
+    pub(crate) fn app_restore_open(
+        &mut self,
+        root: &WlSurface,
+        window: &Window,
+        rule: &crate::config::WindowRule,
+        name: &str,
+    ) -> bool {
+        let place = self
+            .app_restore
+            .placed
+            .iter()
+            .find(|a| a.surface == *root)
+            .map(|a| a.place.clone());
+        let opened = match place {
+            Some(place) => self.app_restore_open_container(window, rule, &place),
+            None => self.open_in_named_container(window, rule, name),
+        };
+        if opened {
+            self.app_restore_container_joined(root, name);
+        }
+        opened
+    }
+
+    /// Puts `window` in the container its `place` names. A container the user named is found
+    /// or started by that name. One that had no name is found by the place it had and started
+    /// without one. Returns false, having changed nothing, where
+    /// [`JffState::open_in_container_by`] does.
+    fn app_restore_open_container(
+        &mut self,
+        window: &Window,
+        rule: &crate::config::WindowRule,
+        place: &Placement,
+    ) -> bool {
+        if !is_unnamed_container_key(&place.container) {
+            return self.open_in_named_container(window, rule, &place.container);
+        }
+        let key = container_key(&place.container, place.workspace, &place.output);
+        let known = self.app_restore.rebuilt.get(&key).copied();
+        let joined = self.open_in_container_by(
+            window,
+            rule,
+            &place.container,
+            |this, workspace, output| {
+                known.filter(|&id| {
+                    this.desk
+                        .container(id)
+                        .is_some_and(|c| c.workspace() == workspace && c.output() == output)
+                })
+            },
+            None,
+        );
+        match joined {
+            Some(id) => {
+                self.app_restore.rebuilt.insert(key, id);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The windows `restore-apps` put back that are still open, oldest first.
     pub(crate) fn app_restore_placed(&mut self) -> Vec<WlSurface> {
         self.app_restore.placed.retain(|a| a.surface.alive());
@@ -504,9 +571,17 @@ impl JffState {
         let in_name = current
             .and_then(|id| self.desk.container(id))
             .and_then(|c| c.name().map(str::to_owned));
-        if current.is_some()
-            && !place.container.is_empty()
-            && in_name.as_deref() == Some(place.container.as_str())
+        if !place.container.is_empty()
+            && current.is_some_and(|id| match in_name.as_deref() {
+                Some(name) => name == place.container,
+                None => {
+                    self.app_restore.rebuilt.get(&container_key(
+                        &place.container,
+                        place.workspace,
+                        &place.output,
+                    )) == Some(&id)
+                }
+            })
         {
             return;
         }
@@ -526,9 +601,7 @@ impl JffState {
                 self.retile_container(from);
             }
         }
-        if !place.container.is_empty()
-            && self.open_in_named_container(&window, &target, &place.container)
-        {
+        if !place.container.is_empty() && self.app_restore_open_container(&window, &target, place) {
             self.app_restore_container_joined(root, &place.container);
         } else {
             self.apply_rule_monitor_and_workspace(root, &target);
@@ -690,13 +763,7 @@ impl JffState {
         for container in self.desk.containers() {
             let name = match container.name() {
                 Some(name) => name.to_owned(),
-                None => {
-                    let mut name = format!("restore-{}", container.id().get());
-                    while taken.contains(&name) {
-                        name.push('\'');
-                    }
-                    name
-                }
+                None => unnamed_container_key(container.id().get(), &taken),
             };
             let layout = Template::from_tree(container.tree(), |_| None)
                 .map(|t| t.to_text())

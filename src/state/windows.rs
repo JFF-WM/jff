@@ -187,10 +187,12 @@ impl JffState {
         let named = restore_named.or(named);
         if let (Some((rule, name)), Some(window)) = (named.as_ref(), window.as_ref()) {
             self.focus_before_open.remove(root);
-            if self.open_in_named_container(window, rule, name) {
-                if from_restore {
-                    self.app_restore_container_joined(root, name);
-                }
+            let opened = if from_restore {
+                self.app_restore_open(root, window, rule, name)
+            } else {
+                self.open_in_named_container(window, rule, name)
+            };
+            if opened {
                 if restore_maximized {
                     self.set_mode(&toplevel, WindowMode::Maximized);
                 }

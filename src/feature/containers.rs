@@ -372,21 +372,40 @@ impl JffState {
         rule: &WindowRule,
         name: &str,
     ) -> bool {
+        self.open_in_container_by(
+            window,
+            rule,
+            name,
+            |this, workspace, output| this.desk.container_named_on(workspace, output, name),
+            Some(name),
+        )
+        .is_some()
+    }
+
+    /// The body of [`Self::open_in_named_container`], with the container looked up by `find`
+    /// (given the workspace and monitor the window is on) and a new one started with `name`,
+    /// which may be `None` for a container that carries no name. `label` is what the logs call
+    /// the container. Returns the container the window is in now, `None` when nothing changed.
+    pub(crate) fn open_in_container_by(
+        &mut self,
+        window: &Window,
+        rule: &WindowRule,
+        label: &str,
+        find: impl FnOnce(&Self, usize, &str) -> Option<ContainerId>,
+        name: Option<&str>,
+    ) -> Option<ContainerId> {
         if !self.config.tiling_containers() || self.overview_active() || self.session_locked() {
             tracing::info!(
-                "open-in-container {name:?} skipped: tiling-containers={} overview={} locked={}",
+                "open-in-container {label:?} skipped: tiling-containers={} overview={} locked={}",
                 self.config.tiling_containers(),
                 self.overview_active(),
                 self.session_locked()
             );
-            return false;
+            return None;
         }
-        let Some(root) = window
+        let root = window
             .toplevel()
-            .map(|toplevel| toplevel.wl_surface().clone())
-        else {
-            return false;
-        };
+            .map(|toplevel| toplevel.wl_surface().clone())?;
         self.apply_rule_monitor_and_workspace(&root, rule);
         let Some((pos, size, workspace, output)) = self
             .desk
@@ -402,15 +421,15 @@ impl JffState {
             })
         else {
             tracing::info!(
-                "open-in-container {name:?} skipped: window is in a container or fullscreen"
+                "open-in-container {label:?} skipped: window is in a container or fullscreen"
             );
-            return false;
+            return None;
         };
         let gap = self.config.snap_gap();
-        if let Some(id) = self.desk.container_named_on(workspace, &output, name) {
+        if let Some(id) = find(self, workspace, &output) {
             if let Err(err) = self.desk.join_container(id, None, |w| w == window, gap) {
-                tracing::warn!("could not join container {name:?}: {err:?}");
-                return false;
+                tracing::warn!("could not join container {label:?}: {err:?}");
+                return None;
             }
             // A container that was never laid out (it has no area yet) gets the usable area.
             if self
@@ -423,29 +442,31 @@ impl JffState {
                 self.tile_and_configure(id, area);
             }
             self.finish_join(id, window);
-            self.template_layout_sync(id, name);
+            if let Some(name) = name {
+                self.template_layout_sync(id, name);
+            }
             tracing::info!(
-                "window rule: window joined container {name:?} ({})",
+                "window rule: window joined container {label:?} ({})",
                 id.get()
             );
-            return true;
+            return Some(id);
         }
         tracing::info!(
-            "open-in-container {name:?}: no container on workspace {workspace} of {output:?}, starting one"
+            "open-in-container {label:?}: no container on workspace {workspace} of {output:?}, starting one"
         );
-        let Ok(id) = self
+        let id = self
             .desk
-            .create_container(|w| w == window, Some(name.to_owned()))
-        else {
-            return false;
-        };
+            .create_container(|w| w == window, name.map(str::to_owned))
+            .ok()?;
         self.desk.float_in_place_where(|w| w == window);
         let monitor = self.rect_for_window(pos, (size.w, size.h));
         let area = self.snapped_area(monitor);
         self.tile_and_configure(id, area);
-        self.template_layout_sync(id, name);
-        tracing::info!("window rule: container {name:?} ({}) started", id.get());
-        true
+        if let Some(name) = name {
+            self.template_layout_sync(id, name);
+        }
+        tracing::info!("window rule: container {label:?} ({}) started", id.get());
+        Some(id)
     }
 
     /// `window` has just joined container `id`: lay the container out again, configuring every

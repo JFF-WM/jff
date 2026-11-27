@@ -11,6 +11,29 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+/// What the name of a container that had none starts with in the list.
+const UNNAMED_CONTAINER_PREFIX: &str = "restore-";
+
+/// The name the list gives a container that has none, from its id, so that the windows of one
+/// container can be told from those of another. `taken` are the names in use, which it avoids.
+pub fn unnamed_container_key(id: u64, taken: &[String]) -> String {
+    let mut name = format!("{UNNAMED_CONTAINER_PREFIX}{id}");
+    while taken.contains(&name) {
+        name.push('\'');
+    }
+    name
+}
+
+/// Whether `name`, as the list has it, was made by [`unnamed_container_key`] and not given by
+/// the user: the restore keeps such a container without a name.
+pub fn is_unnamed_container_key(name: &str) -> bool {
+    name.strip_prefix(UNNAMED_CONTAINER_PREFIX)
+        .is_some_and(|rest| {
+            let digits = rest.trim_end_matches('\'');
+            !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
 /// Where one window was.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Placement {
