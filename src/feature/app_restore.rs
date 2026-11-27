@@ -49,6 +49,10 @@ use crate::state::JffState;
 pub const POLL: Duration = Duration::from_millis(100);
 /// How long it waits for that before giving up.
 pub const GIVE_UP: Duration = Duration::from_secs(10);
+/// How long it waits, counted from the start, for the monitors the saved windows were on to be
+/// connected (a monitor can take several seconds to wake up) before it starts the apps without
+/// them.
+const OUTPUTS_GIVE_UP: Duration = Duration::from_secs(10);
 /// How long after the apps were started the saved places are handed to new windows, and how long
 /// an app that was started by the restore stays on the list without a window. Short, so a window
 /// the user opens afterwards is never taken for one of the last session's.
@@ -634,8 +638,9 @@ impl JffState {
         self.app_restore.pending.is_some()
     }
 
-    /// Start the apps once the list of installed apps is there. Returns `true` when it is done
-    /// (or gave up) and doesn't need to be called again.
+    /// Start the apps once the list of installed apps is there and the monitors the saved windows
+    /// were on are connected. Returns `true` when it is done (or gave up) and doesn't need to be
+    /// called again.
     pub fn app_restore_poll(&mut self) -> bool {
         let Some(wanted) = self.app_restore.pending.take() else {
             return true;
@@ -653,6 +658,18 @@ impl JffState {
             }
             self.app_restore.pending = Some(wanted);
             return false;
+        }
+        let missing = self.app_restore_missing_outputs();
+        if !missing.is_empty() {
+            let waited = self
+                .app_restore
+                .waiting_since
+                .map_or(Duration::ZERO, |since| since.elapsed());
+            if waited < OUTPUTS_GIVE_UP {
+                self.app_restore.pending = Some(wanted);
+                return false;
+            }
+            tracing::warn!("restore-apps: monitors {missing:?} never came, starting without them");
         }
 
         self.app_restore.places_until = Some(Instant::now() + GRACE);
@@ -707,6 +724,23 @@ impl JffState {
             self.show_error("Could not restore some apps", &failures.join("\n"));
         }
         true
+    }
+
+    /// The monitors that saved windows were on and that are not connected now, each once.
+    fn app_restore_missing_outputs(&self) -> Vec<String> {
+        let mut missing: Vec<String> = self
+            .app_restore
+            .loaded
+            .iter()
+            .map(|place| place.output.as_str())
+            .filter(|output| {
+                !output.is_empty() && !self.outputs.iter().any(|o| o.name() == *output)
+            })
+            .map(str::to_owned)
+            .collect();
+        missing.sort();
+        missing.dedup();
+        missing
     }
 
     /// Whether a process of the app is still running, by `poll` on a pidfd (see
