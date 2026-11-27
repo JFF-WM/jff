@@ -176,21 +176,11 @@ pub fn fullscreen_content(
 /// windows that never asked, like X11 ones. With `force` (`force-tearing`) any covering
 /// fullscreen window counts, asked or not: games under Wine never ask.
 pub fn fullscreen_wants_tearing(desk: &Desk<Window>, rect: Rect, force: bool) -> bool {
-    if !fullscreen_covers(desk, rect) {
-        return false;
-    }
     if force {
-        return true;
+        return fullscreen_covers(desk, rect);
     }
-    let Some(entry) = desk.top_down().find(|entry| {
-        let size = entry.window.geometry().size;
-        layout::intersects((entry.pos.0, entry.pos.1, size.w, size.h), rect)
-    }) else {
-        return false;
-    };
-    entry.window.toplevel().is_some_and(|toplevel| {
-        crate::protocol::tearing_control::wants_tearing(toplevel.wl_surface())
-    })
+    fullscreen_surface(desk, rect)
+        .is_some_and(|surface| crate::protocol::tearing_control::wants_tearing(&surface))
 }
 
 /// Layers to draw in front of the windows on the monitor at `rect`. With a fullscreen window on

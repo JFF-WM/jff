@@ -7,8 +7,9 @@
 //! (`PresentationMode::Async`), and falls back to a normal flip when the hardware or the frame
 //! can't do it. This module advertises the global, enforces the rules (one object per
 //! surface), and remembers the hint (see `wants_tearing`, read by
-//! `layer_shell::fullscreen_wants_tearing`). The hint is stored the moment it's set, not on the
-//! next commit, so a frame already being drawn sees it.
+//! `layer_shell::fullscreen_wants_tearing`). The hint is double-buffered surface state, as the
+//! protocol says: `set_presentation_hint` (and destroying the object, which goes back to
+//! vsync) only takes effect with the next `wl_surface.commit`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -23,15 +24,31 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
 };
-use smithay::wayland::compositor::with_states;
+use smithay::wayland::compositor::{with_states, Cacheable};
 
 use crate::state::JffState;
+
+/// The presentation hint, double-buffered with the surface: what was set applies with the next
+/// commit and stays until a request changes it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TearingCachedState {
+    /// The client asked for async presentation.
+    hint_async: bool,
+}
+
+impl Cacheable for TearingCachedState {
+    fn commit(&mut self, _dh: &DisplayHandle) -> Self {
+        *self
+    }
+
+    fn merge_into(self, into: &mut Self, _dh: &DisplayHandle) {
+        *into = self;
+    }
+}
 
 /// What's remembered of a surface, in its user data.
 #[derive(Default)]
 struct SurfaceTearing {
-    /// The client asked for async presentation.
-    hint_async: AtomicBool,
     /// A `wp_tearing_control_v1` object exists for the surface.
     has_object: AtomicBool,
 }
@@ -58,25 +75,27 @@ impl TearingControlState {
     }
 }
 
-/// Whether the client asked for `surface` to be shown with tearing. The TTY backend acts on it
-/// for a fullscreen window covering the monitor, with `allow-tearing` set.
+/// Whether the client asked for `surface` to be shown with tearing, as of its last commit. The
+/// TTY backend acts on it for a fullscreen window covering the monitor, with `allow-tearing`
+/// set.
 pub fn wants_tearing(surface: &WlSurface) -> bool {
     with_states(surface, |states| {
-        states
-            .data_map
-            .get::<SurfaceTearing>()
-            .is_some_and(|data| data.hint_async.load(Ordering::SeqCst))
+        if !states.cached_state.has::<TearingCachedState>() {
+            return false;
+        }
+        let mut cached = states.cached_state.get::<TearingCachedState>();
+        cached.current().hint_async
     })
 }
 
+/// Set the hint of the next commit.
 fn set_hint(surface: &WlSurface, hint_async: bool) {
     if !surface.is_alive() {
         return;
     }
     with_states(surface, |states| {
-        if let Some(data) = states.data_map.get::<SurfaceTearing>() {
-            data.hint_async.store(hint_async, Ordering::SeqCst);
-        }
+        let mut cached = states.cached_state.get::<TearingCachedState>();
+        cached.pending().hint_async = hint_async;
     });
 }
 
@@ -151,8 +170,8 @@ impl Dispatch<WpTearingControlV1, TearingObject> for JffState {
         }
     }
 
-    // The object is gone (destroyed, or its client left): the surface goes back to vsync and
-    // can get a new object.
+    // The object is gone (destroyed, or its client left): the surface goes back to vsync with
+    // its next commit and can get a new object.
     fn destroyed(
         _state: &mut Self,
         _client: ClientId,
@@ -164,9 +183,13 @@ impl Dispatch<WpTearingControlV1, TearingObject> for JffState {
         }
         with_states(&data.surface, |states| {
             if let Some(surface) = states.data_map.get::<SurfaceTearing>() {
-                surface.hint_async.store(false, Ordering::SeqCst);
                 surface.has_object.store(false, Ordering::SeqCst);
             }
+            states
+                .cached_state
+                .get::<TearingCachedState>()
+                .pending()
+                .hint_async = false;
         });
     }
 }
