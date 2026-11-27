@@ -63,7 +63,8 @@
 //! screenshot-area            freeze the monitor under the pointer and pick a rectangle to save
 //! screenshot-fullscreen      save a picture of the monitor under the pointer
 //! screenshot-window          save a picture of the window the user works in
-//! window-thumbnail ID [MAXW MAXH]  PNG of a window that fits MAXW x MAXH (default 320 x 200)
+//! window-thumbnail ID [MAXW MAXH]  PNG of a window that fits MAXW x MAXH (default 320 x 200),
+//!                            a window in a container gives the whole container's picture
 //!                            at $XDG_RUNTIME_DIR/jff-wm/thumbs/thumb-ID.png, for panel previews,
 //!                            reply {"ok":true,"path":...,"width":...,"height":...}
 //! clipboard-history          the copies jff keeps of the clipboard, newest first (see `clipboard { history N }`)
@@ -611,7 +612,8 @@ pub enum Request {
     ScreenshotFullscreen,
     /// `screenshot-window`: the window the user works in.
     ScreenshotWindow,
-    /// `window-thumbnail ID [MAXW MAXH]`: a small picture of a window, in a file.
+    /// `window-thumbnail ID [MAXW MAXH]`: a small picture of a window, in a file. For a window in a
+    /// container it is a picture of the whole container.
     WindowThumbnail(u64, Option<(u32, u32)>),
     /// `move-cursor X Y`: put the pointer there (clamped to the monitors).
     MoveCursor(i32, i32),

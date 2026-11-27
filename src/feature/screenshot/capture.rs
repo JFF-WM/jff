@@ -1302,18 +1302,32 @@ impl JffState {
     }
 
     /// A picture of `window` that fits in `max_w` by `max_h` pixels (never enlarged), drawn at
-    /// that size. Pixels are premultiplied, like `capture_window`.
+    /// that size. A window that is a member of a container is pictured as the whole container
+    /// (all its members, in their tiles), so every member of a container has the same thumbnail.
+    /// Pixels are premultiplied, like `capture_window`.
     pub(crate) fn capture_window_thumbnail(
         &mut self,
         window: &Window,
         max_w: u32,
         max_h: u32,
     ) -> Result<Captured, String> {
-        let (_, full) = self.window_capture_size(window)?;
-        let shrink = (f64::from(max_w) / f64::from(full.w))
-            .min(f64::from(max_h) / f64::from(full.h))
-            .min(1.0);
         let color = crate::protocol::color_management::capture_color(&self.config);
+        // A window in a container is shown as the whole container, however many windows it has.
+        if let Some(container) = self.desk.container_of(|w| w == window) {
+            let (_, _, full) = self.container_capture_geometry(container)?;
+            let shrink = thumbnail_shrink(full, max_w, max_h);
+            let (elements, scale_factor, size) =
+                self.container_surface_elements(container, color, shrink)?;
+            return render_to_rgba(
+                self.backend.renderer(),
+                (size.w, size.h),
+                scale_factor,
+                &elements,
+                [0.0; 4],
+            );
+        }
+        let (_, full) = self.window_capture_size(window)?;
+        let shrink = thumbnail_shrink(full, max_w, max_h);
         let (elements, scale_factor, size) = self.window_surface_elements(window, color, shrink)?;
         render_to_rgba(
             self.backend.renderer(),
@@ -1370,6 +1384,19 @@ impl JffState {
         // Draw the window with its geometry corner at (0, 0).
         let loc: Point<i32, Physical> =
             Point::<i32, Logical>::from((-geo.loc.x, -geo.loc.y)).to_physical_precise_round(scale);
+        let elements = self.window_elements_at(window, color, scale, loc);
+        Ok((elements, scale_factor, size))
+    }
+
+    /// The surfaces of `window` and its menus, with the window's own origin (the corner of its
+    /// buffer geometry minus `geometry().loc`) at `loc`, converted to `color`.
+    fn window_elements_at(
+        &mut self,
+        window: &Window,
+        color: Option<OutputColor>,
+        scale: Scale<f64>,
+        loc: Point<i32, Physical>,
+    ) -> Vec<JffElement> {
         // The window's own surfaces and those of its menus, each needing its own conversion.
         let mut conversions = Vec::new();
         if let (Some(toplevel), Some(color)) = (window.toplevel(), color) {
@@ -1404,6 +1431,93 @@ impl JffState {
                 Some(mask) => elements.push(mask.wrap(surface)),
                 None => elements.push(JffElement::from(surface)),
             }
+        }
+        elements
+    }
+
+    /// What a picture of a whole container covers: its rectangle (its area and every member's
+    /// tile, where a member sticks out of it), the scale of the monitor it is on, and the pixel
+    /// size of the picture.
+    fn container_capture_geometry(
+        &self,
+        id: crate::desk::ContainerId,
+    ) -> Result<(Rect, f64, Size<i32, Physical>), String> {
+        let container = self.desk.container(id).ok_or("the container is gone")?;
+        let mut rects: Vec<Rect> = container.area().into_iter().collect();
+        for entry in self.desk.members(id) {
+            let geo = entry.window.geometry();
+            if geo.size.w <= 0 || geo.size.h <= 0 {
+                continue;
+            }
+            let pos = crate::feature::containers::drawn_pos(&self.desk, entry);
+            rects.push((pos.0, pos.1, geo.size.w, geo.size.h));
+        }
+        if rects.is_empty() {
+            return Err("the container has nothing on screen yet".to_string());
+        }
+        let rect = layout::bounds(&rects);
+        if rect.2 <= 0 || rect.3 <= 0 {
+            return Err("the container has nothing on screen yet".to_string());
+        }
+        // Scale of the monitor the container is on.
+        let on = self.rect_for_window((rect.0, rect.1), (rect.2, rect.3));
+        let scale_factor = self
+            .outputs
+            .iter()
+            .find(|output| output_rect(output) == on)
+            .map_or(1.0, |output| output.current_scale().fractional_scale());
+        let size: Size<i32, Physical> = Size::<i32, Logical>::from((rect.2, rect.3))
+            .to_f64()
+            .to_physical(Scale::from(scale_factor))
+            .to_i32_round();
+        Ok((rect, scale_factor, size))
+    }
+
+    /// The surfaces of every member of container `id` (and their menus), drawn where they are
+    /// in the container, with the corner of its rectangle at (0, 0), converted to `color`.
+    /// `shrink` works as in [`JffState::window_surface_elements`]. A maximized member covers the
+    /// others, so it is all that is drawn then.
+    fn container_surface_elements(
+        &mut self,
+        id: crate::desk::ContainerId,
+        color: Option<OutputColor>,
+        shrink: f64,
+    ) -> Result<(Vec<JffElement>, f64, Size<i32, Physical>), String> {
+        self.refuse_when_locked()?;
+        let (rect, scale_factor, size) = self.container_capture_geometry(id)?;
+        let (scale_factor, size) = if shrink < 1.0 {
+            let small: Size<i32, Physical> = (
+                ((f64::from(size.w) * shrink).round() as i32).max(1),
+                ((f64::from(size.h) * shrink).round() as i32).max(1),
+            )
+                .into();
+            (scale_factor * shrink, small)
+        } else {
+            (scale_factor, size)
+        };
+        let scale = Scale::from(scale_factor);
+        let zoomed = self.desk.container(id).and_then(|c| c.zoomed());
+        // Members topmost first, with where each window's own origin goes in the picture.
+        let members: Vec<(Window, Point<i32, Logical>)> = self
+            .desk
+            .all_top_down()
+            .filter(|entry| entry.container == Some(id))
+            .filter(|entry| zoomed.map_or(true, |z| z == entry.id))
+            .filter_map(|entry| {
+                let geo = entry.window.geometry();
+                if geo.size.w <= 0 || geo.size.h <= 0 {
+                    return None;
+                }
+                let pos = crate::feature::containers::drawn_pos(&self.desk, entry);
+                let origin: Point<i32, Logical> =
+                    Point::from((pos.0 - rect.0 - geo.loc.x, pos.1 - rect.1 - geo.loc.y));
+                Some((entry.window.clone(), origin))
+            })
+            .collect();
+        let mut elements: Vec<JffElement> = Vec::new();
+        for (window, origin) in members {
+            let loc: Point<i32, Physical> = origin.to_physical_precise_round(scale);
+            elements.extend(self.window_elements_at(&window, color, scale, loc));
         }
         Ok((elements, scale_factor, size))
     }
@@ -2048,4 +2162,11 @@ impl PointerGrab<JffState> for ScreenshotGrab {
     }
 
     fn unset(&mut self, _data: &mut JffState) {}
+}
+
+/// How much to shrink a picture of `full` pixels to fit `max_w` by `max_h` (never enlarged).
+fn thumbnail_shrink(full: Size<i32, Physical>, max_w: u32, max_h: u32) -> f64 {
+    (f64::from(max_w) / f64::from(full.w))
+        .min(f64::from(max_h) / f64::from(full.h))
+        .min(1.0)
 }
