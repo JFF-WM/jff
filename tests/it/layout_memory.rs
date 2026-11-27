@@ -156,14 +156,15 @@ fn remember_container_layouts_is_off_unless_asked_for() {
 
 #[test]
 fn check_config_warns_about_remember_container_layouts_without_tiling_containers() {
-    let warnings = Config::check_text("remember-container-layouts").unwrap();
+    let warnings =
+        Config::check_text("tiling-containers #false\nremember-container-layouts").unwrap();
     assert!(
         warnings
             .iter()
             .any(|w| w.contains("remember-container-layouts")),
         "{warnings:?}"
     );
-    let warnings = Config::check_text("tiling-containers\nremember-container-layouts").unwrap();
+    let warnings = Config::check_text("remember-container-layouts").unwrap();
     assert!(
         !warnings
             .iter()

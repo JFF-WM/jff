@@ -479,3 +479,14 @@ fn maximized_windows_fill_their_area_unless_told_otherwise() {
     assert!(Config::parse("maximize-fill \"maybe\"").is_err());
     assert!(jff_wm::config::TOP_LEVEL_NODES.contains(&"maximize-fill"));
 }
+
+#[test]
+fn tiling_containers_are_on_by_default_and_can_be_turned_off() {
+    assert!(Config::parse("").unwrap().tiling_containers());
+    assert!(Config::parse("tiling-containers")
+        .unwrap()
+        .tiling_containers());
+    assert!(!Config::parse("tiling-containers #false")
+        .unwrap()
+        .tiling_containers());
+}

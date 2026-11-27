@@ -224,7 +224,7 @@ impl Config {
             .any(|rule| rule.sticky && rule.matches(window))
     }
 
-    /// Whether windows can be grouped in tiling containers (`tiling-containers`, off by default).
+    /// Whether windows can be grouped in tiling containers (`tiling-containers`, on by default).
     pub fn tiling_containers(&self) -> bool {
         self.tiling_containers
     }

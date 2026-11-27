@@ -27,7 +27,7 @@
 //!
 //! `focus-new-windows` (on by default) makes a newly opened window take the keyboard. With `focus-new-windows #false` focus stealing is prevented strictly: a window that opens while another one has the keyboard (on the monitor in use) leaves the keyboard where it is, opens just below that window in the stack instead of on top of it, is marked urgent, and gets focus only when the user picks it (click, binding, switcher, taskbar) or an activation request carries a real input serial. A window that opens with nothing to take the keyboard from (an empty workspace) still takes it.
 //!
-//! `tiling-containers` turns on tiling containers (groups of windows that tile among themselves, see `desk::container`), and is off by default. It accepts a bare name or `#true` / `#false`.
+//! `tiling-containers` turns on tiling containers (groups of windows that tile among themselves, see `desk::container`), and is on by default, `tiling-containers #false` turns it off. It accepts a bare name or `#true` / `#false`.
 //! `hide-behind-containers` (on by default) leaves out of the frame the windows behind the container that has the keyboard, so the gaps between its tiles show the wallpaper and not them. It accepts a bare name or `#true` / `#false`.
 //! `remember-container-layouts` (off by default, needs `tiling-containers`) remembers how every container was arranged (its splits and ratios, and which window stood where) by the app ids of its windows, until jff ends. When windows with the same app ids are tiled into a new container together again, for instance after one was dragged to the edge, which takes the container apart, and then another one is dragged to the edge, which tiles them all again, the container gets that arrangement instead of the default split. A `container-rule` `layout` wins over it. It accepts a bare name or `#true` / `#false`.
 //! `restore-apps` starts the applications that were open when the last session ended (one launch per app, found by the app id of its windows in the installed `.desktop` files, see `feature::app_restore`), puts each of their windows on the monitor and the workspace it was on, and keeps that list up to date while you work. It is off by default, and while it is off jff neither reads nor writes the list. It accepts a bare name or `#true` / `#false`. Turning it on in a running session starts saving, and the next start restores. Its monitor and workspace win over those of a `window-rule`, a monitor that is not connected any more leaves the window where it opens by default.
@@ -1762,7 +1762,7 @@ pub struct Config {
     autostart: Vec<Action>,
     /// `window-rule` blocks, in file order.
     window_rules: Vec<WindowRule>,
-    /// `tiling-containers`: windows can be grouped in tiling containers. Off by default.
+    /// `tiling-containers`: windows can be grouped in tiling containers. On by default.
     tiling_containers: bool,
     /// `remember-container-layouts`: windows tiled together again get the arrangement their
     /// container had. Off by default.
@@ -1905,7 +1905,7 @@ impl Default for Config {
                 zoom: ZoomConfig::default(),
                 autostart: Vec::new(),
                 window_rules: Vec::new(),
-                tiling_containers: false,
+                tiling_containers: true,
                 remember_container_layouts: false,
                 hide_behind_containers: true,
                 container_rules: Vec::new(),
@@ -2336,7 +2336,7 @@ impl Config {
             }
         }
 
-        let tiling_containers = parse_flag(&doc, "tiling-containers", false)?;
+        let tiling_containers = parse_flag(&doc, "tiling-containers", true)?;
         let remember_container_layouts = parse_flag(&doc, "remember-container-layouts", false)?;
         let hide_behind_containers = parse_flag(&doc, "hide-behind-containers", true)?;
         let mut container_rules = Vec::new();

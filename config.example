@@ -111,9 +111,10 @@ warp-mouse-to-focus #true
 // restores. While it is off, jff neither reads nor writes the list.
 // restore-apps #true
 
-// Tiling containers (off by default): groups of windows that tile among themselves. Needed by
+// Tiling containers (on by default): groups of windows that tile among themselves. Needed by
 // `open-in-container` in a window-rule, `container-rule`, and the container binds below.
-// tiling-containers #true
+// Uncomment to turn them off.
+// tiling-containers #false
 
 // Remember how every container is arranged (off by default, needs `tiling-containers`). The
 // splits, their ratios and which window stands where are kept, by the app ids of the windows,
