@@ -138,19 +138,24 @@ impl JffState {
     }
 
     pub fn process_input_event<B: InputBackend>(&mut self, event: InputEvent<B>) {
+        // zwp_input_timestamps_v1: keep the hardware time of a key, button or scroll for the
+        // spot where it is handed to a client (`stamp_keyboard`, `stamp_pointer`), after the
+        // bindings, grabs and overview have had their pick. It must not outlive the event, or
+        // a virtual keyboard's key would pick up the time of a key a binding kept. Motion has
+        // its own (`motion_hw_time`).
+        self.input_hw_time = match &event {
+            InputEvent::Keyboard { event } => Some(Event::time(event)),
+            InputEvent::PointerButton { event } => Some(Event::time(event)),
+            InputEvent::PointerAxis { event } => Some(Event::time(event)),
+            _ => None,
+        };
+        self.process_input_event_inner(event);
+        self.input_hw_time = None;
+    }
+
+    fn process_input_event_inner<B: InputBackend>(&mut self, event: InputEvent<B>) {
         // Idle tools (ext-idle-notify) measure time since the last input.
         self.idle_notifier_state.notify_activity(&self.seat);
-        // zwp_input_timestamps_v1: a client that asked gets the event's time just before the
-        // event itself. Sending it for an event a compositor binding then swallows is harmless:
-        // the next event of that device is stamped again, and the client keeps the latest.
-        // Motion is not stamped here: the pointer focus before the move can be another client
-        // than the one the move ends on, so `stamp_pointer_motion` does it once that is known.
-        match &event {
-            InputEvent::Keyboard { event } => self.stamp_keyboard(Event::time(event)),
-            InputEvent::PointerButton { event } => self.stamp_pointer(Event::time(event)),
-            InputEvent::PointerAxis { event } => self.stamp_pointer(Event::time(event)),
-            _ => {}
-        }
         // The cursor is for whatever was used last: a finger has no use for one.
         match &event {
             InputEvent::TouchDown { .. } | InputEvent::TouchMotion { .. } => {
@@ -265,6 +270,7 @@ impl JffState {
                     }
                 }
 
+                self.stamp_pointer();
                 pointer.axis(self, frame);
                 pointer.frame(self);
             }
@@ -603,6 +609,7 @@ impl JffState {
         // Step 2: forward the key to the focused client.
         self.input_serials
             .note(serial, keyboard.current_focus().as_ref());
+        self.stamp_keyboard();
         keyboard.input_forward(self, key_code, key_state, serial, time, mods_changed);
     }
 
@@ -926,6 +933,7 @@ impl JffState {
 
         self.input_serials
             .note(serial, pointer.current_focus().as_ref());
+        self.stamp_pointer();
         pointer.button(
             self,
             &ButtonEvent {
@@ -962,11 +970,13 @@ impl JffState {
         self.input_serials.note(serial, Some(surface));
         let previous = keyboard.current_focus();
         if previous.as_ref() == Some(surface) {
+            self.stamp_keyboard();
             keyboard.input_forward(self, key_code, key_state, serial, time, false);
             return;
         }
         keyboard.set_focus(self, Some(surface.clone()), SERIAL_COUNTER.next_serial());
         keyboard.advertise_modifier_state(self);
+        self.stamp_keyboard();
         keyboard.input_forward(self, key_code, key_state, serial, time, false);
         keyboard.set_focus(self, previous, SERIAL_COUNTER.next_serial());
         keyboard.advertise_modifier_state(self);

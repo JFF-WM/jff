@@ -2,11 +2,13 @@
 //! `wl_keyboard` / `wl_pointer` / `wl_touch`, in nanoseconds instead of the milliseconds the
 //! core events carry. Games and input tools use it for latency and for sub-millisecond ordering.
 //!
-//! The protocol only promises that the `timestamp` event comes before the input event it
-//! belongs to, so the compositor sends it right before it hands the event to the client.
-//! `process_input_event` calls `stamp_keyboard` / `stamp_pointer` ahead of the dispatch for that.
-//! Pointer motion is the exception: it can change the focus, so it is stamped by
-//! `stamp_pointer_motion` right before `wl_pointer.motion`, for the surface it ends on.
+//! The protocol ties a `timestamp` event to the next input event of that device the client gets,
+//! so a timestamp must only be sent for an event that really goes to the client. It is sent
+//! where the event is handed over, not where it comes in: a key a binding keeps, a scroll the
+//! zoom or the overview uses, a click that starts a window drag, or pointer motion that goes to
+//! a compositor grab or only enters a surface (`enter` carries no time) would all leave a stray
+//! timestamp behind, and the client would pair it with its next event. `stamp_keyboard`,
+//! `stamp_pointer` and `stamp_pointer_motion` are called right before the event is delivered.
 
 use smithay::backend::input::InputTime;
 use smithay::reexports::wayland_protocols::wp::input_timestamps::zv1::server::{
@@ -120,6 +122,29 @@ pub fn split_timestamp(nsec: u64) -> (u32, u32, u32) {
     ((secs >> 32) as u32, secs as u32, rest)
 }
 
+/// Which surface gets a `wl_pointer.motion` when the pointer moves, so the one a timestamp can be
+/// sent to. `focus` is the pointer focus before the move, `target` the surface under the pointer
+/// after it, `grabbed` whether any pointer grab is active.
+///
+/// Without a grab the focus follows the pointer: a move inside the focused surface is a
+/// `motion`, one onto another surface is a `leave` and an `enter`, and neither carries a time
+/// (a move out of every surface sends nothing). A grab that keeps the focus (a click, a
+/// popup) forwards the motion to that focus wherever the pointer is. A compositor grab (a
+/// window move or resize, the overview, a selection) clears the focus and the client sees no
+/// motion at all.
+pub fn motion_stamp_target<'a, T: PartialEq>(
+    grabbed: bool,
+    focus: Option<&'a T>,
+    target: Option<&'a T>,
+) -> Option<&'a T> {
+    let focus = focus?;
+    if grabbed || target == Some(focus) {
+        Some(focus)
+    } else {
+        None
+    }
+}
+
 /// The one place that reads an `InputTime` (a type from the smithay fork) as nanoseconds on
 /// CLOCK_MONOTONIC, which is the clock libinput and `wp_presentation` use. If `InputTime`
 /// spells it differently, this is the only line to change.
@@ -128,8 +153,13 @@ fn input_time_nsec(time: InputTime) -> u64 {
 }
 
 impl JffState {
-    /// Before a `wl_keyboard` event: tell the keyboard focus client when it happened.
-    pub(crate) fn stamp_keyboard(&mut self, time: InputTime) {
+    /// Right before a `wl_keyboard.key` goes to the keyboard focus: tell the client when the key
+    /// happened. Does nothing unless a device event is being handled (`input_hw_time`), so a key
+    /// a virtual keyboard or `jff msg` makes carries no timestamp.
+    pub(crate) fn stamp_keyboard(&mut self) {
+        let Some(time) = self.input_hw_time.take() else {
+            return;
+        };
         if self.input_timestamps.is_empty() {
             return;
         }
@@ -150,11 +180,10 @@ impl JffState {
             .stamp(DeviceKind::Touch, surface, input_time_nsec(time));
     }
 
-    /// Before a `wl_pointer.motion`: tell the client the pointer is about to be on, `target`,
-    /// when the move happened. That is the focus after the move, not before: when the pointer
-    /// crosses into another client's surface, that client gets `enter` and the motion, and the
-    /// client it left sees neither. Does nothing unless a device event is being handled
-    /// (`motion_hw_time`), so synthetic motion carries no timestamp.
+    /// Right before `pointer.motion`: tell the client that is about to get a `wl_pointer.motion`
+    /// when the move happened. `target` is the surface under the pointer after the move. See
+    /// `motion_stamp_target` for who really gets the motion. Does nothing unless a device
+    /// event is being handled (`motion_hw_time`), so synthetic motion carries no timestamp.
     pub(crate) fn stamp_pointer_motion(&mut self, target: Option<&WlSurface>) {
         let Some(time) = self.motion_hw_time.take() else {
             return;
@@ -162,15 +191,23 @@ impl JffState {
         if self.input_timestamps.is_empty() {
             return;
         }
-        if let Some(surface) = target {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        let focus = pointer.current_focus();
+        if let Some(surface) = motion_stamp_target(pointer.is_grabbed(), focus.as_ref(), target) {
             self.input_timestamps
                 .stamp(DeviceKind::Pointer, surface, input_time_nsec(time));
         }
     }
 
-    /// Before a `wl_pointer` event that does not move the pointer (button, axis): tell the
-    /// pointer focus client when it happened.
-    pub(crate) fn stamp_pointer(&mut self, time: InputTime) {
+    /// Right before a `wl_pointer.button` or `wl_pointer.axis` goes to the pointer focus: tell
+    /// the client when it happened. Does nothing unless a device event is being handled
+    /// (`input_hw_time`). With a compositor grab the pointer has no focus, so nothing is sent.
+    pub(crate) fn stamp_pointer(&mut self) {
+        let Some(time) = self.input_hw_time.take() else {
+            return;
+        };
         if self.input_timestamps.is_empty() {
             return;
         }

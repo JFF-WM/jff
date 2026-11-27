@@ -355,6 +355,10 @@ pub struct JffState {
     /// client the pointer ends up on. Set only while that event is dispatched, `None` for motion
     /// that did not come from a device (virtual pointer, tablet, IPC).
     pub motion_hw_time: Option<smithay::backend::input::InputTime>,
+    /// Hardware time of the libinput key, button or scroll event being handled, `None` for
+    /// events that did not come from a device (virtual keyboard, `jff msg`, a touch press). Its
+    /// timestamp is sent where the event is handed to the client (`protocol/input_timestamps.rs`).
+    pub input_hw_time: Option<smithay::backend::input::InputTime>,
     /// xdg-toplevel-drag: a drag-and-drop that carries a window (`protocol/toplevel_drag.rs`).
     pub toplevel_drags: ToplevelDrags,
     /// xdg-toplevel-tag: window tags for `window-rule` (`protocol/toplevel_tag.rs`).
@@ -768,6 +772,7 @@ impl JffState {
             fixes,
             input_timestamps,
             motion_hw_time: None,
+            input_hw_time: None,
             toplevel_drags,
             toplevel_tag_manager,
             dbus_annotation,
