@@ -202,6 +202,10 @@ impl JffState {
             .filter(|w| windows.contains(w))
             .or_else(|| windows.first().cloned());
 
+        // A client may hold the pointer (pointer-constraints lock or confine): the overview
+        // takes it back, before the pointer leaves the client's surface.
+        self.release_pointer_constraints();
+
         // Bring the pointer onto the monitor first. This also tells the client under it that
         // the pointer left.
         let at = pointer.current_location();

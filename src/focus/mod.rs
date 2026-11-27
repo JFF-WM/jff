@@ -364,6 +364,9 @@ impl JffState {
         if to_client && focus_changed {
             keyboard.advertise_modifier_state(self);
         }
+        if focus_changed {
+            self.sync_pointer_constraint();
+        }
     }
 
     /// The window the user is working in: the one they picked while it's still on the shown
@@ -563,6 +566,84 @@ impl JffState {
             size.w,
             size.h
         );
+    }
+
+    /// Take the pointer back from a client that locked or confined it (a game, wine): the
+    /// active constraint on the surface under the pointer is deactivated, so the client is told
+    /// it is unlocked, and the next motion no longer treats the pointer as held.
+    pub(crate) fn release_pointer_constraints(&mut self) {
+        self.locked_pointer_under = None;
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        let Some(surface) = pointer.current_focus() else {
+            return;
+        };
+        with_pointer_constraint(&surface, &pointer, |constraint| {
+            if let Some(constraint) = constraint {
+                if constraint.is_active() {
+                    constraint.deactivate();
+                }
+            }
+        });
+    }
+
+    /// Whether `surface`, or the window it is a part of, is the one that has the keyboard.
+    pub(crate) fn surface_has_keyboard(&self, surface: &WlSurface) -> bool {
+        fn root(surface: &WlSurface) -> WlSurface {
+            let mut root = surface.clone();
+            while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
+                root = parent;
+            }
+            root
+        }
+        self.seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .is_some_and(|focus| root(&focus) == root(surface))
+    }
+
+    /// A pointer lock or confine only holds while its window has the keyboard. Called when the
+    /// keyboard changes hands: the window that lost it is let go of, the one that got it (with
+    /// the pointer already on it) is held at once, without waiting for the pointer to move.
+    pub(crate) fn sync_pointer_constraint(&mut self) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        let Some(surface) = pointer.current_focus() else {
+            return;
+        };
+        let allowed =
+            !self.overview_active() && self.screenshot.is_none() && !self.session_locked();
+        let has_keyboard = allowed && self.surface_has_keyboard(&surface);
+        let location = pointer.current_location();
+        let origin = if has_keyboard {
+            self.pointer_focus_under(location)
+                .filter(|(under, _)| *under == surface)
+                .map(|(_, origin)| origin)
+        } else {
+            None
+        };
+        with_pointer_constraint(&surface, &pointer, |constraint| {
+            let Some(constraint) = constraint else {
+                return;
+            };
+            if !has_keyboard {
+                if constraint.is_active() {
+                    constraint.deactivate();
+                }
+            } else if !constraint.is_active() {
+                if let Some(origin) = origin {
+                    let local = (location - origin).to_i32_round();
+                    if constraint.region().map_or(true, |r| r.contains(local)) {
+                        constraint.activate();
+                    }
+                }
+            }
+        });
+        if !has_keyboard {
+            self.locked_pointer_under = None;
+        }
     }
 
     /// Forget a menu grab that ended by itself (the menu was dismissed, a click outside it).

@@ -525,7 +525,11 @@ impl JffState {
                     let action = sym
                         .and_then(|sym| state.config.action_for(mods, sym))
                         .filter(|action| {
-                            !inhibited || matches!(action, Action::ToggleShortcutsInhibit)
+                            !inhibited
+                                || matches!(
+                                    action,
+                                    Action::ToggleShortcutsInhibit | Action::Overview
+                                )
                         })
                         .cloned();
                     match action {
@@ -652,7 +656,10 @@ impl JffState {
         let mut locked = false;
         let mut confined = false;
         let mut confine_region = None;
-        if let Some((surface, origin)) = under.as_ref() {
+        // The overview and a screenshot selection own the pointer: whatever lock or confine a
+        // client had on the window underneath does not apply to them.
+        let constraints_apply = !self.overview_active() && self.screenshot.is_none();
+        if let Some((surface, origin)) = under.as_ref().filter(|_| constraints_apply) {
             with_pointer_constraint(surface, &pointer, |constraint| {
                 if let Some(constraint) = constraint {
                     if !constraint.is_active() {
@@ -737,8 +744,14 @@ impl JffState {
         self.update_toplevel_drag();
         self.focus_follows_mouse(pos);
 
-        // The pointer reached a surface that already asked for a lock: engage it.
-        if let Some((surface, origin)) = new_under {
+        // The pointer reached a surface that already asked for a lock: engage it. Not while the
+        // overview or a screenshot selection has the pointer (a hot corner may have just opened
+        // it), or the lock would come back at once and freeze the cursor.
+        if let Some((surface, origin)) = new_under.filter(|(surface, _)| {
+            !self.overview_active()
+                && self.screenshot.is_none()
+                && self.surface_has_keyboard(surface)
+        }) {
             with_pointer_constraint(&surface, &pointer, |constraint| {
                 if let Some(constraint) = constraint {
                     if !constraint.is_active() {

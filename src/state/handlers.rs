@@ -396,8 +396,9 @@ impl XdgSystemBellHandler for JffState {
 // pointer-constraints: games lock the pointer (mouse look) or confine it to their window.
 impl PointerConstraintsHandler for JffState {
     fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
-        // Activate right away when the pointer is already on that surface.
-        if pointer.current_focus().as_ref() == Some(surface) {
+        // Activate right away when the pointer is already on that surface, and its window has
+        // the keyboard: a window that was only passed over does not get to hold the pointer.
+        if pointer.current_focus().as_ref() == Some(surface) && self.surface_has_keyboard(surface) {
             with_pointer_constraint(surface, pointer, |constraint| {
                 if let Some(constraint) = constraint {
                     constraint.activate();
