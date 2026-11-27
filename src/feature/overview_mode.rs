@@ -336,7 +336,8 @@ struct Drag {
 /// A tiling container as the overview shows it: one cell of the grid with its windows inside.
 struct Group {
     id: ContainerId,
-    /// The name above the cell: the container's name or its first window's app id.
+    /// The name above the cell: the name the user gave the container, empty when it has none
+    /// (and then the cell has no strip for it).
     label: String,
     /// The container's rectangle in the real space, border not included.
     area: Rect,
@@ -1057,7 +1058,7 @@ impl JffState {
                 .unwrap_or_else(|| leaves[0].0.clone());
             groups.push(Group {
                 id: container.id(),
-                label: container_view::label(container.name(), &app_id_of(&leaves[0].0)),
+                label: container_view::label(container.name()),
                 area,
                 leaves,
                 focused,
@@ -1457,7 +1458,7 @@ fn overview_arrangement(
             Item::Window(i) => window_size(&ov.visible[*i]),
             Item::Group(g) => {
                 let area = groups[*g].area;
-                container_view::cell_size((area.2, area.3))
+                container_view::cell_size((area.2, area.3), !groups[*g].label.is_empty())
             }
         })
         .collect();
@@ -1480,7 +1481,8 @@ fn overview_arrangement(
             Item::Group(g) => {
                 let group = &groups[*g];
                 let rects: Vec<Rect> = group.leaves.iter().map(|(_, rect)| *rect).collect();
-                let inside = container_view::leaf_thumbs(slot, group.area, &rects);
+                let inside =
+                    container_view::leaf_thumbs(slot, group.area, &rects, !group.label.is_empty());
                 for ((leaf, _), thumb) in group.leaves.iter().zip(inside) {
                     if let Some(i) = ov.visible.iter().position(|w| w == leaf) {
                         thumbs[i] = thumb;

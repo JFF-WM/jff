@@ -12,7 +12,8 @@ use crate::primitives::overview_grid::Thumb;
 
 /// Room around the windows of a cell, at both sides and at the bottom, in real pixels.
 pub const CELL_PAD: i32 = 24;
-/// Room above the windows of a cell, for the name, in real pixels.
+/// Room above the windows of a cell that has a name, for the name, in real pixels. A cell
+/// without a name has [`CELL_PAD`] there, like at its other sides.
 pub const CELL_LABEL: i32 = 96;
 /// How far outside the container's rectangle a click still counts as on its border, at least.
 /// A border is a few pixels wide, too thin to aim at.
@@ -32,12 +33,22 @@ pub fn bounds(rects: &[Rect]) -> Option<Rect> {
     Some((left, top, right - left, bottom - top))
 }
 
+/// The room above the windows of a cell, in real pixels: the strip for the name when the cell
+/// has one (`labelled`), else the same padding as at its other sides.
+pub fn top_room(labelled: bool) -> i32 {
+    if labelled {
+        CELL_LABEL
+    } else {
+        CELL_PAD
+    }
+}
+
 /// The size a container takes in the overview grid, before it is scaled to fit: its rectangle
-/// and the room around it.
-pub fn cell_size(area: Size) -> Size {
+/// and the room around it, with the strip for the name only when it `labelled`.
+pub fn cell_size(area: Size, labelled: bool) -> Size {
     (
         area.0.max(1) + 2 * CELL_PAD,
-        area.1.max(1) + CELL_LABEL + CELL_PAD,
+        area.1.max(1) + top_room(labelled) + CELL_PAD,
     )
 }
 
@@ -48,14 +59,16 @@ fn scaled(value: i32, cell: &Thumb) -> i32 {
 
 /// Where the windows of a container go inside its `cell`: each of `leaves` (where the window is
 /// in real space) keeps its place and size relative to `area`, the container's rectangle,
-/// scaled like the cell. One thumbnail per leaf, in order, none under 1 px.
-pub fn leaf_thumbs(cell: Thumb, area: Rect, leaves: &[Rect]) -> Vec<Thumb> {
+/// scaled like the cell. One thumbnail per leaf, in order, none under 1 px. `labelled` says
+/// whether the cell has the strip for the name above the windows (see [`cell_size`]).
+pub fn leaf_thumbs(cell: Thumb, area: Rect, leaves: &[Rect], labelled: bool) -> Vec<Thumb> {
+    let top = top_room(labelled);
     leaves
         .iter()
         .map(|leaf| Thumb {
             pos: (
                 cell.pos.0 + scaled(CELL_PAD + leaf.0 - area.0, &cell),
-                cell.pos.1 + scaled(CELL_LABEL + leaf.1 - area.1, &cell),
+                cell.pos.1 + scaled(top + leaf.1 - area.1, &cell),
             ),
             size: (scaled(leaf.2, &cell).max(1), scaled(leaf.3, &cell).max(1)),
             scale: cell.scale,
@@ -63,7 +76,8 @@ pub fn leaf_thumbs(cell: Thumb, area: Rect, leaves: &[Rect]) -> Vec<Thumb> {
         .collect()
 }
 
-/// The strip across the top of `cell` the name goes in, inside its side padding.
+/// The strip across the top of `cell` the name goes in, inside its side padding. Only a cell
+/// that has a name has this strip.
 pub fn label_rect(cell: Thumb) -> Rect {
     let pad = scaled(CELL_PAD, &cell);
     (
@@ -74,13 +88,11 @@ pub fn label_rect(cell: Thumb) -> Rect {
     )
 }
 
-/// What a container is called in the overview: its name, or when it has none the app id of its
-/// first window. Empty when it has neither.
-pub fn label(name: Option<&str>, first_app_id: &str) -> String {
-    match name.map(str::trim).filter(|name| !name.is_empty()) {
-        Some(name) => name.to_owned(),
-        None => first_app_id.trim().to_owned(),
-    }
+/// What a container is called in the overview: the name the user gave it, trimmed. Empty
+/// when it has none, and then no label is drawn and the cell has no strip for it either (see
+/// [`cell_size`]).
+pub fn label(name: Option<&str>) -> String {
+    name.map(str::trim).unwrap_or_default().to_owned()
 }
 
 /// Whether `p` is on the border of the container whose rectangle is `area`: outside it, and
