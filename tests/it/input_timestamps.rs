@@ -63,5 +63,5 @@ fn a_grab_that_keeps_the_focus_forwards_motion_to_it_anywhere() {
 #[test]
 fn a_grab_that_cleared_the_focus_gets_no_stamp() {
     assert_eq!(motion_stamp_target(true, None, Some(&1)), None);
-    assert_eq!(motion_stamp_target(true, None, None), None);
+    assert_eq!(motion_stamp_target::<i32>(true, None, None), None);
 }
