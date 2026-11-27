@@ -39,8 +39,8 @@ uniform vec3 ycc_off;
 uniform float ycc_on;
 
 // Alpha mode (wp-color-representation): 0 premultiplied electrical, what the blending wants and
-// what a surface is without the protocol; 1 premultiplied optical, the color is linear light
-// times alpha; 2 straight, the color is not multiplied by alpha at all. Both are turned into
+// what a surface is without the protocol, 1 premultiplied optical, the color is linear light
+// times alpha, 2 straight, the color is not multiplied by alpha at all. Both are turned into
 // premultiplied electrical right after sampling (straight color is multiplied, optical color is
 // encoded with the surface's own curve), or, with `cm_on`, taken as light as they are.
 uniform float alpha_mode;
@@ -214,11 +214,12 @@ void main() {
         }
     }
 
-    // Only the window's own rectangle is shaped, what a client draws outside it (a shadow) is
-    // left alone.
+    // The window is clipped to its own rectangle and shaped there. What a client draws outside
+    // its geometry (a shadow, or a stray edge column like Firefox's one pixel on the left) is
+    // not shown: left alone, it would stick out past the rounded corners.
     vec2 p = gl_FragCoord.xy;
     bool inside = p.x >= geo_min.x && p.y >= geo_min.y && p.x < geo_max.x && p.y < geo_max.y;
-    float coverage = inside ? rounded_coverage(p) : 1.0;
+    float coverage = inside ? rounded_coverage(p) : 0.0;
 
     // Premultiplied alpha: every channel scales together.
     color = color * coverage * alpha;
