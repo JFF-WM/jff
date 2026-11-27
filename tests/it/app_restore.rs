@@ -139,7 +139,8 @@ fn the_text_is_the_same_for_the_same_places() {
         place("foot", Some(1), "DP-1"),
     ]));
     assert_eq!(a, b);
-    assert_eq!(a, "firefox\t0\tDP-2\nfoot\t1\tDP-1\n");
+    // The pid and process id columns are always there, empty when unknown.
+    assert_eq!(a, "firefox\t0\tDP-2\t\t\nfoot\t1\tDP-1\t\t\n");
 }
 
 #[test]
@@ -150,8 +151,10 @@ fn a_line_with_only_an_app_id_has_no_place() {
 
 #[test]
 fn bad_lines_are_skipped() {
-    let list =
-        parse_apps("foot\tx\tDP-1\n\n\tnot an id? \nfirefox\t2\tDP-1\ntoo\t1\tmany\tfields\n");
+    // The last line has eleven fields, one more than the format has.
+    let list = parse_apps(
+        "foot\tx\tDP-1\n\n\tnot an id? \nfirefox\t2\tDP-1\ntoo\t1\tmany\t1\t2\ta\tb\t3\tc\ttrue\textra\n",
+    );
     assert_eq!(list, vec![place("firefox", Some(2), "DP-1")]);
     assert!(parse_apps("").is_empty());
 }
