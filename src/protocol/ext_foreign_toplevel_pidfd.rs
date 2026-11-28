@@ -64,7 +64,7 @@ pub fn peer_pidfd(stream: &std::os::unix::net::UnixStream) -> Option<OwnedFd> {
 }
 
 /// A pidfd for `pid` from `pidfd_open(2)`, the fallback for a kernel without `SO_PEERPIDFD`.
-fn open_pidfd(pid: u32) -> Option<OwnedFd> {
+pub(crate) fn open_pidfd(pid: u32) -> Option<OwnedFd> {
     // SAFETY: `pidfd_open` only reads its two integer arguments.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
     if fd < 0 {
@@ -87,7 +87,7 @@ pub fn pidfd_inode(fd: &impl AsRawFd) -> Option<u64> {
 /// Whether pidfds have their own inode each (pidfs, Linux 6.9+). Before that every pidfd shares
 /// one anonymous inode, which would call a recycled pid "the same process". Told by comparing
 /// the pidfds of two different processes.
-fn pidfs_supported() -> bool {
+pub(crate) fn pidfs_supported() -> bool {
     static OK: OnceLock<bool> = OnceLock::new();
     *OK.get_or_init(|| {
         let id = |pid: u32| open_pidfd(pid).and_then(|fd| pidfd_inode(&fd));

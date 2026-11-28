@@ -849,4 +849,26 @@ impl JffState {
         };
         self.osd.show(notice, ERROR_TIMEOUT, Instant::now());
     }
+
+    /// Show an information toast: what a key bind just did. `osd { off }` hides it.
+    pub fn show_info(&mut self, title: &str, message: &str) {
+        let (off, timeout) = {
+            let osd = self.config.osd();
+            (osd.off, Duration::from_millis(u64::from(osd.timeout_ms)))
+        };
+        if off {
+            return;
+        }
+        let Some(output) = self.output_at_pointer().map(|o| o.name()) else {
+            return;
+        };
+        let notice = Notice {
+            key: None,
+            icon: Icon::Info,
+            title: title.to_owned(),
+            subtitle: first_line(message),
+            output,
+        };
+        self.osd.show(notice, timeout, Instant::now());
+    }
 }

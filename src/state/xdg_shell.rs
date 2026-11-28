@@ -134,6 +134,7 @@ impl XdgShellHandler for JffState {
             self.container_after_close(*container, window);
         }
         self.close_watch_gone(surface.wl_surface());
+        self.freeze_window_gone(surface.wl_surface());
         self.dialog_toplevels.remove(surface.wl_surface());
         self.settling_dialogs.remove(surface.wl_surface());
         self.focus_before_open.remove(surface.wl_surface());

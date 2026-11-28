@@ -124,6 +124,8 @@ pub fn run() -> anyhow::Result<()> {
 
     crate::logging::init();
     tracing::info!("{}", version_line());
+    // Apps an earlier jff froze and did not get to thaw (it crashed): before anything starts.
+    crate::feature::freeze::thaw_stale();
 
     let mut event_loop: EventLoop<JffState> = EventLoop::try_new()?;
     let display: Display<JffState> = Display::new()?;
@@ -347,6 +349,9 @@ pub fn run() -> anyhow::Result<()> {
         state.redraw_queued_outputs();
         let _ = state.display_handle.flush_clients();
     })?;
+
+    // Nothing stays frozen behind a session that ended in order.
+    state.thaw_all_frozen();
 
     // Before the satellite and the display go: their windows are still there to be counted.
     state.app_restore_finish();

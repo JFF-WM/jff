@@ -1481,6 +1481,7 @@ pub(super) fn parse_action(node: &KdlNode) -> anyhow::Result<Action> {
         "screenshot-window" => no_args(Action::ScreenshotWindow),
         "toggle-shortcuts-inhibit" => no_args(Action::ToggleShortcutsInhibit),
         "toggle-stats" => no_args(Action::ToggleStats),
+        "toggle-freeze" => no_args(Action::ToggleFreeze),
         "zoom-in" => no_args(Action::ZoomIn),
         "zoom-out" => no_args(Action::ZoomOut),
         "zoom-reset" => no_args(Action::ZoomReset),

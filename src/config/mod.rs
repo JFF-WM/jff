@@ -317,6 +317,10 @@ pub enum Action {
     /// direct scanout and why not. While it is shown the window is composited, so direct
     /// scanout and tearing are off (it says so).
     ToggleStats,
+    /// Freeze the process behind the focused window (the whole app, X11 apps too), or let it
+    /// run again. A cgroup freeze when the app has a cgroup of its own, else `SIGSTOP` for its
+    /// process tree. See `feature/freeze.rs`.
+    ToggleFreeze,
     /// Focus the first tiling container with this name on the current workspace, or show an
     /// error toast when there is none (`focus-container "Terminals"`).
     FocusContainer(String),

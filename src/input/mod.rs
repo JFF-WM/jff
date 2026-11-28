@@ -1030,6 +1030,7 @@ impl JffState {
             }
             Action::ToggleShortcutsInhibit => self.toggle_shortcuts_inhibit(),
             Action::ToggleStats => self.toggle_stats(),
+            Action::ToggleFreeze => self.toggle_freeze_focused(),
             Action::ZoomIn => self.zoom_in(),
             Action::ZoomOut => self.zoom_out(),
             Action::ZoomReset => self.zoom_reset(),

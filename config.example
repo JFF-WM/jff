@@ -773,6 +773,14 @@ window-rule { match app-id="kitty"; opacity 0.9; }
 //                                 While shown the window is composited (the overlay is drawn over it), so direct
 //                                 scanout and tearing are off, and the overlay says so. `jff msg stats` reads the
 //                                 same numbers without drawing anything.
+//   toggle-freeze                 freeze the process behind the focused window, or let it run again. X11 apps work
+//                                 too (the X server says which process owns the window, so it has to have the
+//                                 keyboard). When the app is alone in its own cgroup (a systemd `app-*.scope`),
+//                                 the cgroup freezer is used: the whole app stops, nothing can SIGCONT it, and jff
+//                                 waits for the kernel to confirm. Otherwise the app's process tree gets SIGSTOP,
+//                                 which is weaker (anyone of the same user can resume it), and the toast says so.
+//                                 Needs Linux 6.5+ for Wayland apps. Never freezes jff, init or xwayland-satellite.
+//                                 Thawed when jff quits, and by the next jff if this one crashed. `jff msg toggle-freeze [ID]`
 //   forward-key "APP-ID"          hand the key to that app's window without focusing it, for its own global hotkeys
 //   focus-urgent                  focus the window that asked for attention last (urgent), on its workspace, again for the one before
 //   Needing `tiling-containers`:
@@ -818,6 +826,7 @@ binds {
     // Super+Ctrl+Up { zoom-pan-up; }
     // Super+Ctrl+Down { zoom-pan-down; }
     // Super+Shift+S { toggle-stats; }
+    // Super+Shift+F { toggle-freeze; }
 
     // Tiling containers (need `tiling-containers`)
     // Super+T { focus-container "Terminals"; }

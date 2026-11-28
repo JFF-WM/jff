@@ -11,6 +11,9 @@
 //! focused                    the window that has the keyboard
 //! window-info [ID]             one window (the focused one without an ID)
 //! close [ID]                 ask a window to close
+//! toggle-freeze [ID]         freeze the process behind a window, or thaw it, reply
+//!                            `{"ok":true,"frozen":true,"method":"cgroup"}` (`cgroup` or
+//!                            `sigstop`). An X11 window can only be frozen while it has the keyboard
 //! maximize [ID]              maximize a window
 //! unmaximize [ID]            put it back
 //! toggle-maximize [ID]       maximize, or put back when it already is
@@ -559,6 +562,8 @@ pub enum Request {
     Focused,
     Info(Option<u64>),
     Close(Option<u64>),
+    /// `toggle-freeze [ID]`: freeze the process behind a window, or let it run again.
+    ToggleFreeze(Option<u64>),
     Maximize(Option<u64>, Maximize),
     /// `minimize` (true) and `unminimize` (false): put a window out of sight, or bring one back.
     Minimize(Option<u64>, bool),
@@ -645,7 +650,7 @@ pub enum Request {
 }
 
 pub const COMMANDS: &str =
-    "windows, status, outputs, focused, window-info, close, maximize, unmaximize, toggle-maximize, \
+    "windows, status, outputs, focused, window-info, close, toggle-freeze, maximize, unmaximize, toggle-maximize, \
      output, minimize, unminimize, move-to-scratchpad, scratchpad, fullscreen, unfullscreen, always-on-top, not-always-on-top, toggle-always-on-top, sticky, unsticky, toggle-sticky, focus, focus-urgent, containers, layout-save, layout-apply, layout-list, layout-delete, tag, untag, workspaces, workspace, move-to-workspace, focus-monitor, move-to-monitor, move-workspace-to-monitor, spawn, spawn-sh, \
      screenshot-area, screenshot-fullscreen, screenshot-window, window-thumbnail, move-cursor, click, toggle-overview, clipboard-history, clipboard-select, clipboard-clear, hdr, sdr-white, hdr-set, hdr-reset, hdr-get, stats, toggle-stats, hotkeys, keyboard-layouts, switch-layout, watch";
 
@@ -982,6 +987,7 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
         "window-info" => Ok(Request::Info(id)),
         "untag" => Ok(Request::Tag(id, TagOp::Clear)),
         "close" => Ok(Request::Close(id)),
+        "toggle-freeze" => Ok(Request::ToggleFreeze(id)),
         "maximize" => Ok(Request::Maximize(id, Maximize::On)),
         "unmaximize" => Ok(Request::Maximize(id, Maximize::Off)),
         "toggle-maximize" => Ok(Request::Maximize(id, Maximize::Toggle)),
@@ -1173,6 +1179,15 @@ impl JffState {
                     .ok_or("the window cannot be closed")?;
                 self.request_close(&toplevel);
                 Ok("{\"ok\":true}\n".to_string())
+            }
+            Request::ToggleFreeze(id) => {
+                let window = self.target_window(id)?;
+                let outcome = self.toggle_freeze(&window)?;
+                self.show_info(&outcome.title, &outcome.detail);
+                Ok(format!(
+                    "{{\"ok\":true,\"frozen\":{},\"method\":\"{}\"}}\n",
+                    outcome.frozen, outcome.method
+                ))
             }
             Request::Maximize(id, how) => {
                 let window = self.target_window(id)?;

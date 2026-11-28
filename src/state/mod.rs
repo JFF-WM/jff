@@ -216,6 +216,8 @@ pub struct JffState {
     /// `close-kill`: windows asked to close and the processes that are never killed (see
     /// `feature/close_watch.rs`).
     pub close_watch: crate::feature::close_watch::CloseWatch,
+    /// Processes frozen with `toggle-freeze` (`feature/freeze.rs`).
+    pub freezer: crate::feature::freeze::Freezer,
     /// `remember-container-layouts`: how containers were arranged, by the app ids of their
     /// windows (see `feature/layout_memory.rs`).
     pub layout_memory: crate::primitives::layout_memory::LayoutMemory<crate::desk::WindowId>,
@@ -716,6 +718,7 @@ impl JffState {
             tile_carry: None,
             osd: crate::feature::osd::Osd::new(config.osd().font.clone()),
             close_watch: crate::feature::close_watch::CloseWatch::default(),
+            freezer: crate::feature::freeze::Freezer::default(),
             layout_memory: crate::primitives::layout_memory::LayoutMemory::default(),
             stats: crate::feature::stats::StatsOverlay::new(),
             zoom: crate::feature::zoom::ZoomState::new(),
